@@ -30,7 +30,7 @@ docker compose ps
 ## 主要能力
 
 - 文档：上传、版本、解析百分比、元素、Chunk、治理画像、增量加工与历史溯源。
-- 人工治理：在 Semantica 自动画像、解析元素、Chunk、实体与事实之上叠加可回滚约束，支持待办、修正、屏蔽、调权、实体合并/拆分和有效发布；原始自动结果不被覆盖。
+- 人工治理：在 Semantica 自动画像、解析元素、Chunk、实体与事实之上叠加可回滚约束；治理工作台按“待处理—人工调整—发布记录”组织业务闭环，支持主动查找、批次归并、真实进度、失败重试和影响预览；原始自动结果不被覆盖。
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
 - 模型：LLM、Embedding、Reranker、Vision、ASR 统一配置、默认项、启停和真实连接测试。
 - 图谱：白底 3D 力导图，节点与边真实 CRUD，版本校验并发布到 FalkorDB。
@@ -86,6 +86,7 @@ python3 tests/performance/live_load.py
 - [DeepSeek Harness 适配与升级](docs/DEEPSEEK_HARNESS.md)
 - [知识分析与 Semantica Analyze 融合](docs/KNOWLEDGE_ANALYSIS.md)
 - [人工治理 P0–P3 设计与实现](docs/HUMAN_CURATION_P0_P3.md)
+- [治理工作台业务与操作说明](docs/GOVERNANCE_WORKBENCH_GUIDE.md)
 - [文件格式能力矩阵](docs/FORMAT_MATRIX.md)
 - [数据源支持矩阵](docs/SOURCE_MATRIX.md)
 - [模型配置](docs/MODELS.md)

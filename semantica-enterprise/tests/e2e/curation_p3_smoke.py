@@ -7,6 +7,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -63,31 +64,43 @@ def main() -> None:
     token = request("POST", "/auth/login", body={"username": USERNAME, "password": PASSWORD})["access_token"]
     document, version, profile = find_processed_version(token)
     space_id = document["space_id"]
-    profile_decision_id = chunk_decision_id = None
+    profile_batch_id = chunk_batch_id = None
     results: dict[str, object] = {}
     try:
         changed_classification = f"{profile['classification']} · P3验证"[:300]
-        created = request("POST", "/curation/decisions", token, {
+        created = request("POST", f"/curation/profiles/{version['id']}", token, {
             "space_id": space_id,
-            "target_type": "document_profile",
-            "target_id": version["id"],
-            "version_id": version["id"],
-            "field_path": "classification",
-            "operation": "override",
-            "value": changed_classification,
+            "changes": {
+                "classification": changed_classification,
+                "tags": [*(profile.get("tags") or []), "治理工作台验证"],
+            },
             "scope": "version_only",
-            "reason_code": "e2e_smoke",
-            "auto_publish": True,
+            "reason_note": "治理工作台端到端验证",
         })
-        profile_decision_id = created["decision"]["id"]
+        profile_batch_id = created["batch"]["id"]
+        assert created["decision_count"] == 2
         projected = request("GET", f"/versions/{version['id']}/profile", token)
         assert projected["classification"] == changed_classification
-        assert projected["automatic"]["classification"] == profile["classification"]
         assert projected["field_origins"]["classification"] == "manual"
-        request("POST", f"/curation/decisions/{profile_decision_id}/rollback", token)
-        profile_decision_id = None
+        batch = request("GET", f"/curation/batches/{profile_batch_id}", token)
+        assert batch["decision_count"] == 2
+        assert batch["field_summary"] == "主题分类、标签"
+        assert batch["display_status"] == "即时生效"
+        batches = request("GET", f"/curation/batches?space_id={space_id}&limit=10", token)
+        assert any(item["id"] == profile_batch_id for item in batches["items"])
+        workbench = request("GET", f"/curation/workbench?space_id={space_id}&status=all", token)
+        assert "summary" in workbench and "has_knowledge" in workbench
+        target_query = urllib.parse.quote(document["title"])
+        targets = request("GET", f"/curation/targets/search?space_id={space_id}&target_type=document_profile&query={target_query}", token)
+        assert any(item["version_id"] == version["id"] for item in targets["items"])
+        request("POST", f"/curation/batches/{profile_batch_id}/rollback", token)
+        profile_batch_id = None
+        restored_profile = request("GET", f"/versions/{version['id']}/profile", token)
+        assert restored_profile["classification"] == profile["classification"]
 
         chunk = request("GET", f"/versions/{version['id']}/chunks?limit=1", token)["items"][0]
+        original_boost = chunk["boost"]
+        changed_boost = 1.2 if original_boost != 1.2 else 1.3
         created = request("POST", "/curation/decisions", token, {
             "space_id": space_id,
             "target_type": "chunk",
@@ -95,20 +108,24 @@ def main() -> None:
             "version_id": version["id"],
             "field_path": "boost",
             "operation": "override",
-            "value": 1.2,
+            "value": changed_boost,
             "scope": "version_only",
             "reason_code": "e2e_smoke",
+            "reason_note": "检索召回优先级验证",
             "auto_publish": True,
         })
-        chunk_decision_id = created["decision"]["id"]
+        chunk_batch_id = created["batch"]["id"]
         forward = wait_job(token, created["job"]["id"])
         projected_chunk = request("GET", f"/versions/{version['id']}/chunks?limit=1", token)["items"][0]
-        assert projected_chunk["boost"] == 1.2
-        rolled_back = request("POST", f"/curation/decisions/{chunk_decision_id}/rollback", token)
-        chunk_decision_id = None
+        assert projected_chunk["boost"] == changed_boost
+        assert projected_chunk["automatic_boost"] == 1.0
+        chunk_batch = request("GET", f"/curation/batches/{chunk_batch_id}", token)
+        assert "向量检索" in chunk_batch["impacts"]
+        rolled_back = request("POST", f"/curation/batches/{chunk_batch_id}/rollback", token)
+        chunk_batch_id = None
         reverse = wait_job(token, rolled_back["job"]["id"])
         restored_chunk = request("GET", f"/versions/{version['id']}/chunks?limit=1", token)["items"][0]
-        assert restored_chunk["boost"] == 1.0
+        assert restored_chunk["boost"] == original_boost
         results = {
             "document_id": document["id"],
             "version_id": version["id"],
@@ -117,12 +134,12 @@ def main() -> None:
             "chunk_rollback_release": reverse["result"],
         }
     finally:
-        if chunk_decision_id:
-            rolled_back = request("POST", f"/curation/decisions/{chunk_decision_id}/rollback", token)
+        if chunk_batch_id:
+            rolled_back = request("POST", f"/curation/batches/{chunk_batch_id}/rollback", token)
             if rolled_back.get("job"):
                 wait_job(token, rolled_back["job"]["id"])
-        if profile_decision_id:
-            request("POST", f"/curation/decisions/{profile_decision_id}/rollback", token)
+        if profile_batch_id:
+            request("POST", f"/curation/batches/{profile_batch_id}/rollback", token)
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 

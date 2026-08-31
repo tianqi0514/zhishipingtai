@@ -459,6 +459,35 @@ class CurationBatchCreate(BaseModel):
 
 class CurationCaseUpdate(BaseModel):
     status: Literal["open", "handled", "ignored"]
+    resolution: Literal["accepted_automatic", "corrected", "ignored", "reopened"] | None = None
+    reason_note: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def ignored_requires_reason(self):
+        if self.status == "ignored" and not self.reason_note.strip():
+            raise ValueError("忽略问题时必须填写原因")
+        return self
+
+
+class CurationProfileUpdate(BaseModel):
+    space_id: str
+    changes: dict[str, Any]
+    scope: Literal["version_only", "document_future"] = "version_only"
+    reason_note: str = Field(min_length=1, max_length=2000)
+    case_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_changes(self):
+        editable = {
+            "summary", "classification", "document_type", "tags", "keywords",
+            "main_objects", "time_range",
+        }
+        if not self.changes:
+            raise ValueError("至少修改一个画像字段")
+        unknown = sorted(set(self.changes) - editable)
+        if unknown:
+            raise ValueError(f"画像字段不可人工修改：{', '.join(unknown)}")
+        return self
 
 
 class EntityPairCuration(BaseModel):
@@ -529,6 +558,7 @@ class KnowledgeEntityUpdate(BaseModel):
     properties: dict[str, Any] | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     status: str | None = Field(default=None, min_length=1, max_length=32)
+    reason_note: str | None = Field(default=None, max_length=2000)
 
 
 class KnowledgeFactCreate(BaseModel):
@@ -560,6 +590,7 @@ class KnowledgeFactUpdate(BaseModel):
     status: str | None = Field(default=None, min_length=1, max_length=32)
     valid_from: datetime | None = None
     valid_to: datetime | None = None
+    reason_note: str | None = Field(default=None, max_length=2000)
 
 
 class AnalysisCondition(BaseModel):

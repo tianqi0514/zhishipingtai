@@ -51,6 +51,8 @@ flowchart LR
 
 Semantica Analyze/Datalog 和只读 SPARQL 同样读取有效实体、有效事实与人工名称；人工屏蔽、关系修正或实体合并不会只影响图谱页面而遗漏规则推理。
 
+治理工作台只通过 FastAPI 读取业务化投影：`/curation/workbench` 提供待办指标与筛选结果，`/curation/cases/{id}` 提供系统值/当前值对照和业务深链接，`/curation/batches` 将同一次多字段操作归并为业务记录。画像修改使用一个数据库事务创建 Batch 和全部 Decision；内容、片段、实体和事实修改仍复用同一 `create_decision`、Overlay 和不可变发布链。前端没有直接拼装或写入 Semantica 自动表，因此页面重构不会形成第二套治理事实源。
+
 ## 会话与事件
 
 Harness 的 append-only Session JSONL 是 Agent 上下文权威源；平台保存业务会话映射、消息只读投影、检索轨迹与引用投影。SSE 事件包括 `turn_started`、`step_started`、`retrieval_started`、`tool_started`、`tool_finished`、`retrieval_ranked`、`answer_delta`、`citation`、`warning`、`turn_completed/failed/cancelled`。

@@ -15,18 +15,32 @@ def test_curation_is_an_asset_submodule_and_not_a_top_level_module() -> None:
 def test_p0_to_p3_curation_controls_call_real_apis() -> None:
     javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
     for endpoint in (
-        "'/curation/batches'",
+        "`/curation/workbench?${params}`",
+        "`/curation/batches?space_id=${encodeURIComponent(spaceId)}&limit=300`",
+        "`/curation/profiles/${versionId}`",
         "'/curation/decisions'",
         "'/curation/entities/pair'",
-        "`/curation/decisions/${b.dataset.id}/rollback`",
+        "`/curation/batches/${batch.id}/rollback`",
     ):
         assert endpoint in javascript
-    for label in ("人工修正", "修正内容元素", "调整检索权重", "实体合并与拆分"):
+    for label in ("修正文档画像", "修正原始内容", "调整召回优先级", "实体合并与拆分"):
         assert label in javascript
 
 
 def test_curation_workbench_has_effective_source_and_rollback_language() -> None:
     javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
-    assert "自动结果不变，生效值由约束层合成" in javascript
-    assert "查看自动结果与生效来源" in javascript
-    assert "回滚该项人工治理决定" in javascript
+    for label in ("待处理", "人工调整", "发布记录", "系统生成", "当前生效", "查找知识并治理"):
+        assert label in javascript
+    assert "回滚本批次" in javascript
+    assert "不会删除历史自动结果" in javascript
+
+
+def test_profile_curation_uses_business_inputs_instead_of_raw_json() -> None:
+    javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
+    profile_section = javascript.split("async function saveProfileCuration", 1)[1].split("async function editContentElement", 1)[0]
+    assert "tokenField('tags'" in profile_section
+    assert "tokenField('keywords'" in profile_section
+    assert "tokenField('main_objects'" in profile_section
+    assert "field('time_start'" in profile_section
+    assert "field('time_end'" in profile_section
+    assert "JSON.stringify({automatic" not in profile_section

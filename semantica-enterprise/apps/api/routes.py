@@ -7,7 +7,7 @@ import re
 import tempfile
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,7 @@ from apps.api.schemas import (
     CurationBatchCreate,
     CurationCaseUpdate,
     CurationDecisionCreate,
+    CurationProfileUpdate,
     DocumentUpdate,
     ExtractionPolicyCreate,
     ExtractionPolicyUpdate,
@@ -136,6 +137,12 @@ from packages.platform.curation import (
     effective_profile,
     rollback_decision,
     stable_fingerprint,
+)
+from packages.platform.curation_workbench import (
+    business_label,
+    compact_value,
+    curation_impacts,
+    summarize_fields,
 )
 from packages.platform.index_release import publish_index_snapshot as publish_effective_index_snapshot
 from packages.platform.security import (
@@ -933,6 +940,7 @@ def list_elements(version_id: str, offset: int = Query(0, ge=0), limit: int = Qu
     version = _must(db, DocumentVersion, version_id, "版本"); document = _must(db, Document, version.document_id, "文档")
     require_space_permission(db, user, document.space_id, "read")
     raw_rows = list(db.scalars(select(ContentElement).where(ContentElement.version_id == version_id, _active(ContentElement)).order_by(ContentElement.ordinal)))
+    automatic_by_element = {row.element_id: row for row in raw_rows}
     rows = effective_elements(db, raw_rows, version.id)
     return {
         "total": len(rows),
@@ -947,6 +955,8 @@ def list_elements(version_id: str, offset: int = Query(0, ge=0), limit: int = Qu
                 "element_type": row.element_type,
                 "ordinal": row.ordinal,
                 "text": row.text,
+                "automatic_text": automatic_by_element[row.element_id].text,
+                "field_origin": "manual" if (row.element_metadata or {}).get("curation") else "automatic",
                 "structural_path": row.structural_path,
                 "page_number": row.page_number,
                 "bbox": row.bbox,
@@ -1214,6 +1224,12 @@ def retry_job(row_id: str, user: User = Depends(get_current_user), db: Session =
     if old.tenant_id != user.tenant_id: raise HTTPException(404, "任务不存在")
     if old.status != "failed": raise HTTPException(409, "只有失败任务可重试")
     job_input = dict(old.input or {})
+    if old.job_type in {"parse_document", "process_knowledge"} and job_input.get("version_id"):
+        version = _must_tenant(db, DocumentVersion, job_input["version_id"], user.tenant_id, "文档版本")
+        document = _must_tenant(db, Document, version.document_id, user.tenant_id, "文档")
+        require_space_permission(db, user, document.space_id, "write")
+    elif old.job_type in {"sync_source", "curation_publish"} and job_input.get("space_id"):
+        require_space_permission(db, user, job_input["space_id"], "write")
     if old.job_type == "knowledge_inference":
         previous_run = db.get(InferenceRun, job_input.get("inference_run_id"))
         if previous_run is None or previous_run.tenant_id != user.tenant_id:
@@ -1238,6 +1254,7 @@ def retry_job(row_id: str, user: User = Depends(get_current_user), db: Session =
     if job.job_type == "parse_document": parse_version_task.delay(job.id)
     elif job.job_type == "sync_source": sync_source_task.delay(job.id)
     elif job.job_type == "process_knowledge": process_version_task.delay(job.id)
+    elif job.job_type == "curation_publish": publish_curation_task.delay(job.id)
     elif job.job_type == "knowledge_inference": run_inference_task.delay(job.id)
     else: raise HTTPException(400, "不支持重试该任务")
     return _serialize_job(db, job)
@@ -2039,6 +2056,168 @@ def _dispatch_curation_job(db: Session, job: Job, batch: CurationBatch) -> None:
         raise HTTPException(503, "治理任务提交失败") from exc
 
 
+def _curation_jobs(db: Session, tenant_id: str, batch_id: str) -> list[Job]:
+    rows = db.scalars(
+        select(Job).where(
+            Job.tenant_id == tenant_id,
+            Job.job_type.in_(["process_knowledge", "curation_publish"]),
+            _active(Job),
+        ).order_by(Job.created_at.desc())
+    )
+    return [row for row in rows if (row.input or {}).get("curation_batch_id") == batch_id]
+
+
+def _curation_target_name(db: Session, decision: CurationDecision) -> str:
+    if decision.document_id:
+        document = db.get(Document, decision.document_id)
+        if document and document.deleted_at is None:
+            return document.title
+    if decision.target_type == "entity":
+        row = db.get(CanonicalEntity, decision.target_id)
+        if row:
+            return str(effective_entity(db, row).get("canonical_name") or "知识实体")
+    if decision.target_type == "fact":
+        row = db.get(Fact, decision.target_id)
+        if row:
+            values = effective_fact(db, row)
+            subject = db.get(CanonicalEntity, values.get("subject_entity_id"))
+            obj = db.get(CanonicalEntity, values.get("object_entity_id")) if values.get("object_entity_id") else None
+            subject_name = effective_entity(db, subject).get("canonical_name") if subject else "未知主体"
+            object_name = effective_entity(db, obj).get("canonical_name") if obj else values.get("object_value") or "未知客体"
+            return f"{subject_name} —{values.get('predicate') or '关系'}→ {object_name}"
+    if decision.target_type == "entity_pair" and isinstance(decision.after_value, dict):
+        left = db.get(CanonicalEntity, decision.after_value.get("left_id"))
+        right = db.get(CanonicalEntity, decision.after_value.get("right_id"))
+        left_name = effective_entity(db, left).get("canonical_name") if left else decision.after_value.get("left_name")
+        right_name = effective_entity(db, right).get("canonical_name") if right else decision.after_value.get("right_name")
+        return f"{left_name or '实体 A'} 与 {right_name or '实体 B'}"
+    return business_label("target", decision.target_type)
+
+
+def _curation_decision_payload(db: Session, decision: CurationDecision) -> dict[str, Any]:
+    actor = db.get(User, decision.created_by)
+    return {
+        **serialize_row(decision),
+        "target_label": business_label("target", decision.target_type),
+        "target_display": _curation_target_name(db, decision),
+        "field_label": business_label("field", decision.field_path),
+        "operation_label": business_label("operation", decision.operation),
+        "scope_label": business_label("scope", decision.scope),
+        "before_display": compact_value(decision.before_value),
+        "after_display": compact_value(decision.after_value),
+        "actor_name": actor.display_name if actor else "系统用户",
+        "impacts": curation_impacts(decision.target_type, decision.field_path),
+    }
+
+
+def _curation_batch_payload(db: Session, batch: CurationBatch, *, include_decisions: bool = True) -> dict[str, Any]:
+    decisions = list(db.scalars(
+        select(CurationDecision).where(
+            CurationDecision.batch_id == batch.id,
+            _active(CurationDecision),
+        ).order_by(CurationDecision.created_at)
+    ))
+    jobs = _curation_jobs(db, batch.tenant_id, batch.id)
+    latest_job = jobs[0] if jobs else None
+    release = db.scalar(
+        select(KnowledgeRelease).where(
+            KnowledgeRelease.curation_batch_id == batch.id,
+            _active(KnowledgeRelease),
+        ).order_by(KnowledgeRelease.release_number.desc()).limit(1)
+    )
+    graph_release = db.get(GraphRelease, release.graph_release_id) if release else None
+    index_release = db.get(IndexRelease, release.index_release_id) if release else None
+    actor = db.get(User, batch.created_by)
+    target_names = list(dict.fromkeys(_curation_target_name(db, row) for row in decisions))
+    fields = [row.field_path for row in decisions]
+    impacts = list(dict.fromkeys(
+        impact for row in decisions for impact in curation_impacts(row.target_type, row.field_path)
+    ))
+    reasons = [row.reason_note.strip() for row in decisions if row.reason_note and row.reason_note.strip()]
+    instant = batch.status == "published" and not jobs
+    display_status = "即时生效" if instant else business_label("batch_status", batch.status)
+    progress_value = latest_job.progress if latest_job else (100 if batch.status in {"published", "rolled_back"} else 0)
+    payload = {
+        **serialize_row(batch),
+        "display_status": display_status,
+        "actor_name": actor.display_name if actor else "系统用户",
+        "decision_count": len(decisions),
+        "field_summary": summarize_fields(fields),
+        "target_display": "、".join(target_names[:2]) + (f"等 {len(target_names)} 个对象" if len(target_names) > 2 else ""),
+        "reason_note": reasons[0] if reasons else "未填写调整说明",
+        "scope_label": business_label("scope", decisions[0].scope) if decisions else "—",
+        "impacts": impacts,
+        "progress": progress_value,
+        "can_rollback": any(row.status == "active" for row in decisions),
+        "job": _serialize_job(db, latest_job) if latest_job else None,
+        "knowledge_release": release.release_number if release else None,
+        "graph_release": graph_release.release_number if graph_release else (latest_job.result or {}).get("graph_release") if latest_job else None,
+        "index_release": index_release.release_number if index_release else (latest_job.result or {}).get("index_release") if latest_job else None,
+    }
+    if include_decisions:
+        payload["decisions"] = [_curation_decision_payload(db, row) for row in decisions]
+    return payload
+
+
+def _curation_case_payload(db: Session, row: CurationCase, *, detail: bool = False) -> dict[str, Any]:
+    document = db.get(Document, row.document_id) if row.document_id else None
+    version = db.get(DocumentVersion, row.version_id) if row.version_id else None
+    evidence = dict(row.evidence or {})
+    payload: dict[str, Any] = {
+        **serialize_row(row),
+        "document_title": document.title if document else None,
+        "case_type_label": business_label("case_type", row.case_type),
+        "severity_label": business_label("severity", row.severity),
+        "target_label": business_label("target", row.target_type),
+        "target_display": document.title if document else business_label("target", row.target_type),
+        "impacts": curation_impacts(row.target_type),
+        "resolution": evidence.get("resolution"),
+        "resolution_note": evidence.get("resolution_note") or "",
+        "deep_link": {
+            "view": "documents" if document else "knowledge",
+            "document_id": document.id if document else None,
+            "version_id": version.id if version else None,
+            "panel": "profile" if row.target_type == "document_profile" else None,
+            "target_id": evidence.get("entity_id") or row.target_id,
+        },
+    }
+    if not detail:
+        return payload
+    payload["evidence"] = evidence
+    payload["automatic"] = {}
+    payload["effective"] = {}
+    payload["comparison"] = []
+    payload["recommended_actions"] = []
+    if row.target_type == "document_profile" and version:
+        try:
+            profile = effective_profile(db, version)
+            payload["automatic"] = profile.get("automatic") or {}
+            payload["effective"] = profile.get("effective") or {}
+            payload["recommended_actions"] = profile.get("recommended_actions") or []
+            payload["quality_score"] = profile.get("quality_score")
+            payload["comparison"] = [
+                {
+                    "field": field,
+                    "field_label": business_label("field", field),
+                    "automatic": profile.get("automatic", {}).get(field),
+                    "effective": profile.get("effective", {}).get(field),
+                    "automatic_display": compact_value(profile.get("automatic", {}).get(field)),
+                    "effective_display": compact_value(profile.get("effective", {}).get(field)),
+                    "origin": profile.get("field_origins", {}).get(field, "automatic"),
+                    "origin_label": "人工调整" if profile.get("field_origins", {}).get(field) != "automatic" else "系统生成",
+                }
+                for field in ("summary", "classification", "document_type", "tags", "keywords", "main_objects", "time_range")
+            ]
+        except ValueError:
+            pass
+    elif row.case_type == "fact_conflict":
+        values = evidence.get("values") or []
+        payload["automatic"] = {"candidate_values": values, "strategy": evidence.get("strategy")}
+        payload["effective"] = {"status": evidence.get("automatic_status")}
+        payload["recommended_actions"] = ["查看冲突证据后，在知识图谱中保留正确事实或修正关系"]
+    return payload
+
+
 @router.post("/curation/batches")
 def create_curation_batch(payload: CurationBatchCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_space_permission(db, user, payload.space_id, "write")
@@ -2047,6 +2226,127 @@ def create_curation_batch(payload: CurationBatchCreate, user: User = Depends(get
     audit(db, user.tenant_id, user.id, "curation.batch.create", "curation_batch", row.id, {"space_id": row.space_id})
     db.commit()
     return serialize_row(row)
+
+
+@router.get("/curation/batches")
+def list_curation_batches(
+    space_id: str,
+    status: str | None = None,
+    query: str = Query("", max_length=200),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=300),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "read")
+    statement = select(CurationBatch).where(
+        CurationBatch.tenant_id == user.tenant_id,
+        CurationBatch.space_id == space_id,
+        _active(CurationBatch),
+    )
+    if status:
+        statement = statement.where(CurationBatch.status == status)
+    rows = list(db.scalars(statement.order_by(CurationBatch.created_at.desc())))
+    items = [_curation_batch_payload(db, row) for row in rows]
+    term = query.strip().casefold()
+    if term:
+        items = [
+            item for item in items
+            if term in " ".join([
+                item.get("name") or "", item.get("target_display") or "",
+                item.get("actor_name") or "", item.get("field_summary") or "",
+                item.get("reason_note") or "",
+            ]).casefold()
+        ]
+    return {"total": len(items), "items": items[offset:offset + limit]}
+
+
+@router.get("/curation/batches/{batch_id}")
+def get_curation_batch(batch_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = _must_tenant(db, CurationBatch, batch_id, user.tenant_id, "治理批次")
+    require_space_permission(db, user, row.space_id, "read")
+    return _curation_batch_payload(db, row)
+
+
+@router.post("/curation/profiles/{version_id}")
+def update_curation_profile(
+    version_id: str,
+    payload: CurationProfileUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    version = _must_tenant(db, DocumentVersion, version_id, user.tenant_id, "文档版本")
+    document = _must_tenant(db, Document, version.document_id, user.tenant_id, "文档")
+    if document.space_id != payload.space_id:
+        raise HTTPException(400, "文档版本不属于所选知识空间")
+    require_space_permission(db, user, document.space_id, "write")
+    try:
+        projected = effective_profile(db, version)
+    except ValueError as exc:
+        raise HTTPException(409, "该版本尚未生成可治理画像") from exc
+    changes = {
+        field: value for field, value in payload.changes.items()
+        if value != (projected.get("effective") or {}).get(field)
+    }
+    if not changes:
+        raise HTTPException(409, "内容没有变化")
+    case = None
+    if payload.case_id:
+        case = _must_tenant(db, CurationCase, payload.case_id, user.tenant_id, "治理待办")
+        if case.space_id != document.space_id or case.version_id != version.id:
+            raise HTTPException(400, "治理待办与当前文档版本不匹配")
+    batch = CurationBatch(
+        tenant_id=user.tenant_id,
+        space_id=document.space_id,
+        name=f"调整《{document.title}》画像"[:300],
+        created_by=user.id,
+    )
+    db.add(batch)
+    db.flush()
+    decisions: list[CurationDecision] = []
+    try:
+        for field, value in changes.items():
+            decision, _, _ = create_decision(
+                db,
+                user=user,
+                space_id=document.space_id,
+                target_type="document_profile",
+                target_id=version.id,
+                version_id=version.id,
+                field_path=field,
+                operation="override",
+                value=value,
+                scope=payload.scope,
+                reason_code="profile_correction",
+                reason_note=payload.reason_note.strip(),
+                batch_id=batch.id,
+            )
+            decisions.append(decision)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    batch.status = "published"
+    batch.published_at = datetime.now(timezone.utc)
+    if case:
+        case.status = "handled"
+        case.handled_by = user.id
+        case.handled_at = datetime.now(timezone.utc)
+        case.evidence = {
+            **(case.evidence or {}),
+            "resolution": "corrected",
+            "resolution_note": payload.reason_note.strip(),
+            "curation_batch_id": batch.id,
+        }
+    audit(
+        db, user.tenant_id, user.id, "curation.profile.update", "curation_batch", batch.id,
+        {"version_id": version.id, "fields": sorted(changes), "case_id": payload.case_id},
+    )
+    db.commit()
+    return {
+        "batch": _curation_batch_payload(db, batch),
+        "profile": effective_profile(db, version),
+        "decision_count": len(decisions),
+    }
 
 
 @router.get("/curation/summary")
@@ -2061,6 +2361,94 @@ def curation_summary(space_id: str, user: User = Depends(get_current_user), db: 
         "active_decisions": sum(row.status == "active" for row in decision_rows),
         "published_batches": db.scalar(select(func.count()).select_from(CurationBatch).where(CurationBatch.space_id == space_id, CurationBatch.status == "published", _active(CurationBatch))) or 0,
         "knowledge_release": serialize_row(latest_release) if latest_release else None,
+    }
+
+
+@router.get("/curation/workbench")
+def curation_workbench(
+    space_id: str,
+    status: str | None = None,
+    severity: str | None = None,
+    case_type: str | None = None,
+    document_id: str | None = None,
+    query: str = Query("", max_length=200),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=300),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "read")
+    all_cases = list(db.scalars(
+        select(CurationCase).where(
+            CurationCase.tenant_id == user.tenant_id,
+            CurationCase.space_id == space_id,
+            _active(CurationCase),
+        ).order_by(CurationCase.created_at.desc())
+    ))
+    rows = all_cases
+    if status and status != "all":
+        rows = [row for row in rows if row.status == status]
+    if severity:
+        rows = [row for row in rows if row.severity == severity]
+    if case_type:
+        rows = [row for row in rows if row.case_type == case_type]
+    if document_id:
+        rows = [row for row in rows if row.document_id == document_id]
+    term = query.strip().casefold()
+    items = [_curation_case_payload(db, row) for row in rows]
+    if term:
+        items = [
+            item for item in items
+            if term in " ".join([
+                item.get("title") or "", item.get("reason") or "",
+                item.get("document_title") or "", item.get("case_type_label") or "",
+            ]).casefold()
+        ]
+    severity_rank = {"high": 0, "medium": 1, "low": 2}
+    # The query already returns newest first.  Python's stable sort keeps that
+    # order within each severity while putting urgent work first.
+    items.sort(key=lambda item: severity_rank.get(item.get("severity"), 9))
+    recent_since = datetime.now(timezone.utc) - timedelta(days=7)
+    recent_batches = list(db.scalars(select(CurationBatch).where(
+        CurationBatch.tenant_id == user.tenant_id,
+        CurationBatch.space_id == space_id,
+        CurationBatch.created_at >= recent_since,
+        _active(CurationBatch),
+    )))
+    batches = list(db.scalars(select(CurationBatch).where(
+        CurationBatch.tenant_id == user.tenant_id,
+        CurationBatch.space_id == space_id,
+        _active(CurationBatch),
+    )))
+    latest_release = db.scalar(select(KnowledgeRelease).where(
+        KnowledgeRelease.tenant_id == user.tenant_id,
+        KnowledgeRelease.space_id == space_id,
+        _active(KnowledgeRelease),
+    ).order_by(KnowledgeRelease.release_number.desc()).limit(1))
+    latest_profile = db.scalar(select(DocumentProfile).where(
+        DocumentProfile.tenant_id == user.tenant_id,
+        DocumentProfile.space_id == space_id,
+        _active(DocumentProfile),
+    ).order_by(DocumentProfile.generated_at.desc()).limit(1))
+    document_ids = list(dict.fromkeys(row.document_id for row in all_cases if row.document_id))
+    documents = [db.get(Document, row_id) for row_id in document_ids]
+    return {
+        "summary": {
+            "open_cases": sum(row.status == "open" for row in all_cases),
+            "high_cases": sum(row.status == "open" and row.severity == "high" for row in all_cases),
+            "failed_batches": sum(row.status == "publish_failed" for row in batches),
+            "recent_adjustments": len(recent_batches),
+        },
+        "total": len(items),
+        "items": items[offset:offset + limit],
+        "case_total": len(all_cases),
+        "has_knowledge": bool(latest_release or latest_profile),
+        "current_release": latest_release.release_number if latest_release else None,
+        "last_governance_at": latest_profile.generated_at.isoformat() if latest_profile else None,
+        "documents": [
+            {"id": document.id, "title": document.title}
+            for document in documents if document and document.deleted_at is None
+        ],
     }
 
 
@@ -2090,6 +2478,13 @@ def list_curation_cases(
     return {"total": len(rows), "items": items}
 
 
+@router.get("/curation/cases/{case_id}")
+def get_curation_case(case_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = _must_tenant(db, CurationCase, case_id, user.tenant_id, "治理待办")
+    require_space_permission(db, user, row.space_id, "read")
+    return _curation_case_payload(db, row, detail=True)
+
+
 @router.put("/curation/cases/{case_id}")
 def update_curation_case(case_id: str, payload: CurationCaseUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     row = _must_tenant(db, CurationCase, case_id, user.tenant_id, "治理待办")
@@ -2097,9 +2492,158 @@ def update_curation_case(case_id: str, payload: CurationCaseUpdate, user: User =
     row.status = payload.status
     row.handled_by = user.id if payload.status != "open" else None
     row.handled_at = datetime.now(timezone.utc) if payload.status != "open" else None
-    audit(db, user.tenant_id, user.id, "curation.case.update", "curation_case", row.id, {"status": row.status})
+    resolution = payload.resolution or ("reopened" if payload.status == "open" else "ignored" if payload.status == "ignored" else "accepted_automatic")
+    row.evidence = {
+        **(row.evidence or {}),
+        "resolution": resolution,
+        "resolution_note": payload.reason_note.strip(),
+        "resolved_at": datetime.now(timezone.utc).isoformat() if payload.status != "open" else None,
+    }
+    audit(db, user.tenant_id, user.id, "curation.case.update", "curation_case", row.id, {"status": row.status, "resolution": resolution})
     db.commit()
-    return serialize_row(row)
+    return _curation_case_payload(db, row, detail=True)
+
+
+@router.get("/curation/targets/search")
+def search_curation_targets(
+    space_id: str,
+    query: str = Query("", max_length=200),
+    target_type: str | None = None,
+    limit: int = Query(30, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "read")
+    term = query.strip().casefold()
+    items: list[dict[str, Any]] = []
+
+    def add(item: dict[str, Any]) -> None:
+        if len(items) < limit:
+            items.append(item)
+
+    if target_type in {None, "document_profile", "document"}:
+        documents = list(db.scalars(select(Document).where(
+            Document.tenant_id == user.tenant_id,
+            Document.space_id == space_id,
+            _active(Document),
+        ).order_by(Document.updated_at.desc()).limit(100)))
+        for document in documents:
+            if term and term not in document.title.casefold() and term not in " ".join(document.tags or []).casefold():
+                continue
+            version = db.get(DocumentVersion, document.current_version_id) if document.current_version_id else None
+            if not version or version.deleted_at is not None:
+                continue
+            add({
+                "target_type": "document_profile",
+                "target_label": "文档画像",
+                "target_id": version.id,
+                "document_id": document.id,
+                "version_id": version.id,
+                "title": document.title,
+                "subtitle": f"V{version.version_number} · {version.filename}",
+                "panel": "profile",
+            })
+    if len(items) < limit and target_type in {None, "entity"}:
+        entities = db.scalars(select(CanonicalEntity).where(
+            CanonicalEntity.tenant_id == user.tenant_id,
+            CanonicalEntity.space_id == space_id,
+            _active(CanonicalEntity),
+        ).order_by(CanonicalEntity.updated_at.desc()).limit(200))
+        for entity in entities:
+            effective = effective_entity(db, entity)
+            if effective.get("status") not in {"published", "active"}:
+                continue
+            text = " ".join([effective.get("canonical_name") or "", effective.get("entity_type") or "", *(effective.get("aliases") or [])])
+            if term and term not in text.casefold():
+                continue
+            add({
+                "target_type": "entity", "target_label": "知识实体", "target_id": entity.id,
+                "title": effective.get("canonical_name"), "subtitle": effective.get("entity_type") or "未分类实体",
+                "panel": "graph",
+            })
+            if len(items) >= limit:
+                break
+    if len(items) < limit and target_type in {None, "fact"}:
+        facts = db.scalars(select(Fact).where(
+            Fact.tenant_id == user.tenant_id,
+            Fact.space_id == space_id,
+            _active(Fact),
+        ).order_by(Fact.updated_at.desc()).limit(200))
+        for fact in facts:
+            effective = effective_fact(db, fact)
+            if effective.get("status") != "published":
+                continue
+            subject = db.get(CanonicalEntity, effective.get("subject_entity_id"))
+            obj = db.get(CanonicalEntity, effective.get("object_entity_id")) if effective.get("object_entity_id") else None
+            subject_name = effective_entity(db, subject).get("canonical_name") if subject else "未知主体"
+            object_name = effective_entity(db, obj).get("canonical_name") if obj else effective.get("object_value") or "未知客体"
+            title = f"{subject_name} —{effective.get('predicate') or '关系'}→ {object_name}"
+            if term and term not in title.casefold():
+                continue
+            add({
+                "target_type": "fact", "target_label": "知识关系", "target_id": fact.id,
+                "title": title, "subtitle": "知识图谱关系", "panel": "graph",
+            })
+            if len(items) >= limit:
+                break
+    if len(items) < limit and target_type in {"content_element", "chunk"} and term:
+        documents = {
+            row.id: row for row in db.scalars(select(Document).where(
+                Document.tenant_id == user.tenant_id,
+                Document.space_id == space_id,
+                _active(Document),
+            ))
+        }
+        if target_type == "content_element":
+            raw = list(db.scalars(select(ContentElement).where(
+                ContentElement.tenant_id == user.tenant_id,
+                ContentElement.space_id == space_id,
+                _active(ContentElement),
+            ).order_by(ContentElement.updated_at.desc()).limit(300)))
+            by_version: dict[str, list[ContentElement]] = {}
+            for row in raw:
+                document = documents.get(row.document_id)
+                if document and document.current_version_id == row.version_id:
+                    by_version.setdefault(row.version_id, []).append(row)
+            for version_id, rows in by_version.items():
+                for row in effective_elements(db, rows, version_id):
+                    if term not in row.text.casefold():
+                        continue
+                    document = documents.get(row.document_id)
+                    add({
+                        "target_type": "content_element", "target_label": "原始内容", "target_id": row.element_id,
+                        "document_id": row.document_id, "version_id": row.version_id,
+                        "title": document.title if document else "文档内容",
+                        "subtitle": f"{row.structural_path} · {compact_value(row.text, limit=80)}",
+                        "panel": "elements",
+                    })
+                    if len(items) >= limit:
+                        break
+        else:
+            rows = db.scalars(select(Chunk).where(
+                Chunk.tenant_id == user.tenant_id,
+                Chunk.space_id == space_id,
+                _active(Chunk),
+            ).order_by(Chunk.updated_at.desc()).limit(300))
+            for row in rows:
+                document = documents.get(row.document_id)
+                if not document or document.current_version_id != row.version_id:
+                    continue
+                try:
+                    text, _ = effective_chunk_text(db, row)
+                except ValueError:
+                    continue
+                if term not in text.casefold():
+                    continue
+                add({
+                    "target_type": "chunk", "target_label": "检索片段", "target_id": row.chunk_id,
+                    "document_id": row.document_id, "version_id": row.version_id,
+                    "title": document.title, "subtitle": f"{row.structural_path} · {compact_value(text, limit=80)}",
+                    "panel": "chunks",
+                })
+                if len(items) >= limit:
+                    break
+    return {"total": len(items), "items": items}
 
 
 @router.get("/curation/decisions")
@@ -2429,6 +2973,7 @@ def update_knowledge_entity(row_id: str, payload: KnowledgeEntityUpdate, user: U
     if row.tenant_id != user.tenant_id: raise HTTPException(404, "知识节点不存在")
     require_space_permission(db, user, row.space_id, "write")
     values = payload.model_dump(exclude_unset=True, exclude_none=True)
+    reason_note = str(values.pop("reason_note", "") or "").strip()
     if "canonical_name" in values:
         values["canonical_name"] = values["canonical_name"].strip()
     if "entity_type" in values: values["entity_type"] = values["entity_type"].strip()
@@ -2443,7 +2988,7 @@ def update_knowledge_entity(row_id: str, payload: KnowledgeEntityUpdate, user: U
             create_decision(
                 db, user=user, space_id=row.space_id, target_type="entity", target_id=row.id,
                 field_path=field, operation="override", value=value, scope="space",
-                reason_code="manual_graph_edit", batch_id=batch.id,
+                reason_code="manual_graph_edit", reason_note=reason_note, batch_id=batch.id,
             )[0]
             for field, value in values.items()
         ]
@@ -2599,6 +3144,7 @@ def update_knowledge_fact(row_id: str, payload: KnowledgeFactUpdate, user: User 
     require_space_permission(db, user, row.space_id, "write")
     current = effective_fact(db, row)
     values = payload.model_dump(exclude_unset=True)
+    reason_note = str(values.pop("reason_note", "") or "").strip()
     subject_id = values.get("subject_entity_id") or current["subject_entity_id"]
     object_id = values.get("object_entity_id", current["object_entity_id"])
     object_value = values.get("object_value", current["object_value"])
@@ -2625,7 +3171,7 @@ def update_knowledge_fact(row_id: str, payload: KnowledgeFactUpdate, user: User 
             create_decision(
                 db, user=user, space_id=row.space_id, target_type="fact", target_id=row.id,
                 field_path=field, operation="override", value=value, scope="space",
-                reason_code="manual_graph_edit", batch_id=batch.id,
+                reason_code="manual_graph_edit", reason_note=reason_note, batch_id=batch.id,
             )[0]
             for field, value in values.items()
         ]
@@ -2699,7 +3245,14 @@ def list_chunks(version_id: str, offset: int = Query(0, ge=0), limit: int = Quer
             text, metadata = effective_chunk_text(db, row)
         except ValueError:
             continue
-        items.append({**serialize_row(row), "text": text, **metadata})
+        items.append({
+            **serialize_row(row),
+            "text": text,
+            "automatic_text": row.text,
+            "automatic_boost": 1.0,
+            "field_origin": "manual" if metadata.get("curation_decision_id") else "automatic",
+            **metadata,
+        })
     return {"total": len(items), "items": items[offset:offset + limit]}
 
 

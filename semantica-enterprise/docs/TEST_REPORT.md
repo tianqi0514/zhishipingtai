@@ -5,10 +5,10 @@
 | 项目 | 值 |
 |---|---|
 | 测试日期 | 2026-08-31（Asia/Shanghai） |
-| 应用镜像 | `semantica-enterprise:0.10.0` / `sha256:00678e34965c9559abcff68978286ac0efdb6d9108ae333e03d7e32ff698c855` |
+| 应用镜像 | `semantica-enterprise:0.10.0` / `sha256:2630c175937d7f823617de1b69eed4066211a6c7ee3aa1283ab648f97d8ab4e4` |
 | Harness 镜像 | `chuanshen-agent-runtime:0.1.0-cd5ef81` / `sha256:e5d6cb859b264c8d392b1d782d5204943905b98f49bd1c9e8e85ee9cfecc8c84` |
 | OpenSearch 镜像 | `chuanshen-opensearch:3.6.0` / `sha256:c844e27f12affee7b66537c3a05ae5a7017e21367c776af2c1477316a56f4435`；移除未使用且产生启动错误的 PA/Security Analytics 插件 |
-| 应用 Git 基线 | `5c4b053960be4b7b19219fa75614127c62738937`；P0–P3 交付提交以包含本报告的 GitHub 提交为准 |
+| 应用 Git 基线 | `v0.10.0-p3` / `f51319fddaee3fd3e68e81602a09bfc4b44b836c`；治理工作台交付分支 `codex/governance-workbench-ux` |
 | Semantica commit | `cce5ea177cbac29a526effa546219c48f8ec36f4` |
 | DeepSeek Harness commit | `cd5ef8148158c3a752a658978873241fdf8e2bbc` |
 
@@ -16,7 +16,7 @@
 
 | 层次 | 数量 | 成功 | 失败 | 跳过 |
 |---|---:|---:|---:|---:|
-| Python 单元测试 | 102 | 102 | 0 | 0 |
+| Python 单元测试 | 108 | 108 | 0 | 0 |
 | Semantica/平台合约测试 | 19 | 19 | 0 | 0 |
 | 需要运行时环境的 Pytest E2E | 1 | 0 | 0 | 1 |
 | Harness 插件/恢复合约 | 6 | 6 | 0 | 0 |
@@ -27,7 +27,7 @@
 | 50 并发检索 | 50 | 50 | 0 | 0 |
 | 5 并发 Agent 会话 | 5 | 5 | 0 | 0 |
 
-核心 Pytest 最终结果为 `121 passed, 1 skipped`；跳过项是需要单独注入实时 E2E 环境的知识分析用例，该场景已按下方独立命令真实执行通过；Node Harness 为 `9 passed`。外部企业账号没有被伪装成 skip，单独列在“待外部账号验证”。
+核心 Pytest 最终结果为 `127 passed, 1 skipped`；新增 6 项覆盖治理业务标签、可读值、影响提示、调整说明和请求 Schema。跳过项是需要单独注入实时 E2E 环境的知识分析用例，该场景已按下方独立命令真实执行通过；Node Harness 为 `9 passed`。外部企业账号没有被伪装成 skip，单独列在“待外部账号验证”。
 
 ## 关键执行命令
 
@@ -107,6 +107,27 @@ python3 tests/performance/live_load.py
 | 冷启动 | `docker compose stop/start` 且不删除 Volume；12/12 服务 healthy；重启后 P3 专项与图谱 CRUD 再次通过 |
 
 P0–P3 专项自动化命令结果：单元测试 `102/102`、Semantica 合约 `19/19`、Harness `9/9`、API CRUD、P3 专项、图谱 CRUD、M10 三路检索、REST/MCP/CLI 和安全边界全部通过。浏览器临时分类值已回滚，目标文档最终分类为自动值“产品资料”，对应知识空间 `active_decisions=0`。
+
+## 治理工作台业务化重构专项回归（2026-08-31）
+
+本轮基于 P0–P3 的 Decision、Batch、Overlay、Case 与发布任务继续增量开发，没有复制或替换 Semantica 的解析、切片、抽取、归一化和知识发布能力。业务使用说明见 [GOVERNANCE_WORKBENCH_GUIDE.md](GOVERNANCE_WORKBENCH_GUIDE.md)。
+
+| 场景 | 真实验证结果 |
+|---|---|
+| 待处理工作流 | 以业务卡片展示问题、影响和系统建议；逐项完成接受自动结果、重新打开、忽略并填写原因，状态与 API、数据库一致 |
+| 弹窗取消 | 忽略弹窗、查找知识弹窗、调整弹窗和回滚预览弹窗点击取消均直接关闭，不触发提交或校验提示 |
+| 人工调整 | 文档画像支持标签、关键词、主要对象的增删和时间范围日期控件；一次保存形成一个原子批次，并展示调整人、原因、范围和影响 |
+| 自动值保护 | 人工值通过 Overlay 生效，Semantica 自动结果保持不变；年份型自动时间范围在用户未触碰日期控件时不会被其他字段调整误清空 |
+| 治理目标查找 | 通过真实接口检索文档画像、内容元素、Chunk、实体和事实，可从搜索结果直接进入对应治理页面 |
+| 批次与发布 | 历史按批次聚合，不展示 UUID、原始 JSON 或内部状态码；可查看字段差异、真实发布进度、失败重试和回滚影响预览 |
+| 回滚 | 浏览器实际调整分类后，从批次详情执行回滚；有效画像恢复自动值，新发布记录可追溯，历史批次未被删除 |
+| API | `/curation/workbench`、`/curation/batches`、批次详情、Case 详情、目标搜索和原子画像调整均完成权限与结构化响应验证 |
+| 浏览器 1280×720 | 指标区、筛选区、双栏工作区完整可见；页面宽度与视口一致，无横向溢出；最小工作区仍可独立滚动 |
+| 浏览器 1440×900 | 双栏工作区高度随视口扩展；详情、批次卡片、回滚预览和空状态无遮挡 |
+| 控制台 | 最终构建的浏览器错误和警告均为 0；没有未处理 Promise |
+| 冷启动 | `docker compose stop/start`，未删除 Volume；12/12 服务恢复 healthy；重启后再次执行 P3 实时专项，画像覆盖/回滚和前向/回滚发布均通过 |
+
+最终自动化结果为 `127 passed, 1 skipped`；冷启动后的 P3 实时专项再次通过，图谱发布前向/回滚达到 R25/R26、索引发布 R25/R26、组合知识发布 R24/R25。浏览器使用的临时 Case 已清理，实际画像调整均已回滚，没有遗留有效人工覆盖。
 
 ## 全局 UI/UX 重构专项回归
 
