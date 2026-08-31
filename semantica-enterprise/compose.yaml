@@ -16,6 +16,9 @@ x-app-environment: &app-environment
   USE_LOCAL_OBJECT_STORE: "false"
   PROVENANCE_STORAGE_PATH: /app/data/provenance.db
   KIMI_API_KEY_FILE: /run/secrets/kimi_api_key
+  # FastEmbed derives its cache from the process temp directory. Keep the
+  # downloaded ONNX model in the application volume across container rebuilds.
+  TMPDIR: /app/data
   XDG_CACHE_HOME: /app/data/model-cache
   HF_HOME: /app/data/model-cache/huggingface
   OPENSEARCH_URL: http://opensearch:9200

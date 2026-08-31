@@ -18,7 +18,10 @@ def serialize_row(row: Any) -> dict[str, Any]:
         data[column.key] = value
 
     if isinstance(row, ModelConfig):
-        data["api_key_status"] = masked_secret(row.api_key_encrypted)
+        if row.provider in {"huggingface", "bge", "fastembed"}:
+            data["api_key_status"] = "本地运行 · 无需 API Key"
+        else:
+            data["api_key_status"] = masked_secret(row.api_key_encrypted)
         data.pop("api_key_encrypted", None)
     if isinstance(row, SourceConnector):
         data["secret_status"] = masked_secret(row.secret_encrypted)
@@ -32,4 +35,3 @@ def apply_patch(row: Any, values: dict[str, Any], allowed: set[str]) -> None:
     for key, value in values.items():
         if key in allowed:
             setattr(row, key, value)
-

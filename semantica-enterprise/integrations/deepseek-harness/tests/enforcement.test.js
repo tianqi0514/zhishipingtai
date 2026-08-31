@@ -89,6 +89,30 @@ test('does not steer after knowledge_search was durably logged', () => {
 })
 
 
+test('does not force retrieval for a direct identity question', () => {
+  const { listeners } = fixture()
+  const steered = []
+  const agent = {
+    session: {
+      events: [{
+        type: 'user/message',
+        data: {
+          content: [{ type: 'text', text: '你是谁？' }],
+          source: { kind: 'user' },
+        },
+      }],
+    },
+    steer(message) { steered.push(message) },
+  }
+  listeners.get('agent/turn-stopping')({
+    agent,
+    turn: 3,
+    signal: new AbortController().signal,
+  })
+  assert.equal(steered.length, 0)
+})
+
+
 test('unloads every tool, prompt section and event listener', () => {
   const installed = fixture()
   assert.equal(installed.tools.length, 6)

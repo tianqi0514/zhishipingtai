@@ -33,7 +33,14 @@ def test_model_connection(
             vector = embedder.embed_query("知识平台连通性测试")
             if vector is None or len(vector) == 0:
                 raise RuntimeError("模型未返回向量")
-            return {"status": "ok", "dimension": len(vector)}
+            dimension = len(vector)
+            return {
+                "status": "ok",
+                "dimension": dimension,
+                "local": True,
+                "method": embedder.method,
+                "message": f"本地模型实测成功（{dimension} 维，无需 API Key）",
+            }
         from semantica.llms import HuggingFaceLLM
 
         llm = HuggingFaceLLM(model_name=model_name)

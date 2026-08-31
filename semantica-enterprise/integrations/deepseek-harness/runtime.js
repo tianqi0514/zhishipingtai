@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { DeepSeekHarness } from '/opt/deepseek-harness/packages/sdk/client/src/index.ts'
+import { requiresKnowledgeSearch } from './query-policy.js'
 
 const PORT = Number(process.env.PORT || 8090)
 const PLATFORM_API = (process.env.PLATFORM_API || 'http://api:8080/api/v1').replace(/\/$/, '')
@@ -163,7 +164,7 @@ function normalizeEvent(event, toolStarts, turnState) {
         // Do not leak a model's pre-evidence answer. The plugin will steer a
         // new step that performs knowledge_search; only post-search text is
         // streamed to the platform projection.
-        if (!turnState.hasSearch) {
+        if (turnState.requiresSearch && !turnState.hasSearch) {
           turnState.suppressedAnswer = true
           return null
         }
@@ -178,7 +179,7 @@ function normalizeEvent(event, toolStarts, turnState) {
       if (['aborted', 'interrupted', 'disposed'].includes(reason)) {
         return [['turn_cancelled', { reason, harness_seq: event.seq }]]
       }
-      if (!turnState.hasSearch) {
+      if (turnState.requiresSearch && !turnState.hasSearch) {
         return [['turn_failed', {
           reason: 'knowledge-search-required',
           code: 'KNOWLEDGE_SEARCH_REQUIRED',
@@ -211,7 +212,11 @@ async function runTurn(req, res, sessionId) {
     'X-Accel-Buffering': 'no',
   })
   const toolStarts = new Map()
-  const turnState = { hasSearch: false, suppressedAnswer: false }
+  const turnState = {
+    hasSearch: false,
+    suppressedAnswer: false,
+    requiresSearch: requiresKnowledgeSearch(input.content),
+  }
   let completedSeen = false
   try {
     const result = await entry.harness.run(input.content.trim(), {
