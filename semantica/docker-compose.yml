@@ -1,0 +1,40 @@
+services:
+  explorer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: semantica-knowledge-explorer:latest
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+      # Required for API access - the Explorer refuses all protected routes
+      # (503) until this is set. Generate one with `openssl rand -hex 32`.
+      SEMANTICA_API_KEY: ${SEMANTICA_API_KEY:-}
+      # Trusted local-only setups only: bypasses the API key entirely.
+      SEMANTICA_ALLOW_ANONYMOUS: ${SEMANTICA_ALLOW_ANONYMOUS:-false}
+    depends_on:
+      falkordb:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    networks:
+      - semantica
+    restart: unless-stopped
+
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - falkordb_data:/data
+    networks:
+      - semantica
+    restart: unless-stopped
+
+networks:
+  semantica:
+    driver: bridge
+
+volumes:
+  falkordb_data:

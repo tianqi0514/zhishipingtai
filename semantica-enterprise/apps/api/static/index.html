@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>传神智库</title>
+  <link rel="stylesheet" href="/assets/style.css?v=20260830-enterprise-ux-3">
+</head>
+<body>
+  <section id="login" class="login-wrap">
+    <form id="login-form" class="login-card">
+      <div class="brand-lockup login-brand">
+        <svg class="brand-symbol" viewBox="0 0 48 48" role="img" aria-label="传神智库">
+          <rect x="2" y="2" width="44" height="44" rx="13" class="brand-tile"/>
+          <path d="M10.5 14.5c5.8-.8 10.3.8 13.5 4.1 3.2-3.3 7.7-4.9 13.5-4.1v21.2c-5.3-.7-9.8.7-13.5 4-3.7-3.3-8.2-4.7-13.5-4V14.5Z" class="brand-book"/>
+          <path d="M24 18.6v21.1" class="brand-spine"/>
+          <circle cx="16.5" cy="21" r="1.6" class="brand-node"/>
+          <circle cx="31.5" cy="21" r="1.6" class="brand-node"/>
+          <path d="m16.5 21 3.8 5.2-3.1 4.3M31.5 21l-3.8 5.2 3.1 4.3" class="brand-link"/>
+        </svg>
+        <h1>传神智库</h1>
+      </div>
+      <label>账号<input name="username" autocomplete="username" required></label>
+      <label>密码
+        <span class="password-control">
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+          <button id="password-toggle" class="password-toggle" type="button" aria-label="显示密码" aria-pressed="false" title="显示密码">
+            <svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+            <svg class="eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 6.1A10.8 10.8 0 0 1 12 6c6 0 9.5 6 9.5 6a16.3 16.3 0 0 1-2.1 2.8M6.2 6.2C3.8 7.8 2.5 12 2.5 12s3.5 6 9.5 6c1.5 0 2.8-.4 4-1M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+          </button>
+        </span>
+      </label>
+      <button class="login-submit" type="submit">登录</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </section>
+
+  <div id="shell" class="shell hidden">
+    <aside id="sidebar">
+      <div class="logo">
+        <svg class="brand-symbol" viewBox="0 0 48 48" aria-hidden="true">
+          <rect x="2" y="2" width="44" height="44" rx="13" class="brand-tile"/>
+          <path d="M10.5 14.5c5.8-.8 10.3.8 13.5 4.1 3.2-3.3 7.7-4.9 13.5-4.1v21.2c-5.3-.7-9.8.7-13.5 4-3.7-3.3-8.2-4.7-13.5-4V14.5Z" class="brand-book"/>
+          <path d="M24 18.6v21.1" class="brand-spine"/>
+          <circle cx="16.5" cy="21" r="1.6" class="brand-node"/>
+          <circle cx="31.5" cy="21" r="1.6" class="brand-node"/>
+          <path d="m16.5 21 3.8 5.2-3.1 4.3M31.5 21l-3.8 5.2 3.1 4.3" class="brand-link"/>
+        </svg>
+        <b>传神智库</b>
+        <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="折叠导航" title="折叠导航">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+        </button>
+      </div>
+      <nav id="nav" aria-label="主导航">
+        <div class="nav-group" data-nav-group="dashboard">
+          <button class="nav-primary active" data-view="dashboard" title="工作台">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg><span>工作台</span>
+          </button>
+        </div>
+        <div class="nav-group" data-nav-group="assets">
+          <button class="nav-primary" data-view="assets" title="知识资产">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5 12 3l8 2.5v13L12 21l-8-2.5zM12 3v18M4 5.5l8 2.6 8-2.6"/></svg><span>知识资产</span><i class="nav-chevron">›</i>
+          </button>
+          <div class="nav-children"><button data-view="spaces">空间与目录</button><button data-view="documents">文档资产</button></div>
+        </div>
+        <div class="nav-group" data-nav-group="sources">
+          <button class="nav-primary" data-view="sources" title="数据接入">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></svg><span>数据接入</span>
+          </button>
+        </div>
+        <div class="nav-group" data-nav-group="service">
+          <button class="nav-primary" data-view="search" title="知识服务">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v12H8l-4 4z"/><path d="M8 9h8M8 13h5"/></svg><span>知识服务</span><i class="nav-chevron">›</i>
+          </button>
+          <div class="nav-children"><button data-view="search">智能问答</button><button data-view="retrieval">检索调试</button><button data-view="integrations">服务开放</button></div>
+        </div>
+        <div class="nav-group" data-nav-group="insights">
+          <button class="nav-primary" data-view="knowledge" title="知识洞察">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="2.5"/><circle cx="12" cy="5" r="2.5"/><circle cx="19" cy="12" r="2.5"/><circle cx="12" cy="19" r="2.5"/><path d="m7 10 3-3m4 0 3 3m0 4-3 3m-4 0-3-3"/></svg><span>知识洞察</span><i class="nav-chevron">›</i>
+          </button>
+          <div class="nav-children"><button data-view="knowledge">知识图谱</button><button data-view="analysis">知识分析</button></div>
+        </div>
+        <div class="nav-group" data-nav-group="operations">
+          <button class="nav-primary" data-view="operations" title="运营中心">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10m5 10V4m6 16v-7m5 7V7"/></svg><span>运营中心</span><i class="nav-chevron">›</i>
+          </button>
+          <div class="nav-children"><button data-view="jobs">任务中心</button><button data-view="capabilities">能力检测</button></div>
+        </div>
+        <div class="nav-spacer"></div>
+        <div class="nav-group nav-admin" data-nav-group="configuration" data-admin>
+          <button class="nav-primary" data-view="configuration" title="配置中心">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></svg><span>配置中心</span><i class="nav-chevron">›</i>
+          </button>
+          <div class="nav-children"><button data-view="models">模型服务</button><button data-view="parsers">解析策略</button><button data-view="processing">加工策略</button><button data-view="ontologies">知识结构</button></div>
+        </div>
+        <div class="nav-group nav-admin" data-nav-group="system" data-admin>
+          <button class="nav-primary" data-view="system" title="系统管理">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zm10 0h6v6h-6zM4 14h6v6H4zm10 0h6v6h-6z"/></svg><span>系统管理</span><i class="nav-chevron">›</i>
+          </button>
+          <div class="nav-children"><button data-view="orgs">组织机构</button><button data-view="users">用户管理</button><button data-view="roles">角色权限</button><button data-view="audits">审计日志</button></div>
+        </div>
+      </nav>
+      <div class="account"><span class="account-avatar" id="account-avatar">管</span><span class="account-meta"><b id="account-name"></b><small id="account-role">当前用户</small></span><button id="logout" title="退出登录">退出</button></div>
+    </aside>
+    <main>
+      <header><div class="topbar-title"><div id="breadcrumb" class="breadcrumb">工作台</div><h2 id="view-title">工作台</h2></div><div id="view-actions"></div></header>
+      <div id="content"></div>
+    </main>
+  </div>
+
+  <dialog id="modal">
+    <form id="modal-form" method="dialog" autocomplete="off">
+      <div class="modal-head"><h3 id="modal-title"></h3><button type="button" id="modal-close" class="icon-btn">×</button></div>
+      <div id="modal-body" class="modal-body"></div>
+      <div class="modal-actions"><button type="button" id="modal-cancel" class="secondary">取消</button><button type="submit" id="modal-submit">保存</button></div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast"></div>
+  <script src="/assets/graph3d.js?v=20260830-enterprise-ux"></script>
+  <script src="/assets/app.js?v=20260830-enterprise-ux-4"></script>
+</body>
+</html>

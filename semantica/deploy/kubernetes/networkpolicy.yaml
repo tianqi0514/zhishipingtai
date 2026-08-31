@@ -1,0 +1,42 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: knowledge-explorer
+  namespace: semantica
+  labels:
+    app.kubernetes.io/name: knowledge-explorer
+    app.kubernetes.io/part-of: semantica
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: knowledge-explorer
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from the ingress controller namespace.
+    # Adjust the namespace label if your ingress controller uses a different namespace.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Allow traffic from pods within the same namespace (e.g. monitoring sidecars).
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # FalkorDB
+    - ports:
+        - protocol: TCP
+          port: 6379
+    # DNS resolution
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

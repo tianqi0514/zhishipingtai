@@ -1,0 +1,21 @@
+Subject: NexusOne release
+From: knowledge@example.test
+To: group@example.test
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============8447542484457267674=="
+
+--===============8447542484457267674==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+NexusOne is an enterprise knowledge platform released in 2026.
+
+--===============8447542484457267674==
+Content-Type: text/plain
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="capabilities.txt"
+MIME-Version: 1.0
+
+TmV4dXNPbmUgc3VwcG9ydHMgaHlicmlkIHJldHJpZXZhbC4=
+
+--===============8447542484457267674==--

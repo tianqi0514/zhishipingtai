@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: knowledge-explorer
+  namespace: semantica
+  labels:
+    app.kubernetes.io/name: knowledge-explorer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: knowledge-explorer
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

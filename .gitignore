@@ -1,0 +1,51 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+**/deploy/secrets/*
+!**/deploy/secrets/.gitignore
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime data, model caches and generated databases
+/data/
+/semantica-enterprise/data/
+**/.cache/
+**/model-cache/
+**/huggingface/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+coverage/
+.turbo/
+.vite/
+dist/
+
+# IDE and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local test output
+test-results/
+playwright-report/
+artifacts/

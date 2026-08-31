@@ -1,0 +1,58 @@
+# checkov:skip=CKV_K8S_21:Cloud Run has no namespace concept; Knative services are project-scoped not namespace-scoped
+# checkov:skip=CKV_K8S_28:Cloud Run enforces seccomp at the platform level; this Knative YAML is not a K8s deployment
+# checkov:skip=CKV_K8S_30:Cloud Run enforces AppArmor at the platform level; this Knative YAML is not a K8s deployment
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: knowledge-explorer
+  annotations:
+    # Use 'internal-and-cloud-load-balancing' or 'internal' in production.
+    # 'all' permits direct unauthenticated public internet access.
+    run.googleapis.com/ingress: internal-and-cloud-load-balancing
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        - name: explorer
+          # Replace PROJECT_ID with your GCP project ID before deploying.
+          # See the README for the sed one-liner that does this automatically.
+          image: gcr.io/PROJECT_ID/knowledge-explorer:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+          ports:
+            - name: http1
+              containerPort: 8000
+          env:
+            - name: ALLOWED_ORIGINS
+              # Replace with your actual service URL — do not use '*' in production.
+              value: "https://knowledge-explorer-REPLACE_ME.a.run.app"
+            - name: FALKORDB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: falkordb-host
+                  key: latest
+            - name: FALKORDB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: falkordb-port
+                  key: latest
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3

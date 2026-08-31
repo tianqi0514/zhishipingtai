@@ -1,0 +1,18 @@
+{
+  "name": "chuanshen-knowledge-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node runtime.js",
+    "test": "node --import tsx/esm --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-sdk-client": "workspace:*",
+    "@deepseek-ai/dsh-sdk-minimal": "workspace:*",
+    "@deepseek-ai/dsh-llm-pi-ai": "workspace:*",
+    "@deepseek-ai/dsh-tools": "workspace:*",
+    "tsx": "4.22.4"
+  }
+}

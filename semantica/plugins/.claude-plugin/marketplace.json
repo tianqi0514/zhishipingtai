@@ -1,0 +1,20 @@
+{
+  "name": "semantica-local",
+  "owner": {
+    "name": "Semantica",
+    "url": "https://github.com/semantica-agi/semantica"
+  },
+  "plugins": [
+    {
+      "name": "semantica",
+      "description": "Semantica plugin for Claude: knowledge graph skills, reasoning, extraction, and visualization.",
+      "source": "./",
+      "category": "Productivity",
+      "tags": [
+        "knowledge-graph",
+        "reasoning",
+        "semantica"
+      ]
+    }
+  ]
+}

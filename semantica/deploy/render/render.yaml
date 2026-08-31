@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: semantica-knowledge-explorer
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://semantica-knowledge-explorer.onrender.com
+      - key: FALKORDB_HOST
+        fromService:
+          type: keyvalue
+          name: semantica-explorer-redis
+          property: host
+      - key: FALKORDB_PORT
+        fromService:
+          type: keyvalue
+          name: semantica-explorer-redis
+          property: port
+      - key: SEMANTICA_API_KEY
+        generateValue: true
+
+  - type: keyvalue
+    name: semantica-explorer-redis
+    plan: starter
+    ipAllowList: []
+    maxmemoryPolicy: noeviction
+    persistenceMode: snapshot

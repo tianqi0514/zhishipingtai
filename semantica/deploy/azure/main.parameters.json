@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "imageName": {
+      "value": "${SERVICE_EXPLORER_IMAGE_NAME}"
+    },
+    "allowedOrigins": {
+      "value": "https://REPLACE_ME.azurecontainerapps.io"
+    },
+    "falkordbHost": {
+      "value": "falkordb"
+    },
+    "falkordbPort": {
+      "value": "6379"
+    },
+    "vnetInternal": {
+      "value": true
+    },
+    "infrastructureSubnetId": {
+      "value": "${AZURE_INFRASTRUCTURE_SUBNET_ID}"
+    }
+  }
+}

@@ -1,0 +1,48 @@
+services:
+  explorer:
+    command:
+      - python
+      - -m
+      - uvicorn
+      - semantica.explorer.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/semantica
+    environment:
+      ALLOWED_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      # Local dev only: this compose file is not for public exposure.
+      SEMANTICA_ALLOW_ANONYMOUS: "true"
+    volumes:
+      - ./semantica:/app/semantica
+      - ./pyproject.toml:/app/pyproject.toml:ro
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app/explorer
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_EXPLORER_API_TARGET: http://explorer:8000
+      VITE_EXPLORER_WS_TARGET: ws://explorer:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./explorer:/app/explorer
+      - explorer_node_modules:/app/explorer/node_modules
+    depends_on:
+      explorer:
+        condition: service_started
+    networks:
+      - semantica
+
+networks:
+  semantica:
+    driver: bridge
+
+volumes:
+  explorer_node_modules:

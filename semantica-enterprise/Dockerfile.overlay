@@ -1,0 +1,10 @@
+ARG BASE_IMAGE=semantica-enterprise:0.10.0
+FROM ${BASE_IMAGE}
+
+USER root
+WORKDIR /app
+COPY apps /app/apps
+COPY packages /app/packages
+RUN pip install --no-cache-dir --no-deps -e .
+RUN chown -R app:app /app/apps /app/packages
+USER app

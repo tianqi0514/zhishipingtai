@@ -1,0 +1,40 @@
+FROM node:22-bookworm-slim
+
+ENV NODE_ENV=production \
+    DSH_HOME=/var/lib/chuanshen-harness \
+    DSH_TELEMETRY_DISABLED=1
+
+RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
+
+WORKDIR /opt/deepseek-harness
+COPY deepseek-harness/ /opt/deepseek-harness/
+COPY semantica-enterprise/integrations/deepseek-harness/ /opt/deepseek-harness/packages/integration/chuanshen-knowledge/
+RUN test "$(cat packages/integration/chuanshen-knowledge/HARNESS_COMMIT)" = "cd5ef8148158c3a752a658978873241fdf8e2bbc"
+# The pinned SDK JSON-RPC bridge creates an empty session after a subprocess
+# restart even when the JSONL event log already exists.  Apply an exact,
+# fail-closed overlay in the integration boundary so cold sessions use the
+# public ctx.agents.resume() API; the Agent Loop itself remains untouched.
+RUN node packages/integration/chuanshen-knowledge/patch-sdk-server.mjs \
+    packages/sdk/server/src/server.ts
+RUN --mount=type=cache,id=chuanshen-dsh-filtered-pnpm,target=/root/.local/share/pnpm/store \
+    pnpm install --filter chuanshen-knowledge-harness... --prod --no-frozen-lockfile --ignore-scripts \
+    && pnpm rebuild esbuild koffi node-pty \
+    && pnpm --filter @deepseek-ai/dsh-subprocess-local run postinstall
+# The source-launch path resolves its TypeScript loader from the SDK package,
+# while the filtered workspace install links tsx only into our out-of-tree
+# plugin. Expose the same reviewed package at the workspace root so the locked
+# SDK can resolve it without modifying Harness core code.
+RUN ln -s .pnpm/tsx@4.22.4/node_modules/tsx /opt/deepseek-harness/node_modules/tsx
+RUN cd packages/integration/chuanshen-knowledge \
+    && node --import tsx/esm -e "Promise.all([import('/opt/deepseek-harness/packages/sdk/client/src/index.ts'), import('/opt/deepseek-harness/packages/sdk/client/src/launch.ts').then(m => m.resolveDshLaunch({profile:'sdk-minimal'})), import('@deepseek-ai/dsh-tools')])"
+RUN cd packages/integration/chuanshen-knowledge && pnpm test
+
+RUN groupadd --gid 10002 harness \
+    && useradd --uid 10002 --gid harness --home /var/lib/chuanshen-harness --shell /usr/sbin/nologin harness \
+    && mkdir -p /var/lib/chuanshen-harness /workspace \
+    && chown -R harness:harness /var/lib/chuanshen-harness /workspace
+
+USER harness
+WORKDIR /opt/deepseek-harness/packages/integration/chuanshen-knowledge
+EXPOSE 8090
+CMD ["node", "--import", "tsx/esm", "runtime.js"]

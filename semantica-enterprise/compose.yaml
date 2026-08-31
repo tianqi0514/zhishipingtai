@@ -1,0 +1,280 @@
+name: semantica-enterprise
+
+x-app-environment: &app-environment
+  ENVIRONMENT: development
+  APP_SECRET_KEY: ${APP_SECRET_KEY:-local-semantic-enterprise-2026-change-me}
+  BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+  BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-Admin@123456}
+  DATABASE_URL: postgresql+psycopg://semantica:${POSTGRES_PASSWORD:-semantica}@postgres:5432/semantica
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: amqp://semantica:${RABBITMQ_PASSWORD:-semantica}@rabbitmq:5672//
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  OBJECT_STORE_ENDPOINT: minio:9000
+  OBJECT_STORE_ACCESS_KEY: ${MINIO_ROOT_USER:-semantica}
+  OBJECT_STORE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-semantica-dev-secret}
+  OBJECT_STORE_BUCKET: knowledge
+  USE_LOCAL_OBJECT_STORE: "false"
+  PROVENANCE_STORAGE_PATH: /app/data/provenance.db
+  KIMI_API_KEY_FILE: /run/secrets/kimi_api_key
+  XDG_CACHE_HOME: /app/data/model-cache
+  HF_HOME: /app/data/model-cache/huggingface
+  OPENSEARCH_URL: http://opensearch:9200
+  QDRANT_URL: http://qdrant:6333
+  FALKORDB_HOST: falkordb
+  FALKORDB_PORT: "6379"
+  SOURCE_SCHEDULER_SECONDS: "60"
+  KNOWLEDGE_AUTO_PROCESS: "true"
+  AGENT_RUNTIME_URL: http://agent-runtime:8090
+  AGENT_SERVICE_SECRET_FILE: /run/secrets/agent_service_secret
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: semantica
+      POSTGRES_USER: semantica
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-semantica}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U semantica -d semantica"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: semantica
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-semantica}
+    volumes:
+      - rabbitmq313-data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 8s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-semantica}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-semantica-dev-secret}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  opensearch:
+    build:
+      context: .
+      dockerfile: Dockerfile.opensearch
+    image: chuanshen-opensearch:3.6.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "127.0.0.1:9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    volumes:
+      - qdrant-data:/qdrant/storage
+    ports:
+      - "127.0.0.1:6333:6333"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ': >/dev/tcp/127.0.0.1/6333'"]
+      interval: 8s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  falkordb:
+    image: falkordb/falkordb:v4.18.8
+    volumes:
+      - falkordb-data:/var/lib/falkordb/data
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 8s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+    image: semantica-enterprise:0.10.0
+    environment: *app-environment
+    secrets:
+      - kimi_api_key
+      - agent_service_secret
+    volumes:
+      - application-data:/app/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/ready', timeout=3)"]
+      interval: 8s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    image: semantica-enterprise:0.10.0
+    command: ["celery", "-A", "apps.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment: *app-environment
+    secrets:
+      - kimi_api_key
+      - agent_service_secret
+    volumes:
+      - application-data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A apps.worker.celery_app:celery_app inspect ping -d celery@$$HOSTNAME --timeout=5 | grep -q pong"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  scheduler:
+    image: semantica-enterprise:0.10.0
+    command: ["celery", "-A", "apps.worker.celery_app:celery_app", "beat", "--loglevel=INFO"]
+    environment: *app-environment
+    secrets:
+      - kimi_api_key
+      - agent_service_secret
+    volumes:
+      - application-data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "tr '\\0' ' ' </proc/1/cmdline | grep -q 'celery.*beat'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  agent-runtime:
+    build:
+      context: ..
+      dockerfile: semantica-enterprise/Dockerfile.agent-runtime
+    image: chuanshen-agent-runtime:0.1.0-cd5ef81
+    environment:
+      PORT: "8090"
+      PLATFORM_API: http://api:8080/api/v1
+      KNOWLEDGE_API_BASE: http://api:8080/api/v1
+      AGENT_SERVICE_SECRET_FILE: /run/secrets/agent_service_secret
+      DSH_HOME: /var/lib/chuanshen-harness
+      DSH_TELEMETRY_DISABLED: "1"
+      TURN_TIMEOUT_MS: "600000"
+      KNOWLEDGE_TOOL_TIMEOUT_MS: "60000"
+    secrets:
+      - agent_service_secret
+    volumes:
+      - harness-data:/var/lib/chuanshen-harness
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8090/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  mcp-server:
+    image: semantica-enterprise:0.10.0
+    command: ["python", "-m", "apps.mcp.server"]
+    environment:
+      PLATFORM_API: http://api:8080/api/v1
+      MCP_PORT: "8091"
+      MCP_REQUEST_TIMEOUT: "600"
+    ports:
+      - "127.0.0.1:8091:8091"
+    depends_on:
+      api:
+        condition: service_healthy
+      agent-runtime:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8091), 3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+secrets:
+  kimi_api_key:
+    file: ./deploy/secrets/kimi_api_key
+  agent_service_secret:
+    file: ./deploy/secrets/agent_service_secret
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq313-data:
+  minio-data:
+  application-data:
+  opensearch-data:
+  qdrant-data:
+  falkordb-data:
+  harness-data:

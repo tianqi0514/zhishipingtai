@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knowledge-explorer
+  namespace: semantica
+  labels:
+    app.kubernetes.io/name: knowledge-explorer
+    app.kubernetes.io/part-of: semantica
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: knowledge-explorer
+  template:
+    metadata:
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/explorer: runtime/default
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
+      labels:
+        app.kubernetes.io/name: knowledge-explorer
+        app.kubernetes.io/part-of: semantica
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: explorer
+          image: semantica-knowledge-explorer@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: knowledge-explorer-config
+            - secretRef:
+                name: knowledge-explorer-secrets
+                optional: true
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

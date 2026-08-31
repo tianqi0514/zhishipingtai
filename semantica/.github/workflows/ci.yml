@@ -1,0 +1,83 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'docs_check.py'
+      - '**/*.md'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'docs_check.py'
+      - '**/*.md'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: explorer/package-lock.json
+      - name: Install Explorer frontend dependencies
+        working-directory: explorer
+        run: npm ci
+      - name: Test Explorer frontend
+        working-directory: explorer
+        run: |
+          npm run test:graph-store
+          npm run test:graph-workspace
+          npm run test:plugin-registry
+      - name: Build Explorer frontend
+        working-directory: explorer
+        run: npm run build
+      - name: Install pinned Python dependencies
+        run: |
+          pip install -r requirements-ci.txt
+      - name: Verify requirements-ci.txt is up to date
+        run: |
+          pip install uv==0.12.1
+          # Re-resolve with the committed file as a constraint: upstream package
+          # releases must NOT fail CI (deps only change when pyproject.toml
+          # changes intentionally). Compare only version lines (pkg==ver),
+          # ignoring the -c constraint comments and the `\` line continuations
+          # that --generate-hashes emits.
+          uv pip compile pyproject.toml --python-version 3.11 --extra all \
+            --constraint requirements-ci.txt -o /tmp/requirements-ci-check.txt
+          diff \
+            <(grep -E '^[a-zA-Z0-9._-]+==' requirements-ci.txt | sed 's/ \\$//') \
+            <(grep -E '^[a-zA-Z0-9._-]+==' /tmp/requirements-ci-check.txt)
+      - run: pip install build
+      # wheel is build-time only (not in requirements-ci.txt) — install the
+      # same pinned version [build-system] declares so --no-isolation works.
+      - run: pip install wheel==0.48.0
+      - name: Build package (no isolation — pinned deps)
+        run: python -m build --no-isolation
+      - name: Verify Explorer frontend is packaged
+        run: |
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          wheels = list(Path("dist").glob("*.whl"))
+          assert wheels, "No wheel was built"
+
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              names = set(wheel.namelist())
+
+          assert "semantica/static/index.html" in names, "Explorer index.html missing from wheel"
+          assert any(name.startswith("semantica/static/assets/") for name in names), "Explorer assets missing from wheel"
+
+          print("Explorer frontend is packaged")
+          PY

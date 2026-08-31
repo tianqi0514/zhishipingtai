@@ -1,0 +1,78 @@
+name: semantica-local
+
+services:
+  data-init:
+    build:
+      context: ../semantica
+      dockerfile: ../semantica-deploy/Dockerfile.cpu
+    image: semantica-local:0.6.6-cce5ea1
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - install -d -o semantica -g semantica /app/data
+    volumes:
+      - explorer_data:/app/data
+    networks:
+      - semantica
+    restart: "no"
+
+  explorer:
+    image: semantica-local:0.6.6-cce5ea1
+    init: true
+    environment:
+      FALKORDB_HOST: falkordb
+      FALKORDB_PORT: "6379"
+      ALLOWED_ORIGINS: http://localhost:8000,http://127.0.0.1:8000
+      SEMANTICA_ALLOW_ANONYMOUS: "true"
+      SEMANTICA_PROVENANCE_DB: /app/data/provenance.db
+      HF_HOME: /app/data/huggingface
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+      falkordb:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - explorer_data:/app/data
+    networks:
+      - semantica
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)); raise SystemExit(0 if data.get('status') == 'ok' else 1)"
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  falkordb:
+    image: falkordb/falkordb:latest
+    environment:
+      ENCRYPTION_KEY: ${FALKORDB_ENCRYPTION_KEY:?Set FALKORDB_ENCRYPTION_KEY in .env}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - falkordb_data:/data
+    networks:
+      - semantica
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+networks:
+  semantica:
+    driver: bridge
+
+volumes:
+  explorer_data:
+  falkordb_data:

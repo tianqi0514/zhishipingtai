@@ -1,0 +1,288 @@
+[build-system]
+requires = ["setuptools==84.0.0", "wheel==0.48.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantica"
+version = "0.6.6"
+description = "Graph-Native Infrastructure for Context and Accountable AI Systems: context graphs, decision intelligence, full provenance tracking, and explainable reasoning engines — every AI decision traceable, every output auditable."
+readme = "README.md"
+license = { text = "MIT" }
+
+authors = [{ name = "Semantica", email = "kaif@getsemantica.ai" }]
+maintainers = [{ name = "Semantica", email = "kaif@getsemantica.ai" }]
+
+requires-python = ">=3.8"
+
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Text Processing :: Linguistic",
+  "Topic :: Database :: Database Engines/Servers",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
+
+keywords = [
+  "knowledge-graph", "context-graph", "ai-agents", "llm", "decision-intelligence",
+  "provenance", "explainability", "reasoning-engine", "entity-extraction",
+  "relation-extraction", "graph-rag", "knowledge-intelligence", "semantic-layer",
+  "nlp", "embeddings", "ontology", "rdf", "triplet-extraction", "agentic-ai",
+  "knowledge-base", "entity-resolution", "w3c-prov", "audit-trail"
+]
+
+# ---------------- CORE DEPENDENCIES (SAFE DEFAULT) ----------------
+dependencies = [
+  "numpy>=2.0.2",
+  "pandas>=1.3.0",
+  "scipy>=1.13.1",
+  "scikit-learn>=1.7.2",
+  "umap-learn>=0.5.12",
+  "spacy>=3.4.0",
+  "transformers>=4.20.0",
+  "torch>=1.13.1",
+  "sentence-transformers>=2.2.0",
+  "rdflib>=6.2.0",
+  "networkx>=2.8.0",
+  "matplotlib>=3.9.4",
+  "seaborn>=0.13.2",
+  "plotly>=6.8.0",
+  "ipywidgets>=8.0.0",
+  "requests>=2.34.2",
+  "GitPython>=3.1.58",
+  "chardet>=7.4.3",
+  "protobuf>=5.29.1,<8.0",
+  "grpcio>=1.81.1",
+  "beautifulsoup4>=4.15.0",
+  "lxml>=6.1.1",
+  "python-docx>=1.2.0",
+  "openpyxl>=3.1.5",
+  "pillow>=12.2.0",
+  "librosa>=0.9.0",
+  "opencv-python>=4.13.0.92",
+  "faiss-cpu>=1.7.0",
+  "fastembed>=0.2.0",
+  "onnxruntime>=1.20.1",
+  "tokenizers>=0.15.0",
+  "pydantic>=2.13.4",
+  "click>=8.4.2",
+  "rich>=12.5.0",
+  "tqdm>=4.68.3",
+  "pyyaml>=6.0",
+  "toml>=0.10.0",
+  "python-dotenv>=1.2.1",
+  "loguru>=0.7.3",
+  "structlog>=22.1.0",
+  "gensim>=4.4.0",
+  "httpx<0.29.0",
+  "pyarrow>=14.0.0"
+]
+
+[project.urls]
+Homepage      = "https://getsemantica.ai"
+Documentation = "https://docs.getsemantica.ai"
+Repository    = "https://github.com/semantica-agi/semantica"
+Changelog     = "https://github.com/semantica-agi/semantica/blob/main/CHANGELOG.md"
+"Bug Tracker" = "https://github.com/semantica-agi/semantica/issues"
+Discord       = "https://discord.gg/sV34vps5hH"
+
+# ---------------- OPTIONAL DEPENDENCIES ----------------
+[project.optional-dependencies]
+
+# ---- LLM Providers ----
+llm-openai = ["openai>=1.0.0"]
+llm-groq = ["groq>=0.4.0"]
+llm-gemini = ["google-genai>=0.1.0"]
+llm-anthropic = ["anthropic>=0.122.0"]
+llm-ollama = ["ollama>=0.1.0"]
+llm-deepseek = ["openai>=1.0.0"]
+llm-litellm = ["litellm>=1.83.9"]
+llm-instructor = ["instructor>=1.15.3"]
+
+llm-all = [
+  "semantica[llm-openai,llm-groq,llm-gemini,llm-anthropic,llm-ollama,llm-deepseek,llm-litellm,llm-instructor]"
+]
+
+# ---- Document Parsing ----
+parse-docling = ["docling>=2.107.0"]
+
+# ---- SHACL Validation ----
+shacl = ["pyshacl>=0.25.0"]
+
+# ---- Database Connectors ----
+db-snowflake = ["snowflake-connector-python>=4.6.0", "cryptography>=49.0.0"]
+db-databricks = ["databricks-sdk>=0.60.0", "databricks-sql-connector>=4.0.0"]
+db-arrow = ["pyarrow>=24.0.0"]
+ingest-parquet = ["pyarrow>=24.0.0"]
+ingest-arrow = ["pyarrow>=24.0.0"]
+
+db-all = [
+  "semantica[db-snowflake,db-databricks,db-arrow]"
+]
+
+# ---- Embedding / Models ----
+models-huggingface = [
+  "transformers>=4.20.0",
+  "torch>=1.13.1"
+]
+
+# ---- Graph Backends ----
+graph-neo4j = ["neo4j>=5.0.0"]
+graph-falkordb = ["falkordb>=1.0.0", "redis>=4.3.0"]
+graph-amazon-neptune = ["boto3>=1.24.0", "neo4j>=5.0.0"]
+graph-apache-age = ["psycopg2-binary>=2.9.0"]
+
+graph-all = [
+  "semantica[graph-neo4j,graph-falkordb,graph-amazon-neptune,graph-apache-age]"
+]
+
+# ---- Triplet Store Backends ----
+tripletstore-oxigraph = ["pyoxigraph>=0.5.0"]
+
+# ---- Vector Store Backends ----
+vectorstore-qdrant = ["qdrant-client>=1.0.0"]
+vectorstore-weaviate = ["weaviate-client>=4.0.0"]
+vectorstore-pinecone = ["pinecone-client>=3.0.0"]
+vectorstore-milvus = ["pymilvus>=2.0.0"]
+vectorstore-pgvector = ["psycopg[binary,pool]>=3.0.0", "pgvector>=0.2.0"]
+vectorstore-sqlite = ["sqlite-vec>=0.1.1"]
+
+vectorstore-all = [
+  "semantica[vectorstore-qdrant,vectorstore-weaviate,vectorstore-pinecone,vectorstore-milvus,vectorstore-pgvector,vectorstore-sqlite]"
+]
+
+# ---- Infra / Queues / Workers ----
+infra = [
+  "redis>=4.3.0",
+  "celery>=5.2.0",
+  "kafka-python>=3.0.2",
+  "pulsar-client>=3.0.0",
+  "pika>=1.3.0"
+]
+
+# ---- Cloud Providers ----
+cloud = [
+  "boto3>=1.24.0",
+  "azure-storage-blob>=12.30.0",
+  "google-cloud-storage>=2.5.0"
+]
+
+# ---- Monitoring (FIXED) ----
+monitoring = [
+  "prometheus-client>=0.14.0",
+  "opentelemetry-api>=1.30.0,<2.0.0",
+  "opentelemetry-sdk>=1.30.0,<2.0.0",
+  "opentelemetry-semantic-conventions>=0.58b0,<0.65",
+  "opentelemetry-instrumentation>=0.62b1,<0.65"
+]
+
+# ---- Visualization ----
+viz = [
+  "pyvis>=0.3.0",
+  "graphviz>=0.21",
+  "d3blocks>=1.0.0"
+]
+
+# ---- GPU ----
+gpu = [
+  "faiss-gpu>=1.7.0",
+  "cupy>=10.0.0"
+]
+
+# ---- Agentic Framework Integrations ----
+agno = ["agno>=1.0.0"]
+# crewai core provides BaseTool and BaseKnowledgeSource; crewai-tools is not
+# needed (it pulls vulnerable transitive deps like chromadb) and would only
+# duplicate the prebuilt tooling users can install separately.
+crewai = ["crewai>=0.80.0"]
+langchain = ["langchain-core>=0.3.0"]
+
+# ---- File Watching ----
+watch = ["watchdog>=6.0.0"]
+
+# ---- Splitting / Chunking ----
+split-tiktoken = ["tiktoken>=0.5.0"]
+split-community = ["python-louvain>=0.16"]
+split-topic = ["bertopic>=0.15.0", "gensim>=4.4.0"]
+
+split-all = [
+  "semantica[split-tiktoken,split-community,split-topic]"
+]
+
+# ---- Dev ----
+dev = [
+  "pytest>=7.1.0",
+  "pytest-cov>=7.1.0",
+  "pytest-asyncio>=0.19.0",
+  "black>=22.6.0",
+  "isort>=6.1.0",
+  "flake8>=4.0.0",
+  "mypy>=0.971",
+  "pre-commit>=4.6.0",
+  "jupyter>=1.0.0",
+  "ipykernel>=6.15.0"
+]
+
+# Explorer Dashboard
+explorer = [
+  "fastapi>=0.109.2",
+  "uvicorn[standard]>=0.22.0",
+  "websockets>=15.0.1",
+  "python-multipart>=0.0.7",
+  "defusedxml>=0.7.1"
+]
+explorer-lite = [
+  "streamlit>=1.25.0",
+  "streamlit-agraph>=0.0.45"
+]
+
+# Everything (cross-platform — gpu excluded; install semantica[gpu] separately on Linux)
+# NOTE: the ``crewai`` extra is intentionally NOT in ``all``: crewai hard-requires
+# ``chromadb~=1.1.0``, which carries a pre-authentication code-injection advisory
+# (CVE-2026-45829) with no fixed release — including it here would fail the CI
+# dependency-audit/security gates.  Install it explicitly via ``semantica[crewai]``.
+all = [
+  "semantica[dev,viz,infra,cloud,monitoring,watch,llm-all,models-huggingface,split-all,graph-all,tripletstore-oxigraph,vectorstore-all,parse-docling,ingest-parquet,ingest-arrow,shacl,explorer]",
+  "semantica[dev,viz,infra,cloud,monitoring,watch,llm-all,models-huggingface,split-all,graph-all,tripletstore-oxigraph,vectorstore-all,parse-docling,ingest-parquet,ingest-arrow,shacl,agno,langchain]"
+]
+
+# ---------------- ENTRYPOINTS ----------------
+[project.scripts]
+semantica = "semantica.cli:main"
+semantica-server = "semantica.server:main"
+semantica-worker = "semantica.worker:main"
+semantica-explorer = "semantica.explorer:main"
+semantica-mcp = "semantica.mcp_server:main"
+
+# ---------------- TOOLING ----------------
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["semantica*", "integrations*"]
+
+[tool.setuptools.package-data]
+# Explicit patterns are more reliable than **/* across setuptools versions.
+# static/* covers index.html / favicon; static/assets/* covers all JS/CSS chunks.
+"semantica" = ["static/*", "static/assets/*", "ontology/vocabulary/*.ttl"]
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests that require external services or API keys (deselect with '-m not integration')",
+]

@@ -1,0 +1,78 @@
+# 知识分析与 Semantica Analyze 融合
+
+“知识分析”把知识库中的已发布事实从“可查阅的数据”提升为“可执行的业务规则”。平台负责租户、知识空间、规则治理、运行记录、证据链、发布与回滚；真正的规则闭包推理由 Semantica `DatalogReasoner` 执行，未复制其推理算法。
+
+## 业务使用顺序
+
+| 顺序 | 模块 | 业务背景 | 输入 | 输出 | Semantica 复用点 |
+|---:|---|---|---|---|---|
+| 1 | 知识事实准备 | 文档抽取或人工维护的关系是分析前提 | 当前文档版本生成的实体/关系、人工节点/边 | `CanonicalEntity`、已发布 `Fact`、来源 Chunk | Semantica 解析、语义抽取、归一化与溯源 |
+| 2 | 规则集 | 将同一业务目的的规则统一管理 | 名称、分类、知识空间、自动运行/发布开关 | 可启停、可编辑、可删除的规则集 | 为 Semantica 推理组织执行批次，不改变引擎 |
+| 3 | 可视化规则 | 业务人员用“条件 → 结论”描述传递、归属和影响关系 | 1–12 个二元条件、一个二元结论、优先级、置信度、有效期 | 规范化 DSL、Semantica 可执行 Datalog、不可变版本 | `semantica.reasoning.DatalogReasoner.add_rule()` 校验与执行 |
+| 4 | 分析场景 | 将规则集包装为可重复运行的业务入口 | 场景分类、规则集、知识空间、输入 Schema、运行参数 | 可 CRUD 的场景配置 | 调用相同 Semantica 推理适配器 |
+| 5 | 预览推理 | 先验证规则命中和依据，不影响生产图谱 | 场景/规则集、空间范围、最大结果数 | 预览结论、置信度、规则版本、逐条证据、执行指标 | `DatalogReasoner.derive_all()` |
+| 6 | 发布推理 | 将验证后的推导结论供检索、图谱和 Agent 使用 | 与预览相同，运行方式为发布 | `InferredFact`、`InferenceEvidence`、新 FalkorDB 图谱版本 | Semantica 推理结果通过平台一致性边界发布 |
+| 7 | 查询与消费 | 人和智能体需要区分原始事实与推导结论 | 图谱查询、混合检索、Agent `knowledge_reason`、REST/MCP/CLI | `origin_type=asserted/inferred`、证明、引用证据 | Semantica 推理结论进入图谱召回；Harness 只调用内部 API |
+| 8 | 回滚与增量重算 | 规则或知识变化后必须可追溯、可恢复 | 推理运行 ID；或新文档版本事件 | 推导事实失效、新图谱版本；启用自动运行的规则集重新计算 | 每次重算仍由 Semantica 执行，历史运行保留 |
+
+## 页面模块
+
+- 场景分析：场景增删改查，并从场景直接发起运行。
+- 规则中心：规则集增删改查；规则使用可视化条件编辑器，保存时生成 DSL；每次定义变更产生新版本。
+- 推理结果：显示队列/运行/完成状态、真实百分比、结果数、证据链和回滚入口。
+- 高级查询：在用户有权访问的知识空间投影上执行只读 SPARQL，查询可保存、编辑和删除。
+- 知识图谱：原始关系正常编辑；推导关系用紫色虚线表示，并标记“Semantica 规则推导”，只能从推理运行回滚，不能破坏证据链直接修改。
+
+## 规则写法
+
+变量必须以大写字母开头。关系名可以使用中文。结论中的变量必须已在条件中出现。
+
+```text
+适用于(X, Z) :- 适用于(X, Y), 管理(Y, Z).
+```
+
+含义：若制度 `X` 适用于集团 `Y`，且 `Y` 管理单位 `Z`，则推导制度 `X` 适用于 `Z`。运行结果保存两条前提事实、来源 Chunk、规则版本和 Semantica 引擎标识；证据不足时不会生成结论。
+
+当前业务规则使用二元谓词，适合组织隶属、制度适用、供应链传递、风险影响、产品依赖等图关系分析。数值聚合、时间窗口和外部函数需要后续通过受控 Builtin 扩展，不应把任意代码写进规则。
+
+## 发布与一致性
+
+1. 推理任务先持久化结果和证据。
+2. 发布模式会使同规则集上一批不再成立的推导事实失效。
+3. 平台将当前版本原始事实和所有有效推导事实合并，校验后发布新的 FalkorDB 图谱版本。
+4. 图谱发布失败时任务失败并保留错误；旧 FalkorDB 图谱版本仍可用。
+5. 文档新版本发布时先生成包含既有推导事实的图谱快照，再为 `auto_run=true` 的规则集创建幂等重算任务；`auto_publish` 决定重算只预览还是自动发布。
+6. 回滚不会删除历史记录，而是将推导事实标记为 `invalidated` 并重新发布图谱。
+
+## Agent 与开放协议
+
+DeepSeek Harness 插件新增严格类型化 `knowledge_reason` 工具。Harness 只获得短期、带用户/会话/知识空间范围的内部凭据，不能连接 PostgreSQL、FalkorDB 或其他中间件。内部图谱工具同时返回 `asserted` 和 `inferred` 事实，推导事实带 `proof` 和可用的证据 Chunk。
+
+REST：
+
+```text
+POST /api/v1/analysis/inference-runs
+GET  /api/v1/analysis/inference-runs/{id}
+POST /api/v1/analysis/inference-runs/{id}/rollback
+POST /api/v1/analysis/sparql
+```
+
+MCP：`knowledge_reason`、`knowledge_sparql`。
+
+CLI：
+
+```bash
+chuanshen reason RULE_SET_ID --space SPACE_ID
+chuanshen reason RULE_SET_ID --space SPACE_ID --publish
+chuanshen sparql 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20' --space SPACE_ID
+```
+
+## 安全边界
+
+- 规则集、场景、运行和查询均重新校验租户及知识空间权限。
+- SPARQL 只允许 `SELECT`、`ASK`、`CONSTRUCT`、`DESCRIBE`，拒绝更新语句和 `SERVICE`，避免修改图谱及 SSRF。
+- 查询只在授权数据构造的内存 RDF 投影上执行，不直连 FalkorDB。
+- Agent 工具不能扩大短期凭据中的空间范围。
+- 推导关系不能通过普通边编辑接口修改，防止结论与证据失配。
+- 规则执行最多 500 条规则、50,000 条输入事实、10,000 条结果；页面和接口使用更小的业务默认值。
+

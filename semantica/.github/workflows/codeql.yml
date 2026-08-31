@@ -1,0 +1,97 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '30 1 * * 1'  # Every Monday 7 AM IST
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The CodeQL bundle download (github/codeql-action/init's "Setup CodeQL
+      # tools" step) streams a ~1GB tarball from GitHub's release CDN and
+      # does not retry on a transient connection reset (ECONNRESET) itself
+      # (github/codeql-action, unresolved as of v4 / CLI 2.26.1: the HTTP
+      # error is retryable but isn't retried internally). Since a `uses:`
+      # step can't be wrapped by a shell-level retry action, attempt init
+      # up to 3 times; each retry is a fresh download attempt with no
+      # meaningful state carried over from a failed attempt.
+      - name: Initialize CodeQL (attempt 1)
+        id: codeql-init-1
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
+        continue-on-error: true
+        with:
+          languages: python
+          queries: security-and-quality
+          config-file: .github/codeql/codeql-config.yml
+
+      - name: Initialize CodeQL (attempt 2)
+        id: codeql-init-2
+        if: steps.codeql-init-1.outcome == 'failure'
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
+        continue-on-error: true
+        with:
+          languages: python
+          queries: security-and-quality
+          config-file: .github/codeql/codeql-config.yml
+
+      - name: Initialize CodeQL (attempt 3)
+        id: codeql-init-3
+        if: steps.codeql-init-2.outcome == 'failure'
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
+        with:
+          languages: python
+          queries: security-and-quality
+          config-file: .github/codeql/codeql-config.yml
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
+        with:
+          category: "/language:python"
+          upload: false
+        id: codeql
+
+      - name: Upload SARIF (Advanced Setup only)
+        # Uploads results only when Default Setup is not active.
+        # If Default Setup is still enabled, this step skips gracefully
+        # instead of failing the workflow with HTTP 409.
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
+        with:
+          sarif_file: ${{ steps.codeql.outputs.sarif-output }}
+          category: "/language:python"
+          wait-for-processing: true
+        continue-on-error: true
+
+  # NOTE: Auto-dismissal by rule-id is intentionally removed.
+  # Dismissing every alert that matches a rule ID would silently suppress
+  # future real vulnerabilities of the same type. The alerts below were
+  # individually triaged and dismissed manually in the security-enhancement
+  # PR (alerts #12–#18). New alerts must be reviewed and dismissed by hand,
+  # or will auto-close when the underlying code no longer triggers them.
+  #
+  # If you need to dismiss a specific known-safe alert, pin its alert NUMBER
+  # here and remove it once CodeQL stops reporting it naturally. Example:
+  #
+  #   PINNED_ALERT_NUMBERS=(12 13 14 15 16 17 18)
+  #   for NUM in "${PINNED_ALERT_NUMBERS[@]}"; do
+  #     gh api repos/$REPO/code-scanning/alerts/$NUM \
+  #       -X PATCH -f state=dismissed -f dismissed_reason="false positive" \
+  #       -f dismissed_comment="<reason>"
+  #   done

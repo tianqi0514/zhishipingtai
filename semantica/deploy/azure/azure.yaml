@@ -1,0 +1,14 @@
+name: semantica-knowledge-explorer
+metadata:
+  template: semantica-knowledge-explorer@0.1.0
+services:
+  explorer:
+    project: ../..
+    host: containerapp
+    language: docker
+    docker:
+      path: ./Dockerfile
+      context: .
+infra:
+  provider: bicep
+  path: .

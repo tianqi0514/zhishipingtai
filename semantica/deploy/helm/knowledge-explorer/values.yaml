@@ -1,0 +1,103 @@
+replicaCount: 2
+
+image:
+  repository: semantica-knowledge-explorer
+  pullPolicy: Always
+  # Replace this placeholder digest with the digest of the image you publish.
+  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  # Used only when image.digest is empty.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+automountServiceAccountToken: false
+
+podAnnotations:
+  # AppArmor — must match the container name defined in the Deployment template ("explorer").
+  container.apparmor.security.beta.kubernetes.io/explorer: runtime/default
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+  seccompProfile:
+    type: RuntimeDefault
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: knowledge-explorer.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: knowledge-explorer-tls
+      hosts:
+        - knowledge-explorer.example.com
+
+env:
+  ALLOWED_ORIGINS: https://knowledge-explorer.example.com
+  FALKORDB_HOST: falkordb
+  FALKORDB_PORT: "6379"
+
+secretEnv: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+livenessProbe:
+  path: /api/health
+  initialDelaySeconds: 20
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  path: /api/health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+networkPolicy:
+  enabled: true
+  # Namespace label of your ingress controller. Ingress is only admitted from this namespace
+  # and from pods within the same namespace as the Explorer.
+  ingressNamespace: ingress-nginx
+  # FalkorDB port allowed for egress. Must match FALKORDB_PORT.
+  falkordbPort: 6379

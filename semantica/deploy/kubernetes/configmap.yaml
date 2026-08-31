@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: knowledge-explorer-config
+  namespace: semantica
+data:
+  ALLOWED_ORIGINS: "https://knowledge-explorer.example.com"
+  FALKORDB_HOST: "falkordb"
+  FALKORDB_PORT: "6379"

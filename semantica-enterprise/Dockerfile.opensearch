@@ -1,0 +1,9 @@
+FROM opensearchproject/opensearch:3.6.0
+
+# The knowledge platform only needs core full-text search.  The upstream image
+# enables two optional analytics plugins that emit startup ERROR logs when
+# their external configuration/system indices are absent.  Removing them keeps
+# operational logs actionable and does not affect OpenSearch, k-NN, aliases or
+# the platform's search mappings.
+RUN /usr/share/opensearch/bin/opensearch-plugin remove opensearch-performance-analyzer \
+    && /usr/share/opensearch/bin/opensearch-plugin remove opensearch-security-analytics

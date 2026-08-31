@@ -1,0 +1,1 @@
+"""Semantica adapter contract tests."""

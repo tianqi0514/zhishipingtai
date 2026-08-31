@@ -1,0 +1,12 @@
+semantica/
+semantica-enterprise/.git/
+semantica-enterprise/.env
+semantica-enterprise/data/
+semantica-enterprise/deploy/secrets/
+semantica-enterprise/.pytest_cache/
+semantica-enterprise/**/__pycache__/
+deepseek-harness/.git/
+deepseek-harness/node_modules/
+deepseek-harness/**/node_modules/
+deepseek-harness/.cache/
+deepseek-harness/coverage/

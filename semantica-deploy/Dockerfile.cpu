@@ -1,0 +1,53 @@
+FROM node:26-alpine AS frontend-builder
+
+WORKDIR /app
+COPY explorer/package*.json ./explorer/
+WORKDIR /app/explorer
+RUN npm ci
+
+COPY explorer/ ./
+RUN mkdir -p /app/semantica && npm run build
+
+# Build the runtime only from public base images and the checked-in source.
+# Installing torch from the CPU index first prevents pip from resolving the
+# much larger CUDA runtime on Linux x86_64.
+FROM python:3.13-slim AS runtime
+
+LABEL org.opencontainers.image.title="Semantica Local" \
+      org.opencontainers.image.version="0.6.6" \
+      org.opencontainers.image.revision="cce5ea177cbac29a526effa546219c48f8ec36f4"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    FALKORDB_HOST=falkordb \
+    FALKORDB_PORT=6379 \
+    ALLOWED_ORIGINS=http://localhost:8000,http://127.0.0.1:8000
+
+WORKDIR /app
+
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
+       build-essential git libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system semantica \
+    && useradd --system --gid semantica --home-dir /app --shell /usr/sbin/nologin semantica
+
+COPY pyproject.toml README.md LICENSE MANIFEST.in ./
+COPY semantica/ ./semantica/
+COPY integrations/ ./integrations/
+COPY --from=frontend-builder /app/semantica/static ./semantica/static
+
+RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.13.0+cpu" \
+    && pip install ".[explorer]" \
+    && python -m pip check \
+    && chown -R semantica:semantica /app
+
+USER semantica
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import json, urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)); raise SystemExit(0 if data.get('status') == 'ok' else 1)"
+
+CMD ["python", "-m", "uvicorn", "semantica.explorer.app:app", "--host", "0.0.0.0", "--port", "8000"]
