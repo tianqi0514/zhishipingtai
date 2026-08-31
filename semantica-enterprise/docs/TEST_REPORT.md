@@ -4,11 +4,11 @@
 
 | 项目 | 值 |
 |---|---|
-| 测试日期 | 2026-08-30（Asia/Shanghai） |
-| 应用镜像 | `semantica-enterprise:0.10.0` / `sha256:81e4fa7d41a28a7a414d5deb5ca4d0166cb8c1fcbc836f1ab1bbf187e787a403` |
-| Harness 镜像 | `chuanshen-agent-runtime:0.1.0-cd5ef81` / `sha256:0cac7a469e2142f1b09c9d0eef0b022604bb82d175b9958b21cf5d9f2c40c32c` |
+| 测试日期 | 2026-08-31（Asia/Shanghai） |
+| 应用镜像 | `semantica-enterprise:0.10.0` / `sha256:00678e34965c9559abcff68978286ac0efdb6d9108ae333e03d7e32ff698c855` |
+| Harness 镜像 | `chuanshen-agent-runtime:0.1.0-cd5ef81` / `sha256:e5d6cb859b264c8d392b1d782d5204943905b98f49bd1c9e8e85ee9cfecc8c84` |
 | OpenSearch 镜像 | `chuanshen-opensearch:3.6.0` / `sha256:c844e27f12affee7b66537c3a05ae5a7017e21367c776af2c1477316a56f4435`；移除未使用且产生启动错误的 PA/Security Analytics 插件 |
-| 应用 Git | 顶层仓库为 unborn HEAD，尚无应用提交；未伪造 commit |
+| 应用 Git 基线 | `5c4b053960be4b7b19219fa75614127c62738937`；P0–P3 交付提交以包含本报告的 GitHub 提交为准 |
 | Semantica commit | `cce5ea177cbac29a526effa546219c48f8ec36f4` |
 | DeepSeek Harness commit | `cd5ef8148158c3a752a658978873241fdf8e2bbc` |
 
@@ -16,7 +16,7 @@
 
 | 层次 | 数量 | 成功 | 失败 | 跳过 |
 |---|---:|---:|---:|---:|
-| Python 单元测试 | 86 | 86 | 0 | 0 |
+| Python 单元测试 | 102 | 102 | 0 | 0 |
 | Semantica/平台合约测试 | 19 | 19 | 0 | 0 |
 | 需要运行时环境的 Pytest E2E | 1 | 0 | 0 | 1 |
 | Harness 插件/恢复合约 | 6 | 6 | 0 | 0 |
@@ -27,7 +27,7 @@
 | 50 并发检索 | 50 | 50 | 0 | 0 |
 | 5 并发 Agent 会话 | 5 | 5 | 0 | 0 |
 
-核心 Pytest 最终结果为 `105 passed, 1 skipped`；跳过项是需要单独注入实时 E2E 环境的知识分析用例，该场景已按下方独立命令真实执行通过；Node Harness 为 `6 passed`。外部企业账号没有被伪装成 skip，单独列在“待外部账号验证”。
+核心 Pytest 最终结果为 `121 passed, 1 skipped`；跳过项是需要单独注入实时 E2E 环境的知识分析用例，该场景已按下方独立命令真实执行通过；Node Harness 为 `9 passed`。外部企业账号没有被伪装成 skip，单独列在“待外部账号验证”。
 
 ## 关键执行命令
 
@@ -38,6 +38,7 @@ docker run --rm --network semantica-enterprise_default -v "$PWD:/app" -w /app \
 docker compose exec -T agent-runtime npm test -- --runInBand
 bash tests/e2e/api_crud_smoke.sh
 bash tests/e2e/graph_crud_smoke.sh
+python3 tests/e2e/curation_p3_smoke.py
 bash tests/e2e/m10_platform_smoke.sh
 python3 tests/e2e/source_incremental.py
 docker run --rm -v "$PWD:/workspace" -w /workspace \
@@ -60,7 +61,7 @@ python3 tests/performance/live_load.py
 
 ### 第一轮：功能开发回归
 
-- 105 项 Python 单元/合约测试与 6 项 Harness 测试通过；1 项需实时环境的 Pytest E2E 由独立 Docker 命令验证。
+- 121 项 Python 单元/合约测试与 9 项 Harness 测试通过；1 项需实时环境的 Pytest E2E 由独立 Docker 命令验证。
 - 组织、角色、用户、空间、授权、29 类数据源 Schema、五类模型、解析/切片/抽取/治理、本体/词条 CRUD 通过。
 - 图谱节点、边、级联删除与新 FalkorDB 发布通过。
 - 三路搜索实测：全文 5、向量 8、图谱 11；未配置 Reranker 时真实降级到 RRF。
@@ -84,6 +85,28 @@ python3 tests/performance/live_load.py
 - 冷启动前完成 105 项 Python 全量测试；冷启动后重新执行知识分析 REST/MCP/CLI 关键 E2E、数据持久化核对和服务健康检查，全部通过。
 - 最终浏览器截图为白底图谱 R44；真实对话的检索轨迹显示全文 5、向量 8、图谱 11、24→8 去重、RRF、414ms，总排名与分通道分数可见；引用打开真实 `m10-knowledge.txt`。浏览器错误/警告日志为空。
 - 最终 12 个服务均为 healthy；应用/Worker/Harness/MCP 无 Traceback、Unhandled、Fatal。OpenSearch 精简镜像重启后也无 Error，并再次通过全文/向量/图谱检索。
+
+## 人工治理 P0–P3 专项回归（2026-08-31）
+
+本轮新增能力及业务边界详见 [HUMAN_CURATION_P0_P3.md](HUMAN_CURATION_P0_P3.md)。专项测试使用真实 PostgreSQL、Celery、OpenSearch、Qdrant、FalkorDB 和 Semantica 适配层，不修改自动结果行，也没有用静态返回值替代发布过程。
+
+| 场景 | 真实验证结果 |
+|---|---|
+| 数据库升级 | `0015_human_curation.sql` 在既有库执行成功；冷启动重复执行无报错；原文档、版本、Chunk、图谱和会话保留 |
+| P0 决定与回滚 | Decision、Batch、Overlay、Case 的新增/查询/投影/回滚通过；旧来源指纹冲突会拒绝提交 |
+| P1 文档画像 | 分类人工覆盖即时显示，同时保留自动值与字段来源；浏览器真实保存后显示“1 项人工值”，再从治理历史回滚并恢复自动分类 |
+| P2 实体与事实 | 节点/关系字段以 Overlay 生效；实体 merge/split、must-link/cannot-link、事实端点重定向和批次回滚通过 |
+| P3 内容元素 | 人工正文进入 Semantica Splitter、语义抽取、实体治理、图谱和索引链；回滚后人工标记从有效元素及 Chunk 消失 |
+| P3 Chunk | 文案、屏蔽和 0.1–5.0 调权投影通过；OpenSearch/Qdrant 使用相同 `curation_boost`；文本不变时复用向量 |
+| 发布一致性 | 图谱/索引最终前向 R17、回滚 R18；组合 `KnowledgeRelease` 前向 R16、回滚 R17；旧发布仍可追溯 |
+| 引用稳定性 | 强制重加工不再物理删除被 Citation 引用的 Chunk；旧行标记 `superseded`，稳定 ID 行复用；数据库外键无断链 |
+| 空空间图谱 | 尚无向量索引的全新空间可独立发布图谱，任务返回明确 Warning 而不是整体失败 |
+| Agent/开放服务 | REST 搜索 5 条、MCP 7 工具、Harness 302 个事件、CLI search/fragment/chat 均通过；有效片段和有效图谱供给一致 |
+| 安全边界 | 会话、空间、片段、内部服务认证、Agent Scope 和凭据撤销 6 项实时边界测试通过 |
+| 浏览器 | 治理工作台、画像、内容元素、切片调权、实体合并拆分、白底图谱和相机按钮逐项点击；1280×720 无横向溢出，控制台错误/警告为 0 |
+| 冷启动 | `docker compose stop/start` 且不删除 Volume；12/12 服务 healthy；重启后 P3 专项与图谱 CRUD 再次通过 |
+
+P0–P3 专项自动化命令结果：单元测试 `102/102`、Semantica 合约 `19/19`、Harness `9/9`、API CRUD、P3 专项、图谱 CRUD、M10 三路检索、REST/MCP/CLI 和安全边界全部通过。浏览器临时分类值已回滚，目标文档最终分类为自动值“产品资料”，对应知识空间 `active_decisions=0`。
 
 ## 全局 UI/UX 重构专项回归
 

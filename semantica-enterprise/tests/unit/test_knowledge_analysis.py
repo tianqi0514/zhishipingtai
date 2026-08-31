@@ -10,6 +10,7 @@ from apps.api.routes import create_analysis_rule, create_analysis_rule_set
 from apps.api.schemas import AnalysisRuleCreate, AnalysisRuleSetCreate
 from apps.worker.tasks import _queue_automatic_inference
 from packages.platform.analysis import execute_inference_run, inference_result_rows
+from packages.platform.curation import create_decision
 from packages.platform.database import Base
 from packages.platform.models import (
     AnalysisRuleSet,
@@ -86,8 +87,8 @@ def test_rule_crud_and_persisted_inference_are_tenant_scoped() -> None:
         company = CanonicalEntity(
             tenant_id=tenant.id,
             space_id=space.id,
-            canonical_name="国联证券",
-            normalized_name="国联证券",
+            canonical_name="国联证券（自动值）",
+            normalized_name="国联证券（自动值）",
             entity_type="企业",
         )
         group = CanonicalEntity(
@@ -106,16 +107,17 @@ def test_rule_crud_and_persisted_inference_are_tenant_scoped() -> None:
         )
         db.add_all([company, group, policy])
         db.flush()
+        membership = Fact(
+            tenant_id=tenant.id,
+            space_id=space.id,
+            subject_entity_id=company.id,
+            predicate="隶属（自动值）",
+            object_entity_id=group.id,
+            confidence=1,
+        )
         db.add_all(
             [
-                Fact(
-                    tenant_id=tenant.id,
-                    space_id=space.id,
-                    subject_entity_id=company.id,
-                    predicate="属于",
-                    object_entity_id=group.id,
-                    confidence=1,
-                ),
+                membership,
                 Fact(
                     tenant_id=tenant.id,
                     space_id=space.id,
@@ -126,6 +128,30 @@ def test_rule_crud_and_persisted_inference_are_tenant_scoped() -> None:
                 ),
             ]
         )
+        db.flush()
+        with patch("packages.platform.curation.track_curation_decision"):
+            create_decision(
+                db,
+                user=admin,
+                space_id=space.id,
+                target_type="entity",
+                target_id=company.id,
+                field_path="canonical_name",
+                operation="override",
+                value="国联证券",
+                scope="space",
+            )
+            create_decision(
+                db,
+                user=admin,
+                space_id=space.id,
+                target_type="fact",
+                target_id=membership.id,
+                field_path="predicate",
+                operation="override",
+                value="属于",
+                scope="space",
+            )
         rule_set = db.get(AnalysisRuleSet, created_set["id"])
         run = InferenceRun(
             tenant_id=tenant.id,

@@ -50,6 +50,9 @@ class SearchIndexer:
                     "page_number": {"type": "integer"},
                     "structural_path": {"type": "keyword"},
                     "scope_tokens": {"type": "keyword"},
+                    "effective_hash": {"type": "keyword"},
+                    "curation_boost": {"type": "float"},
+                    "curation_decision_id": {"type": "keyword"},
                 }
             },
         }
@@ -92,6 +95,9 @@ class SearchIndexer:
                 "page_number": item.get("page_number"),
                 "structural_path": item.get("structural_path", ""),
                 "scope_tokens": item.get("scope_tokens", []),
+                "effective_hash": item.get("effective_hash"),
+                "curation_boost": float(item.get("curation_boost") or 1.0),
+                "curation_decision_id": item.get("curation_decision_id"),
             }
             for item in chunks
         }

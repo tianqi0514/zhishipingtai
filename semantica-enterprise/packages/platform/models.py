@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -633,6 +634,94 @@ class AutoDecisionRecord(Base, TimestampMixin):
     reversible: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class CurationBatch(Base, TimestampMixin):
+    """One business operation that can contain several immutable decisions."""
+
+    __tablename__ = "curation_batches"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    name: Mapped[str] = mapped_column(String(300), default="人工治理")
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    publish_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CurationDecision(Base, TimestampMixin):
+    """Append-only human decision; automatic Semantica rows remain untouched."""
+
+    __tablename__ = "curation_decisions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("curation_batches.id"), index=True)
+    document_id: Mapped[str | None] = mapped_column(ForeignKey("documents.id"), nullable=True, index=True)
+    version_id: Mapped[str | None] = mapped_column(ForeignKey("document_versions.id"), nullable=True, index=True)
+    target_type: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(500), index=True)
+    field_path: Mapped[str] = mapped_column(String(200), default="status")
+    operation: Mapped[str] = mapped_column(String(32), index=True)
+    before_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    after_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    reason_code: Mapped[str] = mapped_column(String(100), default="manual_correction")
+    reason_note: Mapped[str] = mapped_column(Text, default="")
+    base_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    scope: Mapped[str] = mapped_column(String(32), default="version_only")
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(ForeignKey("curation_decisions.id"), nullable=True)
+
+
+class CurationOverlay(Base, TimestampMixin):
+    """Materialized pointer to the currently effective decision for one field."""
+
+    __tablename__ = "curation_overlays"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "space_id", "target_type", "target_id", "field_path",
+            name="uq_curation_overlay_target",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    decision_id: Mapped[str] = mapped_column(ForeignKey("curation_decisions.id"), unique=True, index=True)
+    target_type: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(500), index=True)
+    field_path: Mapped[str] = mapped_column(String(200))
+    operation: Mapped[str] = mapped_column(String(32))
+    effective_value: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    base_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    scope: Mapped[str] = mapped_column(String(32), default="version_only")
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+
+
+class CurationCase(Base, TimestampMixin):
+    """Actionable governance issue, not an approval workflow."""
+
+    __tablename__ = "curation_cases"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "fingerprint", name="uq_curation_case_fingerprint"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    document_id: Mapped[str | None] = mapped_column(ForeignKey("documents.id"), nullable=True, index=True)
+    version_id: Mapped[str | None] = mapped_column(ForeignKey("document_versions.id"), nullable=True, index=True)
+    target_type: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(500), index=True)
+    case_type: Mapped[str] = mapped_column(String(100), index=True)
+    severity: Mapped[str] = mapped_column(String(32), default="medium", index=True)
+    title: Mapped[str] = mapped_column(String(500))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    handled_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Ontology(Base, TimestampMixin):
     __tablename__ = "ontologies"
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_ontology_code"),)
@@ -693,6 +782,26 @@ class IndexRelease(Base, TimestampMixin):
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     checksums: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="published")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class KnowledgeRelease(Base, TimestampMixin):
+    """Atomic business pointer pairing graph and search projections."""
+
+    __tablename__ = "knowledge_releases"
+    __table_args__ = (
+        UniqueConstraint("space_id", "release_number", name="uq_knowledge_release_number"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    release_number: Mapped[int] = mapped_column(Integer)
+    graph_release_id: Mapped[str] = mapped_column(ForeignKey("graph_releases.id"), index=True)
+    index_release_id: Mapped[str] = mapped_column(ForeignKey("index_releases.id"), index=True)
+    curation_batch_id: Mapped[str | None] = mapped_column(ForeignKey("curation_batches.id"), nullable=True)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="published", index=True)
+    validation_report: Mapped[dict] = mapped_column(JSON, default=dict)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

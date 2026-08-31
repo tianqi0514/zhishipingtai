@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from packages.platform.models import (
     ChunkPolicy,
     ConflictCase,
     ContentElement,
+    CurationBatch,
     Document,
     DocumentProfile,
     DocumentVersion,
@@ -38,7 +40,16 @@ from packages.platform.models import (
     SourceConnector,
 )
 from packages.platform.analysis import execute_inference_run
+from packages.platform.curation import (
+    constrained_canonical_entity,
+    effective_elements,
+    entity_pair_constraints,
+    invalidate_inference_for_space,
+    upsert_conflict_cases,
+    upsert_profile_cases,
+)
 from packages.platform.graph_release import publish_graph_snapshot
+from packages.platform.index_release import activate_knowledge_release, publish_index_snapshot
 from packages.platform.security import decrypt_secret
 from packages.platform.storage import object_storage
 from packages.semantica_adapter import ingest_source, parse_document, track_elements
@@ -617,7 +628,13 @@ def _canonical_for_name(
 
     canonical_name = EntityNormalizer().normalize_entity(name, entity_type=entity_type)
     normalized_name = canonical_name.casefold()
-    row = db.scalar(
+    row = constrained_canonical_entity(
+        db,
+        tenant_id=tenant_id,
+        space_id=space_id,
+        normalized_name=normalized_name,
+        entity_type=entity_type,
+    ) or db.scalar(
         select(CanonicalEntity).where(
             CanonicalEntity.space_id == space_id,
             CanonicalEntity.normalized_name == normalized_name,
@@ -839,6 +856,9 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         job.progress = 1
         document.status = "processing"
         db.commit()
+        prior_parse_summary = deepcopy(version.parse_summary or {})
+        rollback_chunk_state: dict[str, dict[str, Any]] = {}
+        rollback_fact_state: dict[str, dict[str, Any]] = {}
         try:
             _step(db, job.id, "normalize_split", 1, "running")
             old_chunks = list(db.scalars(select(Chunk).where(Chunk.version_id == version.id)))
@@ -859,42 +879,54 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         db.scalars(select(Chunk).where(Chunk.version_id == previous_version.id))
                     )
             reusable_snapshots = _reusable_extraction_snapshots(db, reuse_source_chunks)
+            existing_chunks = {row.chunk_id: row for row in old_chunks}
             if old_chunks:
                 old_ids = [row.id for row in old_chunks]
-                db.execute(delete(Fact).where(Fact.source_chunk_id.in_(old_ids)))
+                chunk_state_fields = (
+                    "element_id", "chunk_policy_id", "ordinal", "text", "content_hash",
+                    "structural_path", "page_number", "source_span", "scope_tokens",
+                    "status", "deleted_at",
+                )
+                rollback_chunk_state = {
+                    row.id: {field: deepcopy(getattr(row, field)) for field in chunk_state_fields}
+                    for row in old_chunks
+                }
+                old_facts = list(db.scalars(select(Fact).where(Fact.source_chunk_id.in_(old_ids))))
+                fact_state_fields = (
+                    "subject_entity_id", "predicate", "object_entity_id", "object_value",
+                    "confidence", "scope_tokens", "status", "deleted_at",
+                )
+                rollback_fact_state = {
+                    fact.id: {field: deepcopy(getattr(fact, field)) for field in fact_state_fields}
+                    for fact in old_facts
+                }
+                for fact in old_facts:
+                    fact.status = "superseded"
                 run_ids = list(db.scalars(select(ExtractionRun.id).where(ExtractionRun.version_id == version.id)))
                 if run_ids:
                     db.execute(delete(EventAssertion).where(EventAssertion.run_id.in_(run_ids)))
                     db.execute(delete(RelationAssertion).where(RelationAssertion.run_id.in_(run_ids)))
                     db.execute(delete(EntityMention).where(EntityMention.run_id.in_(run_ids)))
                     db.execute(delete(ExtractionRun).where(ExtractionRun.id.in_(run_ids)))
-                db.execute(delete(Chunk).where(Chunk.version_id == version.id))
-                db.flush()
-                valid_chunk_ids = set(
-                    db.scalars(
-                        select(Chunk.id).where(
-                            Chunk.space_id == document.space_id,
-                            Chunk.deleted_at.is_(None),
-                        )
-                    )
-                )
+                for old_chunk in old_chunks:
+                    old_chunk.status = "superseded"
                 for case in db.scalars(
                     select(ConflictCase).where(
                         ConflictCase.space_id == document.space_id,
                         ConflictCase.deleted_at.is_(None),
                     )
                 ):
-                    source_ids = set(case.source_chunk_ids or [])
-                    if source_ids and not source_ids.issubset(valid_chunk_ids):
+                    if set(case.source_chunk_ids or []) & set(old_ids):
                         db.delete(case)
                 db.commit()
-            elements = list(
+            raw_elements = list(
                 db.scalars(
                     select(ContentElement)
                     .where(ContentElement.version_id == version.id, ContentElement.deleted_at.is_(None))
                     .order_by(ContentElement.ordinal)
                 )
             )
+            elements = effective_elements(db, raw_elements, version.id)
             chunks: list[Chunk] = []
             reused_extractions: dict[str, dict[str, Any]] = {}
             global_ordinal = 0
@@ -910,23 +942,37 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     config=chunk_policy.config or {},
                 )
                 for item in generated:
-                    row = Chunk(
-                        tenant_id=version.tenant_id,
-                        space_id=document.space_id,
-                        document_id=document.id,
-                        version_id=version.id,
-                        element_id=element.id,
-                        chunk_policy_id=chunk_policy.id,
-                        chunk_id=item.chunk_id,
-                        ordinal=global_ordinal,
-                        text=item.text,
-                        content_hash=item.content_hash,
-                        structural_path=element.structural_path,
-                        page_number=element.page_number,
-                        source_span={"start": item.start_index, "end": item.end_index, **item.metadata},
-                        scope_tokens=element.scope_tokens or [],
-                    )
-                    db.add(row)
+                    row = existing_chunks.get(item.chunk_id)
+                    if row is None:
+                        row = Chunk(
+                            tenant_id=version.tenant_id,
+                            space_id=document.space_id,
+                            document_id=document.id,
+                            version_id=version.id,
+                            element_id=element.id,
+                            chunk_policy_id=chunk_policy.id,
+                            chunk_id=item.chunk_id,
+                            ordinal=global_ordinal,
+                            text=item.text,
+                            content_hash=item.content_hash,
+                            structural_path=element.structural_path,
+                            page_number=element.page_number,
+                            source_span={"start": item.start_index, "end": item.end_index, **item.metadata},
+                            scope_tokens=element.scope_tokens or [],
+                        )
+                        db.add(row)
+                    else:
+                        row.element_id = element.id
+                        row.chunk_policy_id = chunk_policy.id
+                        row.ordinal = global_ordinal
+                        row.text = item.text
+                        row.content_hash = item.content_hash
+                        row.structural_path = element.structural_path
+                        row.page_number = element.page_number
+                        row.source_span = {"start": item.start_index, "end": item.end_index, **item.metadata}
+                        row.scope_tokens = element.scope_tokens or []
+                        row.status = "staged"
+                        row.deleted_at = None
                     snapshot = reusable_snapshots.get((element.structural_path, item.content_hash))
                     if snapshot:
                         row.source_span = {
@@ -1007,6 +1053,8 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 generated_at=now(),
             )
             db.add(profile)
+            db.flush()
+            upsert_profile_cases(db, profile)
             if profile.tags:
                 document.tags = sorted(set(document.tags or []) | set(profile.tags))
             version.parse_summary = {
@@ -1156,10 +1204,17 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     for row in mentions
                 ],
                 similarity_threshold=governance_policy.similarity_threshold,
+                constraints=entity_pair_constraints(db, version.tenant_id, document.space_id),
             )
             mention_entity: dict[str, CanonicalEntity] = {}
             for item in governed:
-                entity = db.scalar(
+                entity = constrained_canonical_entity(
+                    db,
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    normalized_name=item.normalized_name,
+                    entity_type=item.entity_type,
+                ) or db.scalar(
                     select(CanonicalEntity).where(
                         CanonicalEntity.space_id == document.space_id,
                         CanonicalEntity.normalized_name == item.normalized_name,
@@ -1205,8 +1260,15 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     continue
                 subject = _canonical_for_name(db, tenant_id=version.tenant_id, space_id=document.space_id, name=relation.subject_name, confidence=relation.confidence, scope_tokens=relation.scope_tokens)
                 obj = _canonical_for_name(db, tenant_id=version.tenant_id, space_id=document.space_id, name=relation.object_name, confidence=relation.confidence, scope_tokens=relation.scope_tokens)
-                db.add(
-                    Fact(
+                fact = db.scalar(select(Fact).where(
+                    Fact.space_id == document.space_id,
+                    Fact.subject_entity_id == subject.id,
+                    Fact.predicate == relation.predicate,
+                    Fact.object_entity_id == obj.id,
+                    Fact.source_chunk_id == relation.chunk_id,
+                ).order_by(Fact.created_at.desc()).limit(1))
+                if fact is None:
+                    fact = Fact(
                         tenant_id=version.tenant_id,
                         space_id=document.space_id,
                         subject_entity_id=subject.id,
@@ -1216,13 +1278,19 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         confidence=relation.confidence,
                         scope_tokens=relation.scope_tokens,
                     )
-                )
+                    db.add(fact)
+                else:
+                    fact.confidence = relation.confidence
+                    fact.scope_tokens = relation.scope_tokens
+                    fact.status = "published"
+                    fact.deleted_at = None
                 relation.status = "published"
                 published_facts += 1
             for mention in mentions:
                 mention.status = "published" if mention.mention_id in mention_entity else "rejected"
             db.commit()
             conflicts = _detect_and_resolve_conflicts(db, tenant_id=version.tenant_id, space_id=document.space_id, policy=governance_policy)
+            upsert_conflict_cases(db, version.tenant_id, document.space_id)
             db.commit()
             governance_metrics = {"canonical_entities": len(governed), "facts": published_facts, "conflicts": conflicts, "decisions": len(decisions)}
             _step(db, job.id, "governance", 4, "succeeded", governance_metrics)
@@ -1249,78 +1317,36 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             _progress(db, job, 78)
 
             _step(db, job.id, "index_publish", 6, "running")
-            current_chunks: list[dict[str, Any]] = []
-            for row in db.scalars(select(Chunk).where(Chunk.space_id == document.space_id, Chunk.deleted_at.is_(None))):
-                owner = db.get(Document, row.document_id)
-                if owner is None or owner.deleted_at is not None or owner.current_version_id != row.version_id:
-                    continue
-                current_chunks.append(
-                    {
-                        "id": search_point_id(row.chunk_id),
-                        "chunk_db_id": row.id,
-                        "tenant_id": row.tenant_id,
-                        "space_id": row.space_id,
-                        "document_id": row.document_id,
-                        "version_id": row.version_id,
-                        "chunk_id": row.chunk_id,
-                        "title": owner.title,
-                        "text": row.text,
-                        "page_number": row.page_number,
-                        "structural_path": row.structural_path,
-                        "scope_tokens": row.scope_tokens,
-                    }
-                )
-            index_number = (db.scalar(select(func.max(IndexRelease.release_number)).where(IndexRelease.space_id == document.space_id)) or 0) + 1
-            embedder = SemanticEmbedder(embedding_model.model_name, embedding_model.config or {})
-            previous_release = db.scalar(
-                select(IndexRelease)
-                .where(
-                    IndexRelease.space_id == document.space_id,
-                    IndexRelease.status == "published",
-                    IndexRelease.deleted_at.is_(None),
-                )
-                .order_by(IndexRelease.release_number.desc())
-            )
-            reusable_collection = (
-                previous_release.qdrant_collection
-                if previous_release
-                and previous_release.model_config_id == embedding_model.id
-                and previous_release.embedding_dimension == embedder.dimension
-                else None
-            )
-            index_result = SearchIndexer(opensearch_url=settings.opensearch_url, qdrant_url=settings.qdrant_url).build_release(
+            release, index_result = publish_index_snapshot(
+                db,
                 tenant_id=version.tenant_id,
                 space_id=document.space_id,
-                release_number=index_number,
-                chunks=current_chunks,
-                embedder=embedder,
-                previous_collection=reusable_collection,
+                graph_release=graph_release,
+                embedding_model=embedding_model,
             )
-            release = IndexRelease(
+            index_number = release.release_number
+            knowledge_release = activate_knowledge_release(
+                db,
                 tenant_id=version.tenant_id,
                 space_id=document.space_id,
-                release_number=index_number,
-                opensearch_index=index_result["opensearch_index"],
-                qdrant_collection=index_result["qdrant_collection"],
-                graph_release_id=graph_release.id,
-                model_config_id=embedding_model.id,
-                embedding_dimension=index_result["dimension"],
-                document_count=len({item["document_id"] for item in current_chunks}),
-                chunk_count=len(current_chunks),
-                checksums={"chunks": index_result["checksum"]},
-                published_at=now(),
+                graph_release=graph_release,
+                index_release=release,
             )
-            db.add(release)
             for row in chunks:
                 row.status = "published"
             version.parse_summary = {**(version.parse_summary or {}), "knowledge_status": "published", "chunks": len(chunks), "entities": entity_count, "facts": published_facts, "graph_release": graph_number, "index_release": index_number}
             document.status = "ready"
             job.status = "succeeded"
             job.progress = 100
-            job.result = {"version_id": version.id, "chunks": len(chunks), "entities": entity_count, "relations": relation_count, "events": event_count, "facts": published_facts, "graph_release": graph_number, "index_release": index_number}
+            job.result = {"version_id": version.id, "chunks": len(chunks), "entities": entity_count, "relations": relation_count, "events": event_count, "facts": published_facts, "graph_release": graph_number, "index_release": index_number, "knowledge_release": knowledge_release.release_number}
             job.finished_at = now()
+            curation_batch = db.get(CurationBatch, (job.input or {}).get("curation_batch_id"))
+            if curation_batch:
+                curation_batch.status = "published"
+                curation_batch.published_at = now()
+                curation_batch.publish_error = None
             db.commit()
-            _step(db, job.id, "index_publish", 6, "succeeded", {"release": index_number, "chunks": len(current_chunks), "dimension": embedder.dimension})
+            _step(db, job.id, "index_publish", 6, "succeeded", {"release": index_number, "chunks": release.chunk_count, "dimension": release.embedding_dimension, "embedded": index_result["embedded_count"], "reused": index_result["reused_vector_count"]})
             automatic_runs = _queue_automatic_inference(
                 db,
                 tenant_id=version.tenant_id,
@@ -1342,9 +1368,37 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             if job is None:
                 return {"status": "failed", "error": message}
             if version:
-                version.parse_summary = {**(version.parse_summary or {}), "knowledge_status": "failed", "knowledge_error": message[:1000]}
+                if rollback_chunk_state:
+                    current_chunks = list(db.scalars(select(Chunk).where(Chunk.version_id == version.id)))
+                    current_chunk_ids = [row.id for row in current_chunks]
+                    for row in current_chunks:
+                        snapshot = rollback_chunk_state.get(row.id)
+                        if snapshot:
+                            for field, value in snapshot.items():
+                                setattr(row, field, deepcopy(value))
+                        else:
+                            row.status = "superseded"
+                    if current_chunk_ids:
+                        for fact in db.scalars(select(Fact).where(Fact.source_chunk_id.in_(current_chunk_ids))):
+                            snapshot = rollback_fact_state.get(fact.id)
+                            if snapshot:
+                                for field, value in snapshot.items():
+                                    setattr(fact, field, deepcopy(value))
+                            else:
+                                fact.status = "superseded"
+                    version.parse_summary = {
+                        **prior_parse_summary,
+                        "curation_status": "publish_failed",
+                        "curation_error": message[:1000],
+                    }
+                else:
+                    version.parse_summary = {**(version.parse_summary or {}), "knowledge_status": "failed", "knowledge_error": message[:1000]}
             if document:
                 document.status = "ready"
+            curation_batch = db.get(CurationBatch, (job.input or {}).get("curation_batch_id"))
+            if curation_batch:
+                curation_batch.status = "publish_failed"
+                curation_batch.publish_error = message[:2000]
             run = db.scalar(select(ExtractionRun).where(ExtractionRun.version_id == version_id).order_by(ExtractionRun.created_at.desc()))
             if run and run.status == "running":
                 run.status = "failed"
@@ -1355,6 +1409,115 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 running.detail = {"message": message[:1000]}
                 running.finished_at = now()
             _fail(db, job, "KNOWLEDGE_PROCESS_FAILED", message)
+            return {"status": "failed", "error": message}
+
+
+@celery_app.task(bind=True, autoretry_for=(), name="curation.publish_space")
+def publish_curation_task(self, job_id: str) -> dict[str, Any]:
+    """Rebuild graph and search projections after a non-parser curation decision."""
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        if job is None:
+            return {"status": "missing"}
+        space_id = str((job.input or {}).get("space_id") or "")
+        batch_id = (job.input or {}).get("batch_id")
+        batch = db.get(CurationBatch, batch_id) if batch_id else None
+        job.status = "running"
+        job.started_at = now()
+        job.attempts += 1
+        job.progress = 5
+        db.commit()
+        try:
+            _step(db, job.id, "resolve_effective", 1, "running")
+            invalidated = invalidate_inference_for_space(db, job.tenant_id, space_id)
+            _step(db, job.id, "resolve_effective", 1, "succeeded", {"invalidated_inference": invalidated})
+            _progress(db, job, 25)
+
+            _step(db, job.id, "graph_publish", 2, "running")
+            graph_release = publish_graph_snapshot(db, job.tenant_id, space_id)
+            db.flush()
+            _step(db, job.id, "graph_publish", 2, "succeeded", {"release": graph_release.release_number})
+            _progress(db, job, 60)
+
+            _step(db, job.id, "index_publish", 3, "running")
+            try:
+                index_release, index_result = publish_index_snapshot(
+                    db,
+                    tenant_id=job.tenant_id,
+                    space_id=space_id,
+                    graph_release=graph_release,
+                )
+            except RuntimeError as exc:
+                # A freshly-created graph space may legitimately have no
+                # document/index release yet.  The graph projection is still
+                # publishable; the first document pipeline will create the
+                # composite knowledge release later.
+                if "尚无向量模型发布记录" not in str(exc):
+                    raise
+                _step(
+                    db,
+                    job.id,
+                    "index_publish",
+                    3,
+                    "succeeded",
+                    {"skipped": True, "reason": "space_has_no_search_index"},
+                )
+                if batch:
+                    batch.status = "published"
+                    batch.published_at = now()
+                    batch.publish_error = None
+                job.status = "succeeded"
+                job.progress = 100
+                job.result = {
+                    "space_id": space_id,
+                    "graph_release": graph_release.release_number,
+                    "index_release": None,
+                    "knowledge_release": None,
+                    "invalidated_inference": invalidated,
+                    "warnings": ["space_has_no_search_index"],
+                }
+                job.finished_at = now()
+                db.commit()
+                return job.result
+            knowledge_release = activate_knowledge_release(
+                db,
+                tenant_id=job.tenant_id,
+                space_id=space_id,
+                graph_release=graph_release,
+                index_release=index_release,
+                curation_batch_id=batch.id if batch else None,
+            )
+            _step(db, job.id, "index_publish", 3, "succeeded", {
+                "release": index_release.release_number,
+                "embedded": index_result["embedded_count"],
+                "reused": index_result["reused_vector_count"],
+            })
+            if batch:
+                batch.status = "published"
+                batch.published_at = now()
+                batch.publish_error = None
+            job.status = "succeeded"
+            job.progress = 100
+            job.result = {
+                "space_id": space_id,
+                "graph_release": graph_release.release_number,
+                "index_release": index_release.release_number,
+                "knowledge_release": knowledge_release.release_number,
+                "invalidated_inference": invalidated,
+            }
+            job.finished_at = now()
+            db.commit()
+            return job.result
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            db.rollback()
+            job = db.get(Job, job_id)
+            batch = db.get(CurationBatch, batch_id) if batch_id else None
+            if batch:
+                batch.status = "publish_failed"
+                batch.publish_error = message[:2000]
+            if job:
+                _fail(db, job, "CURATION_PUBLISH_FAILED", message)
             return {"status": "failed", "error": message}
 
 

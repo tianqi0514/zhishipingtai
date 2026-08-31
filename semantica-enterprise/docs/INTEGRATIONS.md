@@ -1,5 +1,7 @@
 # REST、MCP 与 CLI
 
+管理页面的“知识服务 / 服务开放”为 REST、MCP、CLI 与 DeepSeek Harness 分别提供可点击预览的接入手册；预览内容随应用镜像交付，不依赖外部文档站点。
+
 ## REST/OpenAPI
 
 登录后使用 Bearer Token。完整 Schema 见 <http://localhost:8080/docs>。

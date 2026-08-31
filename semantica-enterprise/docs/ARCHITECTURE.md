@@ -34,6 +34,23 @@ flowchart TB
 
 版本更新比较文件 SHA-256、元素稳定 ID 和 Chunk 内容 Hash。未变化 Chunk 复用抽取结果与向量；新发布成功前旧发布继续服务，检索只读取文档当前版本。
 
+## 自动治理与人工治理
+
+人工治理不修改 Semantica 自动产物。平台保留四层数据：不可变来源与版本、Semantica 自动结果、人工决定与约束、面向检索和图谱的有效投影。`CurationDecision` 是追加式业务事实，`CurationOverlay` 只保存当前生效指针；回滚恢复上一个决定或自动值。
+
+```mermaid
+flowchart LR
+  RAW["来源文件 / 原始版本"] --> AUTO["Semantica 自动结果\n元素 / 画像 / Chunk / 实体 / 事实"]
+  AUTO --> EFFECTIVE["有效投影解析器"]
+  HUMAN["人工决定与约束\n修正 / 屏蔽 / 合并 / 拆分 / 调权"] --> EFFECTIVE
+  EFFECTIVE --> RELEASE["KnowledgeRelease\nGraphRelease + IndexRelease"]
+  RELEASE --> SERVE["检索 / 图谱 / Agent / MCP / CLI"]
+```
+
+内容元素修正会重新进入 Semantica Splitter、语义抽取和治理链；Chunk 修正只影响检索投影；实体/事实决定在 FalkorDB 发布前合成。实体 must-link/cannot-link 同时传入 Semantica 归一化聚类，并在后续重加工时用于规范实体映射，避免已合并实体再次生成。人工屏蔽证据后，依赖它的推导事实会被失效，再由后续推理运行重算。
+
+Semantica Analyze/Datalog 和只读 SPARQL 同样读取有效实体、有效事实与人工名称；人工屏蔽、关系修正或实体合并不会只影响图谱页面而遗漏规则推理。
+
 ## 会话与事件
 
 Harness 的 append-only Session JSONL 是 Agent 上下文权威源；平台保存业务会话映射、消息只读投影、检索轨迹与引用投影。SSE 事件包括 `turn_started`、`step_started`、`retrieval_started`、`tool_started`、`tool_finished`、`retrieval_ranked`、`answer_delta`、`citation`、`warning`、`turn_completed/failed/cancelled`。

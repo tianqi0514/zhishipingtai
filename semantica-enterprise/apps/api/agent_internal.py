@@ -18,6 +18,7 @@ from apps.api.utils import serialize_row
 from packages.platform.audit import audit
 from packages.platform.database import get_db
 from packages.platform.knowledge_search import execute_hybrid_search
+from packages.platform.curation import effective_chunk_text, effective_entity, effective_fact
 from packages.platform.analysis import execute_inference_run, inference_result_rows
 from packages.platform.models import (
     AnalysisRuleSet,
@@ -281,12 +282,17 @@ def agent_get_fragment(
     version = db.get(DocumentVersion, chunk.version_id)
     if document is None or version is None or document.tenant_id != claims.get("tenant_id"):
         raise HTTPException(404, "来源文档不存在")
+    try:
+        effective_text, curation = effective_chunk_text(db, chunk, include_superseded=True)
+    except ValueError as exc:
+        raise HTTPException(404, "知识片段已被人工屏蔽") from exc
     return {
         "chunk_id": chunk.id,
         "document_id": document.id,
         "version_id": version.id,
         "document_title": document.title,
-        "text": chunk.text,
+        "text": effective_text,
+        "curation": curation,
         "page_number": chunk.page_number,
         "structural_path": chunk.structural_path,
         "document_tags": document.tags or [],
@@ -319,17 +325,22 @@ def agent_graph_query(
         db.scalars(
             select(CanonicalEntity).where(
                 CanonicalEntity.space_id.in_(spaces),
-                CanonicalEntity.status == "published",
                 _active(CanonicalEntity),
             )
         )
     )
+    entity_values = {row.id: effective_entity(db, row) for row in entity_rows}
+    entity_rows = [
+        row for row in entity_rows
+        if entity_values[row.id].get("status") in {"published", "active"}
+    ]
+    active_entity_ids = {row.id for row in entity_rows}
     if entity_term:
         entity_rows = [
             row
             for row in entity_rows
-            if entity_term in row.canonical_name.casefold()
-            or any(entity_term in alias.casefold() for alias in (row.aliases or []))
+            if entity_term in entity_values[row.id]["canonical_name"].casefold()
+            or any(entity_term in alias.casefold() for alias in (entity_values[row.id]["aliases"] or []))
         ]
     entity_rows = entity_rows[: payload.limit]
     entity_ids = {row.id for row in entity_rows}
@@ -342,14 +353,24 @@ def agent_graph_query(
             )
         )
     )
+    fact_values = {row.id: effective_fact(db, row) for row in fact_rows}
+    fact_rows = [
+        row for row in fact_rows
+        if fact_values[row.id].get("status") == "published"
+        and fact_values[row.id].get("subject_entity_id") in active_entity_ids
+        and (
+            not fact_values[row.id].get("object_entity_id")
+            or fact_values[row.id].get("object_entity_id") in active_entity_ids
+        )
+    ]
     if entity_ids:
         fact_rows = [
             row
             for row in fact_rows
-            if row.subject_entity_id in entity_ids or row.object_entity_id in entity_ids
+            if fact_values[row.id]["subject_entity_id"] in entity_ids or fact_values[row.id]["object_entity_id"] in entity_ids
         ]
     if relation_term:
-        fact_rows = [row for row in fact_rows if relation_term in row.predicate.casefold()]
+        fact_rows = [row for row in fact_rows if relation_term in fact_values[row.id]["predicate"].casefold()]
     inferred_rows = list(
         db.scalars(
             select(InferredFact).where(
@@ -359,6 +380,11 @@ def agent_graph_query(
             )
         )
     )
+    inferred_rows = [
+        row for row in inferred_rows
+        if row.subject_entity_id in active_entity_ids
+        and (not row.object_entity_id or row.object_entity_id in active_entity_ids)
+    ]
     if entity_ids:
         inferred_rows = [
             row for row in inferred_rows
@@ -381,13 +407,21 @@ def agent_graph_query(
             .order_by(InferenceEvidence.inferred_fact_id, InferenceEvidence.ordinal)
         ):
             inferred_evidence.setdefault(evidence.inferred_fact_id, evidence)
-    all_entity_ids = entity_ids | {row.subject_entity_id for row, _ in combined_facts} | {
-        row.object_entity_id for row in selected_asserted if row.object_entity_id
+    all_entity_ids = entity_ids | {
+        fact_values[row.id]["subject_entity_id"] if origin == "asserted" else row.subject_entity_id
+        for row, origin in combined_facts
+    } | {
+        fact_values[row.id]["object_entity_id"] for row in selected_asserted if fact_values[row.id]["object_entity_id"]
     } | {row.object_entity_id for row in selected_inferred if row.object_entity_id}
     entities = {
         row.id: row
         for row in db.scalars(select(CanonicalEntity).where(CanonicalEntity.id.in_(all_entity_ids)))
     } if all_entity_ids else {}
+    final_entity_values = {row.id: effective_entity(db, row) for row in entities.values()}
+    entities = {
+        row_id: row for row_id, row in entities.items()
+        if final_entity_values[row_id].get("status") in {"published", "active"}
+    }
     release = db.scalar(
         select(func.max(GraphRelease.release_number)).where(
             GraphRelease.space_id.in_(spaces),
@@ -401,11 +435,11 @@ def agent_graph_query(
         "entities": [
             {
                 "id": row.id,
-                "name": row.canonical_name,
-                "type": row.entity_type,
-                "aliases": row.aliases or [],
-                "properties": row.properties or {},
-                "confidence": row.confidence,
+                "name": final_entity_values[row.id]["canonical_name"],
+                "type": final_entity_values[row.id]["entity_type"],
+                "aliases": final_entity_values[row.id]["aliases"],
+                "properties": final_entity_values[row.id]["properties"],
+                "confidence": final_entity_values[row.id]["confidence"],
                 "space_id": row.space_id,
             }
             for row in entities.values()
@@ -413,10 +447,10 @@ def agent_graph_query(
         "facts": [
             {
                 "id": row.id,
-                "subject": entities[row.subject_entity_id].canonical_name if row.subject_entity_id in entities else row.subject_entity_id,
-                "predicate": row.predicate,
-                "object": entities[row.object_entity_id].canonical_name if row.object_entity_id in entities else row.object_value,
-                "confidence": row.confidence,
+                "subject": final_entity_values[fact_values[row.id]["subject_entity_id"]]["canonical_name"] if fact_values[row.id]["subject_entity_id"] in entities else fact_values[row.id]["subject_entity_id"],
+                "predicate": fact_values[row.id]["predicate"],
+                "object": final_entity_values[fact_values[row.id]["object_entity_id"]]["canonical_name"] if fact_values[row.id]["object_entity_id"] in entities else fact_values[row.id]["object_value"],
+                "confidence": fact_values[row.id]["confidence"],
                 "evidence_chunk_id": row.source_chunk_id,
                 "space_id": row.space_id,
                 "origin_type": "asserted",

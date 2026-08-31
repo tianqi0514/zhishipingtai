@@ -430,6 +430,46 @@ class GovernancePolicyUpdate(BaseModel):
     is_default: bool | None = None
 
 
+class CurationDecisionCreate(BaseModel):
+    space_id: str
+    target_type: Literal[
+        "document_profile", "content_element", "chunk", "entity", "fact",
+        "entity_pair", "quality_issue",
+    ]
+    target_id: str = Field(min_length=1, max_length=500)
+    version_id: str | None = None
+    field_path: str = Field(default="status", min_length=1, max_length=200)
+    operation: Literal[
+        "accept", "override", "reject", "suppress", "restore", "merge", "split",
+        "must_link", "cannot_link", "lock", "unlock", "resolve", "ignore",
+    ]
+    value: Any = None
+    scope: Literal["version_only", "document_future", "space"] = "version_only"
+    reason_code: str = Field(default="manual_correction", max_length=100)
+    reason_note: str = Field(default="", max_length=2000)
+    base_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
+    batch_id: str | None = None
+    auto_publish: bool = True
+
+
+class CurationBatchCreate(BaseModel):
+    space_id: str
+    name: str = Field(default="批量人工治理", min_length=1, max_length=300)
+
+
+class CurationCaseUpdate(BaseModel):
+    status: Literal["open", "handled", "ignored"]
+
+
+class EntityPairCuration(BaseModel):
+    space_id: str
+    left_entity_id: str
+    right_entity_id: str
+    operation: Literal["must_link", "cannot_link", "merge", "split"]
+    winner_entity_id: str | None = None
+    reason_note: str = Field(default="", max_length=2000)
+
+
 class OntologyCreate(BaseModel):
     space_id: str | None = None
     code: str = Field(min_length=1, max_length=100)

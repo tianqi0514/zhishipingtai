@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from packages.semantica_adapter.analyze import run_graph_inference
 
+from .curation import effective_entity, effective_fact
 from .models import (
     AnalysisRule,
     AnalysisRuleVersion,
@@ -89,16 +90,17 @@ def execute_inference_run(
     db.commit()
     _progress(progress, 20, "rules", {"rules": len(rules)})
 
-    entities = {
-        row.id: row
-        for row in db.scalars(
-            select(CanonicalEntity).where(
-                CanonicalEntity.tenant_id == run.tenant_id,
-                CanonicalEntity.space_id.in_(run.space_ids),
-                CanonicalEntity.status == "published",
-                _active(CanonicalEntity),
-            )
+    entity_rows = list(db.scalars(
+        select(CanonicalEntity).where(
+            CanonicalEntity.tenant_id == run.tenant_id,
+            CanonicalEntity.space_id.in_(run.space_ids),
+            _active(CanonicalEntity),
         )
+    ))
+    entity_values = {row.id: effective_entity(db, row) for row in entity_rows}
+    entities = {
+        row.id: row for row in entity_rows
+        if entity_values[row.id].get("status") in {"published", "active"}
     }
     facts = list(
         db.scalars(
@@ -110,24 +112,28 @@ def execute_inference_run(
             )
         )
     )
+    fact_values = {row.id: effective_fact(db, row) for row in facts}
     fact_payload = []
     for row in facts:
-        subject = entities.get(row.subject_entity_id)
-        obj = entities.get(row.object_entity_id) if row.object_entity_id else None
-        if subject is None or (row.object_entity_id and obj is None):
+        effective = fact_values[row.id]
+        if effective.get("status") != "published":
+            continue
+        subject = entities.get(effective["subject_entity_id"])
+        obj = entities.get(effective["object_entity_id"]) if effective.get("object_entity_id") else None
+        if subject is None or (effective.get("object_entity_id") and obj is None):
             continue
         fact_payload.append(
             {
                 "id": row.id,
                 "space_id": row.space_id,
-                "subject_entity_id": row.subject_entity_id,
-                "subject_name": subject.canonical_name,
-                "predicate": row.predicate,
-                "object_entity_id": row.object_entity_id,
-                "object_name": obj.canonical_name if obj else None,
-                "object_value": row.object_value,
+                "subject_entity_id": effective["subject_entity_id"],
+                "subject_name": entity_values[subject.id]["canonical_name"],
+                "predicate": effective["predicate"],
+                "object_entity_id": effective["object_entity_id"],
+                "object_name": entity_values[obj.id]["canonical_name"] if obj else None,
+                "object_value": effective["object_value"],
                 "source_chunk_id": row.source_chunk_id,
-                "confidence": row.confidence,
+                "confidence": effective["confidence"],
             }
         )
     run.progress = 40
@@ -263,6 +269,7 @@ def inference_result_rows(db: Session, run_id: str) -> list[dict[str, Any]]:
     entities = {
         row.id: row for row in db.scalars(select(CanonicalEntity).where(CanonicalEntity.id.in_(entity_ids)))
     } if entity_ids else {}
+    entity_values = {row.id: effective_entity(db, row) for row in entities.values()}
     result: list[dict[str, Any]] = []
     for row in rows:
         evidence = list(
@@ -280,11 +287,11 @@ def inference_result_rows(db: Session, run_id: str) -> list[dict[str, Any]]:
                 "rule_version_id": row.rule_version_id,
                 "space_id": row.space_id,
                 "subject_entity_id": row.subject_entity_id,
-                "subject_name": entities[row.subject_entity_id].canonical_name
+                "subject_name": entity_values[row.subject_entity_id]["canonical_name"]
                 if row.subject_entity_id in entities else row.subject_entity_id,
                 "predicate": row.predicate,
                 "object_entity_id": row.object_entity_id,
-                "object_name": entities[row.object_entity_id].canonical_name
+                "object_name": entity_values[row.object_entity_id]["canonical_name"]
                 if row.object_entity_id in entities else row.object_value,
                 "confidence": row.confidence,
                 "status": row.status,

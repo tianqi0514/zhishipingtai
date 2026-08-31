@@ -18,8 +18,9 @@ def govern_entities(
     mentions: list[dict[str, Any]],
     *,
     similarity_threshold: float = 0.86,
+    constraints: dict[str, list[dict[str, Any]]] | None = None,
 ) -> tuple[list[GovernedEntity], list[dict[str, Any]]]:
-    """Normalize and cluster mentions with Semantica; returns reversible merge decisions."""
+    """Normalize and cluster with Semantica, then apply platform human constraints."""
     from semantica.deduplication.duplicate_detector import DuplicateDetector
     from semantica.normalize import EntityNormalizer
 
@@ -41,6 +42,22 @@ def govern_entities(
         [{"id": str(index), "name": item["name"], "type": item["entity_type"]} for index, item in enumerate(normalized)]
     ) if len(normalized) > 1 else []
     parent = list(range(len(normalized)))
+    constraint_rows = constraints or {}
+
+    def pair_key(left: str, right: str) -> tuple[str, str]:
+        values = sorted((left.strip().casefold(), right.strip().casefold()))
+        return values[0], values[1]
+
+    cannot_links = {
+        pair_key(str(item.get("left_name") or ""), str(item.get("right_name") or ""))
+        for item in constraint_rows.get("cannot_link", [])
+        if item.get("left_name") and item.get("right_name")
+    }
+    must_links = {
+        pair_key(str(item.get("left_name") or ""), str(item.get("right_name") or ""))
+        for item in constraint_rows.get("must_link", [])
+        if item.get("left_name") and item.get("right_name")
+    }
 
     def find(index: int) -> int:
         while parent[index] != index:
@@ -57,7 +74,9 @@ def govern_entities(
     for index, item in enumerate(normalized):
         key = (item["normalized_name"], item["entity_type"])
         if key in by_exact:
-            union(index, by_exact[key])
+            other = by_exact[key]
+            if pair_key(item["name"], normalized[other]["name"]) not in cannot_links:
+                union(index, other)
         else:
             by_exact[key] = index
     decisions: list[dict[str, Any]] = []
@@ -65,6 +84,8 @@ def govern_entities(
         left = int(candidate.entity1.get("id"))
         right = int(candidate.entity2.get("id"))
         if normalized[left]["entity_type"] != normalized[right]["entity_type"]:
+            continue
+        if pair_key(normalized[left]["name"], normalized[right]["name"]) in cannot_links:
             continue
         if float(candidate.confidence) >= similarity_threshold:
             union(left, right)
@@ -76,6 +97,13 @@ def govern_entities(
                     "confidence": float(candidate.confidence),
                 }
             )
+    for left, right in must_links:
+        left_indexes = [index for index, item in enumerate(normalized) if item["normalized_name"] == left]
+        right_indexes = [index for index, item in enumerate(normalized) if item["normalized_name"] == right]
+        for left_index in left_indexes:
+            for right_index in right_indexes:
+                if normalized[left_index]["entity_type"] == normalized[right_index]["entity_type"]:
+                    union(left_index, right_index)
     groups: dict[int, list[dict[str, Any]]] = {}
     for index, item in enumerate(normalized):
         groups.setdefault(find(index), []).append(item)

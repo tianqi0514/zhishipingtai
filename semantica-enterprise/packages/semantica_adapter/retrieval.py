@@ -20,12 +20,14 @@ def keyword_search(
         return []
     body = {
         "size": limit,
-        "query": {
-            "bool": {
-                "must": [{"multi_match": {"query": query, "fields": ["text^2", "title"]}}],
-                "filter": [{"terms": {"space_id": allowed_space_ids}}],
-            }
-        },
+        "query": {"function_score": {
+            "query": {"bool": {
+                    "must": [{"multi_match": {"query": query, "fields": ["text^2", "title"]}}],
+                    "filter": [{"terms": {"space_id": allowed_space_ids}}],
+            }},
+            "field_value_factor": {"field": "curation_boost", "factor": 1.0, "missing": 1.0},
+            "boost_mode": "multiply",
+        }},
         "highlight": {"fields": {"text": {"fragment_size": 240, "number_of_fragments": 1}}},
     }
     with httpx.Client(timeout=20) as client:
@@ -62,7 +64,11 @@ def vector_search(
         store.connect()
         store.get_collection(collection)
         if hasattr(store.client, "search"):
-            found = store.search_vectors(vector, limit=limit, filter={"space_id": allowed_space_ids})
+            found = store.search_vectors(
+                vector,
+                limit=min(200, max(limit, limit * 3)),
+                filter={"space_id": allowed_space_ids},
+            )
         else:
             from qdrant_client.models import FieldCondition, Filter, MatchAny
 
@@ -70,7 +76,7 @@ def vector_search(
                 collection_name=collection,
                 query=vector.tolist(),
                 query_filter=Filter(must=[FieldCondition(key="space_id", match=MatchAny(any=allowed_space_ids))]),
-                limit=limit,
+                limit=min(200, max(limit, limit * 3)),
                 with_payload=True,
             )
             found = [
@@ -81,10 +87,11 @@ def vector_search(
             metadata = item.get("metadata") or {}
             if metadata.get("space_id") not in allowed_space_ids:
                 continue
+            boost = max(0.1, min(5.0, float(metadata.get("curation_boost") or 1.0)))
             result.append(
                 {
                     "id": str(item["id"]),
-                    "score": float(item.get("score") or 0),
+                    "score": float(item.get("score") or 0) * boost,
                     "channel": "vector",
                     **metadata,
                     "snippet": html.escape(str(metadata.get("text") or "")[:240]),

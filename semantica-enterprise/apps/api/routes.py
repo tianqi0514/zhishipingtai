@@ -27,9 +27,13 @@ from apps.api.schemas import (
     AnalysisScenarioUpdate,
     ChunkPolicyCreate,
     ChunkPolicyUpdate,
+    CurationBatchCreate,
+    CurationCaseUpdate,
+    CurationDecisionCreate,
     DocumentUpdate,
     ExtractionPolicyCreate,
     ExtractionPolicyUpdate,
+    EntityPairCuration,
     GrantCreate,
     GovernancePolicyCreate,
     GovernancePolicyUpdate,
@@ -65,7 +69,13 @@ from apps.api.schemas import (
     UserUpdate,
 )
 from apps.api.utils import apply_patch, serialize_row
-from apps.worker.tasks import parse_version_task, process_version_task, run_inference_task, sync_source_task
+from apps.worker.tasks import (
+    parse_version_task,
+    process_version_task,
+    publish_curation_task,
+    run_inference_task,
+    sync_source_task,
+)
 from packages.platform.audit import audit
 from packages.platform.analysis import inference_result_rows
 from packages.platform.config import get_settings
@@ -82,6 +92,10 @@ from packages.platform.models import (
     ConflictCase,
     Conversation,
     ContentElement,
+    CurationBatch,
+    CurationCase,
+    CurationDecision,
+    CurationOverlay,
     Document,
     DocumentProfile,
     DocumentVersion,
@@ -96,6 +110,7 @@ from packages.platform.models import (
     Job,
     JobStep,
     KnowledgeSpace,
+    KnowledgeRelease,
     ModelConfig,
     Ontology,
     OntologyTerm,
@@ -112,6 +127,17 @@ from packages.platform.models import (
 )
 from packages.platform.knowledge_search import execute_hybrid_search
 from packages.platform.graph_release import publish_graph_snapshot
+from packages.platform.curation import (
+    create_decision,
+    effective_chunk_text,
+    effective_elements,
+    effective_entity,
+    effective_fact,
+    effective_profile,
+    rollback_decision,
+    stable_fingerprint,
+)
+from packages.platform.index_release import publish_index_snapshot as publish_effective_index_snapshot
 from packages.platform.security import (
     create_access_token,
     decrypt_secret,
@@ -125,10 +151,8 @@ from packages.semantica_adapter.file_safety import UnsafeFileError, validate_fil
 from packages.semantica_adapter.formats import FORMAT_CAPABILITIES
 from packages.semantica_adapter.ingest import ingest_source
 from packages.semantica_adapter.models import test_model_connection
-from packages.semantica_adapter.embedding import SemanticEmbedder
 from packages.semantica_adapter.graph import publish_graph, validate_graph
 from packages.semantica_adapter.retrieval import fuse_results, keyword_search, vector_search
-from packages.semantica_adapter.indexing import SearchIndexer, search_point_id
 from packages.semantica_adapter.analyze import (
     canonical_rule_dsl,
     compile_rule,
@@ -209,103 +233,12 @@ def _publish_index_snapshot(
     space_id: str,
     graph_release: GraphRelease,
 ) -> IndexRelease:
-    """Publish a complete current-version search snapshot for one space.
-
-    The previous Qdrant collection is passed to Semantica's adapter so stable
-    chunks reuse vectors.  This makes document deletion a release switch
-    instead of mutating an immutable historical release in place.
-    """
-    previous_release = db.scalar(
-        select(IndexRelease)
-        .where(
-            IndexRelease.tenant_id == tenant_id,
-            IndexRelease.space_id == space_id,
-            IndexRelease.status == "published",
-            _active(IndexRelease),
-        )
-        .order_by(IndexRelease.release_number.desc())
-        .limit(1)
-    )
-    if previous_release is None:
-        raise RuntimeError("知识空间尚无可继承的索引发布")
-    embedding_model = db.get(ModelConfig, previous_release.model_config_id)
-    if embedding_model is None or not embedding_model.enabled:
-        raise RuntimeError("当前索引对应的向量模型不可用")
-    chunks: list[dict[str, Any]] = []
-    for chunk in db.scalars(
-        select(Chunk).where(
-            Chunk.tenant_id == tenant_id,
-            Chunk.space_id == space_id,
-            Chunk.status == "published",
-            _active(Chunk),
-        )
-    ):
-        document = db.get(Document, chunk.document_id)
-        if (
-            document is None
-            or document.deleted_at is not None
-            or document.current_version_id != chunk.version_id
-        ):
-            continue
-        chunks.append(
-            {
-                "id": search_point_id(chunk.chunk_id),
-                "chunk_db_id": chunk.id,
-                "tenant_id": chunk.tenant_id,
-                "space_id": chunk.space_id,
-                "document_id": chunk.document_id,
-                "version_id": chunk.version_id,
-                "chunk_id": chunk.chunk_id,
-                "title": document.title,
-                "text": chunk.text,
-                "page_number": chunk.page_number,
-                "structural_path": chunk.structural_path,
-                "scope_tokens": chunk.scope_tokens,
-            }
-        )
-    release_number = (
-        db.scalar(
-            select(func.max(IndexRelease.release_number)).where(
-                IndexRelease.space_id == space_id
-            )
-        )
-        or 0
-    ) + 1
-    embedder = SemanticEmbedder(embedding_model.model_name, embedding_model.config or {})
-    result = SearchIndexer(
-        opensearch_url=settings.opensearch_url,
-        qdrant_url=settings.qdrant_url,
-    ).build_release(
+    release, _ = publish_effective_index_snapshot(
+        db,
         tenant_id=tenant_id,
         space_id=space_id,
-        release_number=release_number,
-        chunks=chunks,
-        embedder=embedder,
-        previous_collection=(
-            previous_release.qdrant_collection
-            if previous_release.embedding_dimension == embedder.dimension
-            else None
-        ),
+        graph_release=graph_release,
     )
-    release = IndexRelease(
-        tenant_id=tenant_id,
-        space_id=space_id,
-        release_number=release_number,
-        opensearch_index=result["opensearch_index"],
-        qdrant_collection=result["qdrant_collection"],
-        graph_release_id=graph_release.id,
-        model_config_id=embedding_model.id,
-        embedding_dimension=result["dimension"],
-        document_count=len({item["document_id"] for item in chunks}),
-        chunk_count=len(chunks),
-        checksums={
-            "chunks": result["checksum"],
-            "embedded_count": result["embedded_count"],
-            "reused_vector_count": result["reused_vector_count"],
-        },
-        published_at=datetime.now(timezone.utc),
-    )
-    db.add(release)
     return release
 
 
@@ -999,9 +932,30 @@ def delete_document(row_id: str, user: User = Depends(get_current_user), db: Ses
 def list_elements(version_id: str, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     version = _must(db, DocumentVersion, version_id, "版本"); document = _must(db, Document, version.document_id, "文档")
     require_space_permission(db, user, document.space_id, "read")
-    total = db.scalar(select(func.count()).select_from(ContentElement).where(ContentElement.version_id == version_id, _active(ContentElement))) or 0
-    rows = db.scalars(select(ContentElement).where(ContentElement.version_id == version_id, _active(ContentElement)).order_by(ContentElement.ordinal).offset(offset).limit(limit))
-    return {"total": total, "items": [serialize_row(x) for x in rows]}
+    raw_rows = list(db.scalars(select(ContentElement).where(ContentElement.version_id == version_id, _active(ContentElement)).order_by(ContentElement.ordinal)))
+    rows = effective_elements(db, raw_rows, version.id)
+    return {
+        "total": len(rows),
+        "items": [
+            {
+                "id": row.id,
+                "tenant_id": row.tenant_id,
+                "space_id": row.space_id,
+                "document_id": row.document_id,
+                "version_id": row.version_id,
+                "element_id": row.element_id,
+                "element_type": row.element_type,
+                "ordinal": row.ordinal,
+                "text": row.text,
+                "structural_path": row.structural_path,
+                "page_number": row.page_number,
+                "bbox": row.bbox,
+                "element_metadata": row.element_metadata,
+                "scope_tokens": row.scope_tokens,
+            }
+            for row in rows[offset:offset + limit]
+        ],
+    }
 
 
 @router.get("/versions/{version_id}/profile")
@@ -1013,15 +967,10 @@ def get_version_profile(
     version = _must(db, DocumentVersion, version_id, "版本")
     document = _must(db, Document, version.document_id, "文档")
     require_space_permission(db, user, document.space_id, "read")
-    profile = db.scalar(
-        select(DocumentProfile).where(
-            DocumentProfile.version_id == version.id,
-            _active(DocumentProfile),
-        )
-    )
-    if profile is None:
+    try:
+        return effective_profile(db, version)
+    except ValueError as exc:
         raise HTTPException(404, "该版本尚未生成治理画像")
-    return serialize_row(profile)
 
 
 @router.post("/versions/{version_id}/profile/retry")
@@ -1957,21 +1906,35 @@ def execute_analysis_sparql(
             select(CanonicalEntity).where(
                 CanonicalEntity.tenant_id == user.tenant_id,
                 CanonicalEntity.space_id.in_(space_ids),
-                CanonicalEntity.status == "published",
                 _active(CanonicalEntity),
             )
         )
     )
+    entity_values = {row.id: effective_entity(db, row) for row in entities}
+    entities = [
+        row for row in entities
+        if entity_values[row.id].get("status") in {"published", "active"}
+    ]
+    active_entity_ids = {row.id for row in entities}
     facts = list(
         db.scalars(
             select(Fact).where(
                 Fact.tenant_id == user.tenant_id,
                 Fact.space_id.in_(space_ids),
-                Fact.status == "published",
                 _active(Fact),
             )
         )
     )
+    fact_values = {row.id: effective_fact(db, row) for row in facts}
+    facts = [
+        row for row in facts
+        if fact_values[row.id].get("status") == "published"
+        and fact_values[row.id].get("subject_entity_id") in active_entity_ids
+        and (
+            not fact_values[row.id].get("object_entity_id")
+            or fact_values[row.id].get("object_entity_id") in active_entity_ids
+        )
+    ]
     inferred = list(
         db.scalars(
             select(InferredFact).where(
@@ -1982,14 +1945,23 @@ def execute_analysis_sparql(
             )
         )
     )
+    inferred = [
+        row for row in inferred
+        if row.subject_entity_id in active_entity_ids
+        and (not row.object_entity_id or row.object_entity_id in active_entity_ids)
+    ]
     started = time.perf_counter()
     try:
         result = run_readonly_sparql(
             entities=[
-                {"id": row.id, "name": row.canonical_name, "type": row.entity_type}
+                {
+                    "id": row.id,
+                    "name": entity_values[row.id]["canonical_name"],
+                    "type": entity_values[row.id]["entity_type"],
+                }
                 for row in entities
             ],
-            facts=[serialize_row(row) for row in facts],
+            facts=[{**serialize_row(row), **fact_values[row.id]} for row in facts],
             inferred_facts=[serialize_row(row) for row in inferred],
             query=payload.query,
         )
@@ -2014,6 +1986,342 @@ def execute_analysis_sparql(
     )
     db.commit()
     return {"query_id": query_run.id, "duration_ms": duration_ms, **result}
+
+
+# ---- P0-P3 human curation ------------------------------------------------------------
+
+def _queue_curation_projection(
+    db: Session,
+    *,
+    user: User,
+    batch: CurationBatch,
+    version_id: str | None = None,
+    rebuild_from_elements: bool = False,
+) -> Job:
+    job_type = "process_knowledge" if rebuild_from_elements else "curation_publish"
+    payload: dict[str, Any] = {
+        "space_id": batch.space_id,
+        "batch_id": batch.id,
+        "curation_batch_id": batch.id,
+        "reason": "human_curation",
+    }
+    if rebuild_from_elements:
+        if not version_id:
+            raise HTTPException(400, "内容治理缺少文档版本")
+        payload.update({"version_id": version_id, "force": True})
+    job = Job(
+        tenant_id=user.tenant_id,
+        job_type=job_type,
+        idempotency_key=f"curation:{batch.id}:{version_id or batch.space_id}",
+        input=payload,
+    )
+    batch.status = "publishing"
+    batch.publish_error = None
+    db.add(job)
+    db.flush()
+    return job
+
+
+def _dispatch_curation_job(db: Session, job: Job, batch: CurationBatch) -> None:
+    try:
+        if job.job_type == "process_knowledge":
+            process_version_task.delay(job.id)
+        else:
+            publish_curation_task.delay(job.id)
+    except Exception as exc:
+        job.status = "failed"
+        job.error_code = "QUEUE_DISPATCH_FAILED"
+        job.error_message = f"{type(exc).__name__}: {exc}"[:4000]
+        job.finished_at = datetime.now(timezone.utc)
+        batch.status = "publish_failed"
+        batch.publish_error = job.error_message
+        db.commit()
+        raise HTTPException(503, "治理任务提交失败") from exc
+
+
+@router.post("/curation/batches")
+def create_curation_batch(payload: CurationBatchCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_space_permission(db, user, payload.space_id, "write")
+    row = CurationBatch(tenant_id=user.tenant_id, space_id=payload.space_id, name=payload.name.strip(), created_by=user.id)
+    db.add(row)
+    audit(db, user.tenant_id, user.id, "curation.batch.create", "curation_batch", row.id, {"space_id": row.space_id})
+    db.commit()
+    return serialize_row(row)
+
+
+@router.get("/curation/summary")
+def curation_summary(space_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_space_permission(db, user, space_id, "read")
+    case_rows = list(db.scalars(select(CurationCase).where(CurationCase.space_id == space_id, _active(CurationCase))))
+    decision_rows = list(db.scalars(select(CurationDecision).where(CurationDecision.space_id == space_id, _active(CurationDecision))))
+    latest_release = db.scalar(select(KnowledgeRelease).where(KnowledgeRelease.space_id == space_id, _active(KnowledgeRelease)).order_by(KnowledgeRelease.release_number.desc()).limit(1))
+    return {
+        "open_cases": sum(row.status == "open" for row in case_rows),
+        "high_cases": sum(row.status == "open" and row.severity == "high" for row in case_rows),
+        "active_decisions": sum(row.status == "active" for row in decision_rows),
+        "published_batches": db.scalar(select(func.count()).select_from(CurationBatch).where(CurationBatch.space_id == space_id, CurationBatch.status == "published", _active(CurationBatch))) or 0,
+        "knowledge_release": serialize_row(latest_release) if latest_release else None,
+    }
+
+
+@router.get("/curation/cases")
+def list_curation_cases(
+    space_id: str,
+    status: str | None = None,
+    case_type: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "read")
+    query = select(CurationCase).where(CurationCase.space_id == space_id, _active(CurationCase))
+    if status:
+        query = query.where(CurationCase.status == status)
+    if case_type:
+        query = query.where(CurationCase.case_type == case_type)
+    rows = list(db.scalars(query.order_by(CurationCase.created_at.desc())))
+    items = []
+    for row in rows[offset:offset + limit]:
+        data = serialize_row(row)
+        document = db.get(Document, row.document_id) if row.document_id else None
+        data["document_title"] = document.title if document else None
+        items.append(data)
+    return {"total": len(rows), "items": items}
+
+
+@router.put("/curation/cases/{case_id}")
+def update_curation_case(case_id: str, payload: CurationCaseUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = _must_tenant(db, CurationCase, case_id, user.tenant_id, "治理待办")
+    require_space_permission(db, user, row.space_id, "write")
+    row.status = payload.status
+    row.handled_by = user.id if payload.status != "open" else None
+    row.handled_at = datetime.now(timezone.utc) if payload.status != "open" else None
+    audit(db, user.tenant_id, user.id, "curation.case.update", "curation_case", row.id, {"status": row.status})
+    db.commit()
+    return serialize_row(row)
+
+
+@router.get("/curation/decisions")
+def list_curation_decisions(
+    space_id: str,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "read")
+    query = select(CurationDecision).where(CurationDecision.space_id == space_id, _active(CurationDecision))
+    if target_type:
+        query = query.where(CurationDecision.target_type == target_type)
+    if target_id:
+        query = query.where(CurationDecision.target_id == target_id)
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = db.scalars(query.order_by(CurationDecision.created_at.desc()).offset(offset).limit(limit))
+    return {"total": total, "items": [serialize_row(row) for row in rows]}
+
+
+@router.post("/curation/decisions")
+def add_curation_decision(payload: CurationDecisionCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_space_permission(db, user, payload.space_id, "write")
+    try:
+        decision, batch, context = create_decision(
+            db,
+            user=user,
+            space_id=payload.space_id,
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            field_path=payload.field_path,
+            operation=payload.operation,
+            value=payload.value,
+            version_id=payload.version_id,
+            scope=payload.scope,
+            reason_code=payload.reason_code,
+            reason_note=payload.reason_note,
+            base_fingerprint=payload.base_fingerprint,
+            batch_id=payload.batch_id,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    job: Job | None = None
+    if payload.auto_publish:
+        if payload.target_type == "document_profile":
+            batch.status = "published"
+            batch.published_at = datetime.now(timezone.utc)
+        else:
+            job = _queue_curation_projection(
+                db,
+                user=user,
+                batch=batch,
+                version_id=context.version_id,
+                rebuild_from_elements=payload.target_type == "content_element",
+            )
+    audit(db, user.tenant_id, user.id, "curation.decision.create", "curation_decision", decision.id, {"target_type": payload.target_type, "target_id": context.target_id, "operation": decision.operation, "scope": decision.scope})
+    db.commit()
+    if job:
+        _dispatch_curation_job(db, job, batch)
+    return {"decision": serialize_row(decision), "batch": serialize_row(batch), "job": serialize_row(job) if job else None, "fingerprint": context.fingerprint}
+
+
+@router.post("/curation/decisions/{decision_id}/rollback")
+def rollback_curation_decision(decision_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    decision = _must_tenant(db, CurationDecision, decision_id, user.tenant_id, "治理决定")
+    require_space_permission(db, user, decision.space_id, "write")
+    try:
+        rollback_decision(db, user=user, decision=decision)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    batch = CurationBatch(tenant_id=user.tenant_id, space_id=decision.space_id, name="回滚人工治理", created_by=user.id)
+    db.add(batch)
+    db.flush()
+    if decision.target_type == "document_profile":
+        batch.status = "published"
+        batch.published_at = datetime.now(timezone.utc)
+        job = None
+    else:
+        job = _queue_curation_projection(db, user=user, batch=batch, version_id=decision.version_id, rebuild_from_elements=decision.target_type == "content_element")
+    audit(db, user.tenant_id, user.id, "curation.decision.rollback", "curation_decision", decision.id, {"target_type": decision.target_type, "target_id": decision.target_id})
+    db.commit()
+    if job:
+        _dispatch_curation_job(db, job, batch)
+    return {"ok": True, "batch": serialize_row(batch), "job": serialize_row(job) if job else None}
+
+
+@router.post("/curation/batches/{batch_id}/rollback")
+def rollback_curation_batch(batch_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    source_batch = _must_tenant(db, CurationBatch, batch_id, user.tenant_id, "治理批次")
+    require_space_permission(db, user, source_batch.space_id, "write")
+    decisions = list(db.scalars(
+        select(CurationDecision).where(
+            CurationDecision.batch_id == source_batch.id,
+            CurationDecision.status == "active",
+            _active(CurationDecision),
+        ).order_by(CurationDecision.created_at.desc())
+    ))
+    if not decisions:
+        raise HTTPException(409, "该批次没有当前生效的决定")
+    try:
+        for decision in decisions:
+            rollback_decision(db, user=user, decision=decision)
+    except ValueError as exc:
+        db.rollback(); raise HTTPException(409, str(exc)) from exc
+    source_batch.status = "rolled_back"
+    rollback_batch = CurationBatch(
+        tenant_id=user.tenant_id,
+        space_id=source_batch.space_id,
+        name=f"回滚 · {source_batch.name}"[:300],
+        created_by=user.id,
+    )
+    db.add(rollback_batch); db.flush()
+    content_decision = next((item for item in decisions if item.target_type == "content_element"), None)
+    projection_decisions = [item for item in decisions if item.target_type != "document_profile"]
+    if projection_decisions:
+        job = _queue_curation_projection(
+            db, user=user, batch=rollback_batch,
+            version_id=content_decision.version_id if content_decision else None,
+            rebuild_from_elements=content_decision is not None,
+        )
+    else:
+        rollback_batch.status = "published"
+        rollback_batch.published_at = datetime.now(timezone.utc)
+        job = None
+    audit(db, user.tenant_id, user.id, "curation.batch.rollback", "curation_batch", source_batch.id, {"decision_count": len(decisions)})
+    db.commit()
+    if job:
+        _dispatch_curation_job(db, job, rollback_batch)
+    return {"ok": True, "rolled_back": len(decisions), "batch": serialize_row(rollback_batch), "job": serialize_row(job) if job else None}
+
+
+@router.post("/curation/entities/pair")
+def curate_entity_pair(payload: EntityPairCuration, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    require_space_permission(db, user, payload.space_id, "write")
+    left = _must_tenant(db, CanonicalEntity, payload.left_entity_id, user.tenant_id, "左侧实体")
+    right = _must_tenant(db, CanonicalEntity, payload.right_entity_id, user.tenant_id, "右侧实体")
+    if left.space_id != payload.space_id or right.space_id != payload.space_id or left.id == right.id:
+        raise HTTPException(400, "实体必须是当前知识空间内两个不同节点")
+    winner = None
+    if payload.operation in {"merge", "must_link"}:
+        winner_id = payload.winner_entity_id or left.id
+        winner = left if winner_id == left.id else right if winner_id == right.id else None
+        if winner is None:
+            raise HTTPException(400, "保留节点必须是待合并节点之一")
+    batch = CurationBatch(tenant_id=user.tenant_id, space_id=payload.space_id, name="实体合并治理" if winner else "实体拆分治理", created_by=user.id)
+    db.add(batch)
+    db.flush()
+    pair_value = {
+        "left_id": left.id,
+        "right_id": right.id,
+        "left_name": left.normalized_name,
+        "right_name": right.normalized_name,
+        "left_type": left.entity_type,
+        "right_type": right.entity_type,
+        "winner_id": winner.id if winner else None,
+        "requested_operation": payload.operation,
+    }
+    constraint_operation = "must_link" if winner else "cannot_link"
+    pair_id = stable_fingerprint({"space_id": payload.space_id, "entities": sorted([left.id, right.id])})
+    try:
+        pair_decision, _, _ = create_decision(
+            db, user=user, space_id=payload.space_id, target_type="entity_pair",
+            target_id=pair_id, field_path="link", operation=constraint_operation,
+            value=pair_value, scope="space", reason_code="entity_resolution",
+            reason_note=payload.reason_note, batch_id=batch.id,
+        )
+        if winner:
+            loser = right if winner.id == left.id else left
+            create_decision(
+                db, user=user, space_id=payload.space_id, target_type="entity",
+                target_id=loser.id, field_path="status", operation="reject", value="suppressed",
+                scope="space", reason_code="entity_merged", reason_note=payload.reason_note,
+                batch_id=batch.id,
+            )
+            for fact in db.scalars(select(Fact).where(Fact.space_id == payload.space_id, _active(Fact), (Fact.subject_entity_id == loser.id) | (Fact.object_entity_id == loser.id))):
+                field_path = "subject_entity_id" if fact.subject_entity_id == loser.id else "object_entity_id"
+                create_decision(
+                    db, user=user, space_id=payload.space_id, target_type="fact",
+                    target_id=fact.id, field_path=field_path, operation="override", value=winner.id,
+                    scope="space", reason_code="entity_merged", reason_note=payload.reason_note,
+                    batch_id=batch.id,
+                )
+        else:
+            for entity in (left, right):
+                create_decision(
+                    db, user=user, space_id=payload.space_id, target_type="entity",
+                    target_id=entity.id, field_path="status", operation="restore", value=entity.status,
+                    scope="space", reason_code="entity_split", reason_note=payload.reason_note,
+                    batch_id=batch.id,
+                )
+            for fact in db.scalars(select(Fact).where(
+                Fact.space_id == payload.space_id,
+                _active(Fact),
+                (Fact.subject_entity_id.in_([left.id, right.id]))
+                | (Fact.object_entity_id.in_([left.id, right.id])),
+            )):
+                if fact.subject_entity_id in {left.id, right.id}:
+                    create_decision(
+                        db, user=user, space_id=payload.space_id, target_type="fact",
+                        target_id=fact.id, field_path="subject_entity_id", operation="restore",
+                        value=fact.subject_entity_id, scope="space", reason_code="entity_split",
+                        reason_note=payload.reason_note, batch_id=batch.id,
+                    )
+                if fact.object_entity_id in {left.id, right.id}:
+                    create_decision(
+                        db, user=user, space_id=payload.space_id, target_type="fact",
+                        target_id=fact.id, field_path="object_entity_id", operation="restore",
+                        value=fact.object_entity_id, scope="space", reason_code="entity_split",
+                        reason_note=payload.reason_note, batch_id=batch.id,
+                    )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    job = _queue_curation_projection(db, user=user, batch=batch)
+    audit(db, user.tenant_id, user.id, "curation.entity_pair", "curation_decision", pair_decision.id, {"target_id": pair_id, "operation": payload.operation, "winner_id": winner.id if winner else None})
+    db.commit()
+    _dispatch_curation_job(db, job, batch)
+    return {"decision": serialize_row(pair_decision), "batch": serialize_row(batch), "job": serialize_row(job)}
 
 
 # ---- M8 ontology and graph CRUD ------------------------------------------------------
@@ -2080,8 +2388,13 @@ def delete_ontology_term(row_id: str, admin: User = Depends(require_admin), db: 
 def list_entities(space_id: str, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_space_permission(db, user, space_id, "read")
     query = select(CanonicalEntity).where(CanonicalEntity.space_id == space_id, _active(CanonicalEntity)).order_by(CanonicalEntity.canonical_name)
-    total = db.scalar(select(func.count()).select_from(CanonicalEntity).where(CanonicalEntity.space_id == space_id, _active(CanonicalEntity))) or 0
-    return {"total": total, "items": [serialize_row(row) for row in db.scalars(query.offset(offset).limit(limit))]}
+    items = []
+    for row in db.scalars(query):
+        effective = effective_entity(db, row)
+        if effective.get("status") not in {"published", "active"}:
+            continue
+        items.append({**serialize_row(row), **effective})
+    return {"total": len(items), "items": items[offset:offset + limit]}
 
 
 @router.post("/knowledge/entities")
@@ -2118,17 +2431,28 @@ def update_knowledge_entity(row_id: str, payload: KnowledgeEntityUpdate, user: U
     values = payload.model_dump(exclude_unset=True, exclude_none=True)
     if "canonical_name" in values:
         values["canonical_name"] = values["canonical_name"].strip()
-        values["normalized_name"] = _normalized_entity_name(values["canonical_name"])
     if "entity_type" in values: values["entity_type"] = values["entity_type"].strip()
     if "aliases" in values:
         values["aliases"] = sorted({item.strip() for item in values["aliases"] if item.strip() and item.strip() != values.get("canonical_name", row.canonical_name)})
-    apply_patch(row, values, {"canonical_name", "normalized_name", "entity_type", "aliases", "properties", "confidence", "status"})
-    _flush_or_conflict(db, "该知识空间中已存在同名同类型节点")
-    audit(db, user.tenant_id, user.id, "knowledge.entity.update", "canonical_entity", row.id)
-    release = _publish_graph_snapshot(db, user.tenant_id, row.space_id)
-    _commit(db)
-    data = serialize_row(row); data["graph_release"] = release.release_number
-    return data
+    if not values:
+        raise HTTPException(400, "没有需要保存的字段")
+    batch = CurationBatch(tenant_id=user.tenant_id, space_id=row.space_id, name="实体人工修正", created_by=user.id)
+    db.add(batch); db.flush()
+    try:
+        decisions = [
+            create_decision(
+                db, user=user, space_id=row.space_id, target_type="entity", target_id=row.id,
+                field_path=field, operation="override", value=value, scope="space",
+                reason_code="manual_graph_edit", batch_id=batch.id,
+            )[0]
+            for field, value in values.items()
+        ]
+    except ValueError as exc:
+        db.rollback(); raise HTTPException(409, str(exc)) from exc
+    job = _queue_curation_projection(db, user=user, batch=batch)
+    audit(db, user.tenant_id, user.id, "knowledge.entity.update", "canonical_entity", row.id, {"decision_ids": [item.id for item in decisions]})
+    db.commit(); _dispatch_curation_job(db, job, batch)
+    return {**serialize_row(row), **effective_entity(db, row), "curation_batch_id": batch.id, "job_id": job.id}
 
 
 @router.delete("/knowledge/entities/{row_id}")
@@ -2136,18 +2460,35 @@ def delete_knowledge_entity(row_id: str, user: User = Depends(get_current_user),
     row = _must(db, CanonicalEntity, row_id, "知识节点")
     if row.tenant_id != user.tenant_id: raise HTTPException(404, "知识节点不存在")
     require_space_permission(db, user, row.space_id, "write")
-    related = list(db.scalars(select(Fact).where(
-        Fact.space_id == row.space_id,
-        (Fact.subject_entity_id == row.id) | (Fact.object_entity_id == row.id),
-        _active(Fact),
-    )))
-    for fact in related: _soft_delete(db, fact)
-    _soft_delete(db, row)
-    db.flush()
-    audit(db, user.tenant_id, user.id, "knowledge.entity.delete", "canonical_entity", row.id, {"removed_facts": len(related)})
-    release = _publish_graph_snapshot(db, user.tenant_id, row.space_id)
-    _commit(db)
-    return {"ok": True, "removed_facts": len(related), "graph_release": release.release_number}
+    related = [
+        fact
+        for fact in db.scalars(
+            select(Fact).where(
+                Fact.space_id == row.space_id,
+                (Fact.subject_entity_id == row.id) | (Fact.object_entity_id == row.id),
+                _active(Fact),
+            )
+        )
+        if effective_fact(db, fact).get("status") == "published"
+    ]
+    batch = CurationBatch(tenant_id=user.tenant_id, space_id=row.space_id, name="实体屏蔽", created_by=user.id)
+    db.add(batch); db.flush()
+    try:
+        create_decision(db, user=user, space_id=row.space_id, target_type="entity", target_id=row.id, field_path="status", operation="reject", value="suppressed", scope="space", reason_code="manual_graph_delete", batch_id=batch.id)
+    except ValueError as exc:
+        db.rollback(); raise HTTPException(409, str(exc)) from exc
+    job = _queue_curation_projection(db, user=user, batch=batch)
+    audit(db, user.tenant_id, user.id, "knowledge.entity.delete", "canonical_entity", row.id, {"affected_facts": len(related), "soft_suppressed": True})
+    db.commit(); _dispatch_curation_job(db, job, batch)
+    return {
+        "ok": True,
+        "affected_facts": len(related),
+        # Compatibility alias for existing graph clients.  Facts are hidden
+        # from the effective projection, not physically deleted.
+        "removed_facts": len(related),
+        "curation_batch_id": batch.id,
+        "job_id": job.id,
+    }
 
 
 @router.get("/knowledge/facts")
@@ -2159,17 +2500,23 @@ def list_facts(space_id: str, offset: int = Query(0, ge=0), limit: int = Query(1
     ) or 0
     inferred_total = 0
     items = []
-    for row in db.scalars(query.limit(offset + limit)):
-        data = serialize_row(row); subject = db.get(CanonicalEntity, row.subject_entity_id); obj = db.get(CanonicalEntity, row.object_entity_id) if row.object_entity_id else None
-        data.update({"subject_name": subject.canonical_name if subject else "—", "object_name": obj.canonical_name if obj else row.object_value or "—", "origin_type": "asserted", "editable": True}); items.append(data)
+    asserted_total = 0
+    for row in db.scalars(query):
+        effective = effective_fact(db, row)
+        if effective.get("status") != "published":
+            continue
+        subject = db.get(CanonicalEntity, effective["subject_entity_id"])
+        obj = db.get(CanonicalEntity, effective["object_entity_id"]) if effective.get("object_entity_id") else None
+        subject_effective = effective_entity(db, subject) if subject else None
+        object_effective = effective_entity(db, obj) if obj else None
+        if not subject_effective or subject_effective.get("status") != "published":
+            continue
+        if obj and (not object_effective or object_effective.get("status") != "published"):
+            continue
+        data = {**serialize_row(row), **effective}
+        data.update({"subject_name": subject_effective["canonical_name"] if subject_effective else "—", "object_name": object_effective["canonical_name"] if object_effective else effective.get("object_value") or "—", "origin_type": "asserted", "editable": True}); items.append(data)
+        asserted_total += 1
     if include_inferred:
-        inferred_total = db.scalar(
-            select(func.count()).select_from(InferredFact).where(
-                InferredFact.space_id == space_id,
-                InferredFact.status == "published",
-                _active(InferredFact),
-            )
-        ) or 0
         inferred_rows = db.scalars(
             select(InferredFact).where(
                 InferredFact.space_id == space_id,
@@ -2178,17 +2525,24 @@ def list_facts(space_id: str, offset: int = Query(0, ge=0), limit: int = Query(1
             ).order_by(InferredFact.created_at.desc()).limit(offset + limit)
         )
         for row in inferred_rows:
-            data = serialize_row(row)
             subject = db.get(CanonicalEntity, row.subject_entity_id)
             obj = db.get(CanonicalEntity, row.object_entity_id) if row.object_entity_id else None
+            subject_effective = effective_entity(db, subject) if subject else None
+            object_effective = effective_entity(db, obj) if obj else None
+            if not subject_effective or subject_effective.get("status") != "published":
+                continue
+            if obj and (not object_effective or object_effective.get("status") != "published"):
+                continue
+            data = serialize_row(row)
             data.update({
-                "subject_name": subject.canonical_name if subject else "—",
-                "object_name": obj.canonical_name if obj else row.object_value or "—",
+                "subject_name": subject_effective["canonical_name"],
+                "object_name": object_effective["canonical_name"] if object_effective else row.object_value or "—",
                 "source_chunk_id": None,
                 "origin_type": "inferred",
                 "editable": False,
             })
             items.append(data)
+            inferred_total += 1
     items.sort(key=lambda item: item.get("created_at") or "", reverse=True)
     total = asserted_total + inferred_total
     return {"total": total, "items": items[offset:offset + limit]}
@@ -2243,22 +2597,44 @@ def update_knowledge_fact(row_id: str, payload: KnowledgeFactUpdate, user: User 
     row = _must(db, Fact, row_id, "知识关系")
     if row.tenant_id != user.tenant_id: raise HTTPException(404, "知识关系不存在")
     require_space_permission(db, user, row.space_id, "write")
+    current = effective_fact(db, row)
     values = payload.model_dump(exclude_unset=True)
-    subject_id = values.get("subject_entity_id") or row.subject_entity_id
-    object_id = values.get("object_entity_id", row.object_entity_id)
-    object_value = values.get("object_value", row.object_value)
-    if object_id and object_value: object_value = None
+    subject_id = values.get("subject_entity_id") or current["subject_entity_id"]
+    object_id = values.get("object_entity_id", current["object_entity_id"])
+    object_value = values.get("object_value", current["object_value"])
+    if object_id and object_value:
+        if "object_entity_id" in values and "object_value" not in values:
+            object_value = None
+            values["object_value"] = None
+        elif "object_value" in values and "object_entity_id" not in values:
+            object_id = None
+            values["object_entity_id"] = None
+        else:
+            raise HTTPException(400, "关系必须且只能选择一个客体节点或客体值")
     if not object_id and not (object_value or "").strip(): raise HTTPException(400, "关系必须选择客体节点或填写客体值")
     _knowledge_fact_entities(db, user.tenant_id, row.space_id, subject_id, object_id)
-    values["object_value"] = object_value.strip() if object_value else None
+    if "object_value" in values:
+        values["object_value"] = object_value.strip() if object_value else None
     if "predicate" in values: values["predicate"] = values["predicate"].strip()
-    apply_patch(row, values, {"subject_entity_id", "predicate", "object_entity_id", "object_value", "confidence", "status", "valid_from", "valid_to"})
-    _flush_or_conflict(db, "相同的知识关系已存在")
-    audit(db, user.tenant_id, user.id, "knowledge.fact.update", "fact", row.id)
-    release = _publish_graph_snapshot(db, user.tenant_id, row.space_id)
-    _commit(db)
-    data = serialize_row(row); data["graph_release"] = release.release_number
-    return data
+    if not values:
+        raise HTTPException(400, "没有需要保存的字段")
+    batch = CurationBatch(tenant_id=user.tenant_id, space_id=row.space_id, name="关系人工修正", created_by=user.id)
+    db.add(batch); db.flush()
+    try:
+        decisions = [
+            create_decision(
+                db, user=user, space_id=row.space_id, target_type="fact", target_id=row.id,
+                field_path=field, operation="override", value=value, scope="space",
+                reason_code="manual_graph_edit", batch_id=batch.id,
+            )[0]
+            for field, value in values.items()
+        ]
+    except ValueError as exc:
+        db.rollback(); raise HTTPException(409, str(exc)) from exc
+    job = _queue_curation_projection(db, user=user, batch=batch)
+    audit(db, user.tenant_id, user.id, "knowledge.fact.update", "fact", row.id, {"decision_ids": [item.id for item in decisions]})
+    db.commit(); _dispatch_curation_job(db, job, batch)
+    return {**serialize_row(row), **effective_fact(db, row), "curation_batch_id": batch.id, "job_id": job.id}
 
 
 @router.delete("/knowledge/facts/{row_id}")
@@ -2266,12 +2642,16 @@ def delete_knowledge_fact(row_id: str, user: User = Depends(get_current_user), d
     row = _must(db, Fact, row_id, "知识关系")
     if row.tenant_id != user.tenant_id: raise HTTPException(404, "知识关系不存在")
     require_space_permission(db, user, row.space_id, "write")
-    _soft_delete(db, row)
-    db.flush()
-    audit(db, user.tenant_id, user.id, "knowledge.fact.delete", "fact", row.id)
-    release = _publish_graph_snapshot(db, user.tenant_id, row.space_id)
-    _commit(db)
-    return {"ok": True, "graph_release": release.release_number}
+    batch = CurationBatch(tenant_id=user.tenant_id, space_id=row.space_id, name="关系屏蔽", created_by=user.id)
+    db.add(batch); db.flush()
+    try:
+        create_decision(db, user=user, space_id=row.space_id, target_type="fact", target_id=row.id, field_path="status", operation="reject", value="suppressed", scope="space", reason_code="manual_graph_delete", batch_id=batch.id)
+    except ValueError as exc:
+        db.rollback(); raise HTTPException(409, str(exc)) from exc
+    job = _queue_curation_projection(db, user=user, batch=batch)
+    audit(db, user.tenant_id, user.id, "knowledge.fact.delete", "fact", row.id, {"soft_suppressed": True})
+    db.commit(); _dispatch_curation_job(db, job, batch)
+    return {"ok": True, "curation_batch_id": batch.id, "job_id": job.id}
 
 
 @router.get("/knowledge/conflicts")
@@ -2304,6 +2684,7 @@ def list_releases(space_id: str, user: User = Depends(get_current_user), db: Ses
     return {
         "graphs": [serialize_row(row) for row in db.scalars(select(GraphRelease).where(GraphRelease.space_id == space_id, _active(GraphRelease)).order_by(GraphRelease.release_number.desc()))],
         "indexes": [serialize_row(row) for row in db.scalars(select(IndexRelease).where(IndexRelease.space_id == space_id, _active(IndexRelease)).order_by(IndexRelease.release_number.desc()))],
+        "knowledge": [serialize_row(row) for row in db.scalars(select(KnowledgeRelease).where(KnowledgeRelease.space_id == space_id, _active(KnowledgeRelease)).order_by(KnowledgeRelease.release_number.desc()))],
     }
 
 
@@ -2312,8 +2693,14 @@ def list_releases(space_id: str, user: User = Depends(get_current_user), db: Ses
 @router.get("/versions/{version_id}/chunks")
 def list_chunks(version_id: str, offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     version = _must(db, DocumentVersion, version_id, "版本"); document = _must(db, Document, version.document_id, "文档"); require_space_permission(db, user, document.space_id, "read")
-    total = db.scalar(select(func.count()).select_from(Chunk).where(Chunk.version_id == version_id, _active(Chunk))) or 0
-    return {"total": total, "items": [serialize_row(row) for row in db.scalars(select(Chunk).where(Chunk.version_id == version_id, _active(Chunk)).order_by(Chunk.ordinal).offset(offset).limit(limit))]}
+    items = []
+    for row in db.scalars(select(Chunk).where(Chunk.version_id == version_id, _active(Chunk)).order_by(Chunk.ordinal)):
+        try:
+            text, metadata = effective_chunk_text(db, row)
+        except ValueError:
+            continue
+        items.append({**serialize_row(row), "text": text, **metadata})
+    return {"total": len(items), "items": items[offset:offset + limit]}
 
 
 @router.post("/documents/{row_id}/process")
@@ -2336,8 +2723,14 @@ def get_fragment(chunk_id: str, user: User = Depends(get_current_user), db: Sess
     version = db.get(DocumentVersion, row.version_id)
     if document is None or document.tenant_id != user.tenant_id or version is None:
         raise HTTPException(404, "知识片段来源不存在")
+    try:
+        text, curation = effective_chunk_text(db, row, include_superseded=True)
+    except ValueError as exc:
+        raise HTTPException(404, "知识片段已被人工屏蔽") from exc
     return {
         **serialize_row(row),
+        "text": text,
+        "curation": curation,
         "document_title": document.title,
         "document_tags": document.tags,
         "document_version": version.version_number,

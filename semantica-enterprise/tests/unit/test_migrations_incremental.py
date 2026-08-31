@@ -30,6 +30,7 @@ def test_schema_migrations_are_repeatable_on_fresh_database() -> None:
         "0012_agent_conversations",
         "0013_space_grant_uniqueness",
         "0014_knowledge_analysis",
+        "0015_human_curation",
     ]
     assert profile_table == "document_profiles"
 
