@@ -34,9 +34,9 @@ docker compose ps
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
 - 模型：LLM、Embedding、Reranker、Vision、ASR 统一配置、默认项、启停和真实连接测试。
 - 图谱：白底 3D 力导图，节点与边真实 CRUD，版本校验并发布到 FalkorDB。
-- 分析：Semantica Datalog 规则集、可视化规则版本、场景、预览/发布、证据链、增量重算、SPARQL 和回滚。
+- 分析：按“规则中心 → 场景分析 → 推理结果 → 高级查询”组织 Semantica Datalog 能力；提供业务化规则预览、真实校验、场景卡片、任务进度、可定位来源的证据链、SPARQL 与回滚影响预览。
 - 检索：OpenSearch 全文、Qdrant 向量、FalkorDB 图谱召回，RRF 融合、可选重排、排序依据和真实片段引用。
-- 对话：DeepSeek Harness Agent Loop、多轮 Session、SSE、停止、重试、重启恢复和可核验检索轨迹。
+- 对话：DeepSeek Harness Agent Loop、多轮 Session、SSE、停止、重试、重启恢复；桌面端三栏展示真实 Agent 执行事件、检索轨迹与按最终排名排列的召回依据，不展示模型私有思维链。
 - 开放能力：REST/OpenAPI、MCP Server 和 `chuanshen` CLI。
 
 Docker Compose 共启动 12 个服务：API、Worker、Scheduler、Agent Runtime、MCP Server、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB。前端只访问 FastAPI；Harness、MCP 不直接访问业务数据库或检索中间件。
@@ -85,6 +85,8 @@ python3 tests/performance/live_load.py
 - [系统架构](docs/ARCHITECTURE.md)
 - [DeepSeek Harness 适配与升级](docs/DEEPSEEK_HARNESS.md)
 - [知识分析与 Semantica Analyze 融合](docs/KNOWLEDGE_ANALYSIS.md)
+- [智能问答 UI 与 DSH 事件模型](docs/KNOWLEDGE_SERVICE_UX.md)
+- [知识洞察与知识服务升级留痕](docs/INSIGHTS_SERVICE_UX_DELIVERY.md)
 - [人工治理 P0–P3 设计与实现](docs/HUMAN_CURATION_P0_P3.md)
 - [治理工作台业务与操作说明](docs/GOVERNANCE_WORKBENCH_GUIDE.md)
 - [文件格式能力矩阵](docs/FORMAT_MATRIX.md)

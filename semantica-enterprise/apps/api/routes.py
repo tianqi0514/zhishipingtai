@@ -1442,6 +1442,33 @@ def _prepare_rule_definition(
     }
 
 
+def _inference_jobs(db: Session, tenant_id: str) -> dict[str, Job]:
+    """Resolve the newest real Celery job for each inference run."""
+    result: dict[str, Job] = {}
+    for job in db.scalars(
+        select(Job)
+        .where(Job.tenant_id == tenant_id, Job.job_type == "knowledge_inference", _active(Job))
+        .order_by(Job.created_at.desc())
+        .limit(1000)
+    ):
+        run_id = str((job.input or {}).get("inference_run_id") or "")
+        if run_id and run_id not in result:
+            result[run_id] = job
+    return result
+
+
+def _inference_run_payload(row: InferenceRun, job: Job | None = None) -> dict[str, Any]:
+    data = serialize_row(row)
+    if row.started_at:
+        finished = row.finished_at or datetime.now(timezone.utc)
+        data["duration_ms"] = max(0, round((finished - row.started_at).total_seconds() * 1000))
+    else:
+        data["duration_ms"] = None
+    data["job_id"] = job.id if job else None
+    data["job_status"] = job.status if job else None
+    return data
+
+
 @router.get("/analysis/rule-sets")
 def list_analysis_rule_sets(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = list(
@@ -1682,7 +1709,21 @@ def list_analysis_scenarios(user: User = Depends(get_current_user), db: Session 
         .where(AnalysisScenario.tenant_id == user.tenant_id, _active(AnalysisScenario))
         .order_by(AnalysisScenario.name)
     )
-    return [serialize_row(row) for row in rows if _visible_analysis_spaces(db, user, row.space_ids or [])]
+    jobs = _inference_jobs(db, user.tenant_id)
+    result = []
+    for row in rows:
+        if not _visible_analysis_spaces(db, user, row.space_ids or []):
+            continue
+        data = serialize_row(row)
+        last_run = db.scalar(
+            select(InferenceRun)
+            .where(InferenceRun.scenario_id == row.id, _active(InferenceRun))
+            .order_by(InferenceRun.created_at.desc())
+            .limit(1)
+        )
+        data["last_run"] = _inference_run_payload(last_run, jobs.get(last_run.id)) if last_run else None
+        result.append(data)
+    return result
 
 
 @router.post("/analysis/scenarios")
@@ -1803,8 +1844,13 @@ def list_inference_runs(
     if rule_set_id:
         _must_rule_set(db, user, rule_set_id)
         query = query.where(InferenceRun.rule_set_id == rule_set_id)
+    jobs = _inference_jobs(db, user.tenant_id)
     rows = db.scalars(query.order_by(InferenceRun.created_at.desc()).limit(limit))
-    return [serialize_row(row) for row in rows if _visible_analysis_spaces(db, user, row.space_ids or [])]
+    return [
+        _inference_run_payload(row, jobs.get(row.id))
+        for row in rows
+        if _visible_analysis_spaces(db, user, row.space_ids or [])
+    ]
 
 
 @router.get("/analysis/inference-runs/{run_id}")
@@ -1815,9 +1861,34 @@ def get_inference_run(
 ):
     row = _must_tenant(db, InferenceRun, run_id, user.tenant_id, "推理运行")
     _require_analysis_spaces(db, user, row.space_ids or [], "read")
-    data = serialize_row(row)
+    data = _inference_run_payload(row, _inference_jobs(db, user.tenant_id).get(row.id))
     data["items"] = inference_result_rows(db, row.id)
     return data
+
+
+@router.get("/analysis/inference-runs/{run_id}/rollback-preview")
+def preview_inference_rollback(
+    run_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _must_tenant(db, InferenceRun, run_id, user.tenant_id, "推理运行")
+    _require_analysis_spaces(db, user, row.space_ids or [], "write")
+    published = db.scalar(
+        select(func.count()).select_from(InferredFact).where(
+            InferredFact.run_id == row.id,
+            InferredFact.status == "published",
+            _active(InferredFact),
+        )
+    ) or 0
+    return {
+        "run_id": row.id,
+        "can_rollback": row.mode == "publish" and row.status == "succeeded" and published > 0,
+        "invalidated_facts": published,
+        "space_ids": list(row.space_ids or []),
+        "graph_releases_to_create": len(row.space_ids or []) if published else 0,
+        "effects": ["失效本次发布的推导事实", "生成新的可追溯图谱版本", "保留历史运行与证据链"],
+    }
 
 
 @router.post("/analysis/inference-runs/{run_id}/rollback")

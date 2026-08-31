@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
 import httpx
@@ -71,7 +71,60 @@ def _allowed_space_ids(db: Session, user: User, requested: list[str]) -> list[st
     return allowed
 
 
+def _reconcile_stale_turn(db: Session, conversation: Conversation) -> bool:
+    """Close a user-visible turn whose SSE bridge can no longer be alive.
+
+    Harness sessions survive service restarts, but an HTTP streaming request
+    does not.  Without reconciliation, an interrupted browser or API restart
+    can leave a message in ``generating`` forever and make the elapsed timer
+    grow for hours.  A genuinely active turn is protected by the configured
+    gateway timeout plus a short grace period.
+    """
+    if conversation.status != "generating":
+        return False
+    assistant = db.scalar(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.role == "assistant",
+            ConversationMessage.status == "generating",
+            _active(ConversationMessage),
+        )
+        .order_by(ConversationMessage.sequence.desc())
+        .limit(1)
+    )
+    if assistant is None:
+        conversation.status = "active"
+        db.commit()
+        return True
+    last_activity = assistant.updated_at or assistant.created_at
+    if last_activity.tzinfo is None:
+        last_activity = last_activity.replace(tzinfo=timezone.utc)
+    stale_after = max(int(settings.agent_request_timeout_seconds) + 120, 900)
+    now = datetime.now(timezone.utc)
+    if now - last_activity <= timedelta(seconds=stale_after):
+        return False
+    _project_event(
+        db,
+        conversation.id,
+        assistant.id,
+        "turn_failed",
+        {
+            "code": "AGENT_TURN_INTERRUPTED",
+            "message": "上次生成因连接或服务中断而结束，可以重新生成。",
+            "reason": "stale_stream_reconciled",
+            "occurred_at": now.isoformat(),
+            "duration_ms": max(0, int((last_activity - assistant.created_at.replace(
+                tzinfo=assistant.created_at.tzinfo or timezone.utc
+            )).total_seconds() * 1000)),
+        },
+    )
+    db.commit()
+    return True
+
+
 def _conversation_payload(db: Session, conversation: Conversation, *, detail: bool = False) -> dict[str, Any]:
+    _reconcile_stale_turn(db, conversation)
     value = serialize_row(conversation)
     value["space_ids"] = list((conversation.settings or {}).get("space_ids") or [])
     value["message_count"] = db.scalar(
@@ -424,6 +477,31 @@ def _project_event(
     )
     if conversation is None:
         return
+    payload.setdefault("occurred_at", datetime.now(timezone.utc).isoformat())
+    assistant = db.get(ConversationMessage, assistant_id)
+    # Closing the Harness subprocess after an explicit cancellation can emit a
+    # benign transport failure.  Do not persist a contradictory failure step
+    # after the authoritative turn_cancelled event.
+    if event_type == "turn_failed" and assistant is not None and assistant.status == "cancelled":
+        return
+    harness_sequence = payload.get("harness_seq")
+    if harness_sequence is not None:
+        # A raw Harness event may intentionally map to two business events
+        # (for example tool_finished + retrieval_ranked).  De-duplicate only
+        # the same projected event type so reconnects cannot append answer
+        # deltas or tool stages twice.
+        recent = db.scalars(
+            select(AgentEventProjection)
+            .where(
+                AgentEventProjection.conversation_id == conversation_id,
+                AgentEventProjection.message_id == assistant_id,
+                AgentEventProjection.event_type == event_type,
+            )
+            .order_by(AgentEventProjection.sequence.desc())
+            .limit(50)
+        )
+        if any((row.payload or {}).get("harness_seq") == harness_sequence for row in recent):
+            return
     sequence = db.scalar(
         select(func.max(AgentEventProjection.sequence)).where(
             AgentEventProjection.conversation_id == conversation_id
@@ -438,7 +516,6 @@ def _project_event(
             payload=payload,
         )
     )
-    assistant = db.get(ConversationMessage, assistant_id)
     if assistant is None:
         return
     if event_type == "answer_delta":

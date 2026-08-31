@@ -123,7 +123,12 @@ function normalizeEvent(event, toolStarts, turnState) {
     case 'turn/start': {
       turnState.hasSearch = false
       turnState.suppressedAnswer = false
-      return [['turn_started', { turn: data.turn, harness_seq: event.seq }]]
+      turnState.startedAt = Date.now()
+      return [['turn_started', {
+        turn: data.turn,
+        has_prior_turns: typeof data.turn === 'number' ? data.turn > 1 : null,
+        harness_seq: event.seq,
+      }]]
     }
     case 'step/start': return [['step_started', { turn: data.turn, step: data.step, harness_seq: event.seq }]]
     case 'tool/call': {
@@ -177,19 +182,32 @@ function normalizeEvent(event, toolStarts, turnState) {
         ? String(data.reason.kind || 'completed')
         : String(data.reason || 'completed')
       if (['aborted', 'interrupted', 'disposed'].includes(reason)) {
-        return [['turn_cancelled', { reason, harness_seq: event.seq }]]
+        return [['turn_cancelled', {
+          reason,
+          duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
+          harness_seq: event.seq,
+        }]]
       }
       if (turnState.requiresSearch && !turnState.hasSearch) {
         return [['turn_failed', {
           reason: 'knowledge-search-required',
           code: 'KNOWLEDGE_SEARCH_REQUIRED',
+          duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
           harness_seq: event.seq,
         }]]
       }
       if (['failed', 'error', 'blocked'].includes(reason)) {
-        return [['turn_failed', { reason, harness_seq: event.seq }]]
+        return [['turn_failed', {
+          reason,
+          duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
+          harness_seq: event.seq,
+        }]]
       }
-      const completed = [['turn_completed', { reason, harness_seq: event.seq }]]
+      const completed = [['turn_completed', {
+        reason,
+        duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
+        harness_seq: event.seq,
+      }]]
       if (reason === 'max-tokens') {
         completed.unshift(['warning', { message: '回答达到模型输出上限', harness_seq: event.seq }])
       }
@@ -226,15 +244,25 @@ async function runTurn(req, res, sessionId) {
         const event = notification.params.event
         const normalized = normalizeEvent(event, toolStarts, turnState)
         if (!normalized) return
+        const occurredAt = new Date().toISOString()
         for (const [type, payload] of normalized) {
           if (type === 'turn_completed' || type === 'turn_cancelled' || type === 'turn_failed') completedSeen = true
-          sendEvent(res, type, { ...payload, raw_type: event.type })
+          sendEvent(res, type, { ...payload, occurred_at: occurredAt, raw_type: event.type })
         }
       },
     })
-    if (!completedSeen) sendEvent(res, 'turn_completed', { final_response: result.finalResponse })
+    if (!completedSeen) sendEvent(res, 'turn_completed', {
+      final_response: result.finalResponse,
+      duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
+      occurred_at: new Date().toISOString(),
+    })
   } catch (error) {
-    sendEvent(res, 'turn_failed', { code: error?.name || 'AGENT_RUNTIME_ERROR', message: String(error?.message || error).slice(0, 500) })
+    sendEvent(res, 'turn_failed', {
+      code: error?.name || 'AGENT_RUNTIME_ERROR',
+      message: String(error?.message || error).slice(0, 500),
+      duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
+      occurred_at: new Date().toISOString(),
+    })
   } finally {
     entry.running = false
     res.end()

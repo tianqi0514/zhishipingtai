@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from apps.api.conversations import _inherit_referenced_citations, _project_event
+from apps.api.conversations import _inherit_referenced_citations, _project_event, _reconcile_stale_turn
 from packages.platform import models  # noqa: F401
 from packages.platform.database import Base
-from packages.platform.models import Citation, Conversation, ConversationMessage
+from packages.platform.models import AgentEventProjection, Citation, Conversation, ConversationMessage
 
 
 def test_followup_citation_is_inherited_from_latest_verified_message() -> None:
@@ -127,6 +129,7 @@ def test_late_gateway_failure_does_not_overwrite_cancelled_status() -> None:
 
         assert assistant.status == "cancelled"
         assert assistant.error_code is None
+        assert db.scalar(select(AgentEventProjection)) is None
 
 
 def test_explicit_cancel_wins_a_racing_gateway_failure() -> None:
@@ -168,3 +171,79 @@ def test_explicit_cancel_wins_a_racing_gateway_failure() -> None:
         assert assistant.status == "cancelled"
         assert assistant.error_code is None
         assert assistant.error_message is None
+
+
+def test_harness_event_projection_is_timestamped_and_deduplicated() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000005",
+            harness_session_id="session-event-dedup",
+            tenant_id="tenant",
+            user_id="user",
+            title="event contract",
+            status="generating",
+        )
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000005",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="generating",
+            content="",
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+
+        payload = {"harness_seq": 17, "turn": 1}
+        _project_event(db, conversation.id, assistant.id, "turn_started", payload)
+        _project_event(db, conversation.id, assistant.id, "turn_started", dict(payload))
+        db.flush()
+
+        rows = list(db.scalars(select(AgentEventProjection)))
+        assert len(rows) == 1
+        assert rows[0].payload["harness_seq"] == 17
+        assert rows[0].payload["occurred_at"]
+
+
+def test_stale_generating_turn_is_reconciled_as_retryable_failure() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000006",
+            harness_session_id="session-stale-turn",
+            tenant_id="tenant",
+            user_id="user",
+            title="stale turn",
+            status="generating",
+        )
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000006",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="generating",
+            content="partial",
+            created_at=old,
+            updated_at=old,
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+
+        assert _reconcile_stale_turn(db, conversation) is True
+        db.refresh(assistant)
+        db.refresh(conversation)
+        event = db.scalar(select(AgentEventProjection))
+
+        assert assistant.status == "failed"
+        assert assistant.error_code == "AGENT_TURN_INTERRUPTED"
+        assert conversation.status == "active"
+        assert event is not None
+        assert event.event_type == "turn_failed"

@@ -276,6 +276,11 @@ def test_semantica_analysis_end_to_end() -> None:
             assert run["items"][0]["predicate"] == "适用于"
             assert len(run["items"][0]["evidence"]) == 2
             assert run["graph_releases"][space["id"]] >= 1
+            assert run["job_id"] == started["job_id"]
+            assert run["duration_ms"] >= 0
+            scenarios = call("GET", "/analysis/scenarios")
+            scenario_view = next(item for item in scenarios if item["id"] == scenario["id"])
+            assert scenario_view["last_run"]["id"] == started["id"]
 
             graph_facts = call(
                 "GET",
@@ -372,6 +377,12 @@ def test_semantica_analysis_end_to_end() -> None:
                 assert cli_reason_payload["metrics"]["engine"] == "semantica.reasoning.DatalogReasoner"
                 assert len(cli_reason_payload["items"]) == 1
 
+            rollback_preview = call(
+                "GET", f"/analysis/inference-runs/{started['id']}/rollback-preview"
+            )
+            assert rollback_preview["can_rollback"] is True
+            assert rollback_preview["invalidated_facts"] == 1
+            assert rollback_preview["graph_releases_to_create"] == 1
             rollback = call("POST", f"/analysis/inference-runs/{started['id']}/rollback")
             assert rollback["invalidated"] == 1
         finally:

@@ -14,6 +14,9 @@ from .models import (
     AnalysisRule,
     AnalysisRuleVersion,
     CanonicalEntity,
+    Chunk,
+    Document,
+    DocumentVersion,
     Fact,
     InferenceEvidence,
     InferenceRun,
@@ -270,15 +273,55 @@ def inference_result_rows(db: Session, run_id: str) -> list[dict[str, Any]]:
         row.id: row for row in db.scalars(select(CanonicalEntity).where(CanonicalEntity.id.in_(entity_ids)))
     } if entity_ids else {}
     entity_values = {row.id: effective_entity(db, row) for row in entities.values()}
+    evidence_rows = list(
+        db.scalars(
+            select(InferenceEvidence)
+            .join(InferredFact, InferredFact.id == InferenceEvidence.inferred_fact_id)
+            .where(InferredFact.run_id == run_id)
+            .order_by(InferenceEvidence.inferred_fact_id, InferenceEvidence.ordinal)
+        )
+    )
+    evidence_by_fact: dict[str, list[InferenceEvidence]] = {}
+    for item in evidence_rows:
+        evidence_by_fact.setdefault(item.inferred_fact_id, []).append(item)
+    chunk_ids = {item.source_chunk_id for item in evidence_rows if item.source_chunk_id}
+    chunks = {
+        item.id: item for item in db.scalars(select(Chunk).where(Chunk.id.in_(chunk_ids)))
+    } if chunk_ids else {}
+    document_ids = {item.document_id for item in chunks.values()}
+    version_ids = {item.version_id for item in chunks.values()}
+    documents = {
+        item.id: item for item in db.scalars(select(Document).where(Document.id.in_(document_ids)))
+    } if document_ids else {}
+    versions = {
+        item.id: item for item in db.scalars(select(DocumentVersion).where(DocumentVersion.id.in_(version_ids)))
+    } if version_ids else {}
+
+    def evidence_payload(item: InferenceEvidence) -> dict[str, Any]:
+        payload = dict(item.snapshot or {})
+        payload.setdefault("premise_type", item.premise_type)
+        payload.setdefault("source_chunk_id", item.source_chunk_id)
+        chunk = chunks.get(item.source_chunk_id or "")
+        if chunk is None:
+            return payload
+        document = documents.get(chunk.document_id)
+        version = versions.get(chunk.version_id)
+        payload.update(
+            {
+                "source_title": document.title if document else "来源文档",
+                "source_document_id": chunk.document_id,
+                "source_version_id": chunk.version_id,
+                "source_version": version.version_number if version else None,
+                "page_number": chunk.page_number,
+                "structural_path": chunk.structural_path,
+                "source_snippet": chunk.text[:280],
+            }
+        )
+        return payload
+
     result: list[dict[str, Any]] = []
     for row in rows:
-        evidence = list(
-            db.scalars(
-                select(InferenceEvidence)
-                .where(InferenceEvidence.inferred_fact_id == row.id)
-                .order_by(InferenceEvidence.ordinal)
-            )
-        )
+        evidence = evidence_by_fact.get(row.id, [])
         result.append(
             {
                 "id": row.id,
@@ -298,7 +341,7 @@ def inference_result_rows(db: Session, run_id: str) -> list[dict[str, Any]]:
                 "proof": row.proof,
                 "checksum": row.checksum,
                 "created_at": row.created_at.isoformat(),
-                "evidence": [item.snapshot for item in evidence],
+                "evidence": [evidence_payload(item) for item in evidence],
             }
         )
     return result

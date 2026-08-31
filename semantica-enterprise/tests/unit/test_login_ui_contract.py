@@ -39,12 +39,40 @@ def test_browser_regression_contracts_are_present() -> None:
     assert "conversation-clear" in conversation_menu
     assert "conversation-delete" in conversation_menu
     assert "state.documentsMode==='jobs'" in javascript
-    assert "['tool_started','tool_finished']" in javascript
+    assert "event_type==='tool_finished'" in javascript
     assert "已停止生成" in javascript
     assert "score('全文',x.keyword_score" in javascript
     assert "score('向量',x.vector_score" in javascript
     assert "score('图谱',x.graph_score" in javascript
     assert ".shell>aside{background:#fff" in stylesheet
+
+
+def test_knowledge_chat_exposes_observable_dsh_work_without_private_reasoning() -> None:
+    javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
+    stylesheet = (ROOT / "apps/api/static/style.css").read_text(encoding="utf-8")
+
+    for event_type in (
+        "turn_started",
+        "step_started",
+        "retrieval_started",
+        "tool_started",
+        "tool_finished",
+        "retrieval_ranked",
+        "turn_completed",
+        "turn_failed",
+        "turn_cancelled",
+    ):
+        assert event_type in javascript
+    assert "已思考" in javascript
+    assert "不展示模型私有思维链" in javascript
+    assert "requestAnimationFrame(flushChatDelta)" in javascript
+    assert "返回最新回答" in javascript
+    assert "chatPanelTab:'process'" in javascript
+    assert "[['process','执行过程'],['trace','检索轨迹'],['evidence','召回依据']]" in javascript
+    assert "<details><summary>检索范围与高级选项" not in javascript
+    assert "grid-template-columns:205px minmax(360px,1fr) 380px" in stylesheet
+    assert ".agent-step{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto" in stylesheet
+    assert ".chat-inspector-body{min-height:0;overflow:auto" in stylesheet
 
 
 def test_bounded_views_keep_their_own_scroll_containers() -> None:
