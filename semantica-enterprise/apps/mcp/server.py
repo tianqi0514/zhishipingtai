@@ -19,7 +19,7 @@ authorization_header: ContextVar[str | None] = ContextVar("authorization_header"
 
 mcp = FastMCP(
     "传神智库",
-    instructions="通过传神智库 FastAPI 的授权入口检索、对话和读取知识依据。",
+    instructions="通过传神智库 FastAPI 的授权入口检索、对话、推理并安全查询结构化经营数据。",
     stateless_http=True,
     json_response=True,
     transport_security=TransportSecuritySettings(

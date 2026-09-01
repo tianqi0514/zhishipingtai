@@ -2,7 +2,7 @@
 
 传神智库是基于 Semantica 0.6.6 源码增量开发的组织级知识平台。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理画像、OpenSearch/Qdrant/FalkorDB 三路检索、可编辑 3D 图谱、由 DeepSeek Harness 驱动的多轮知识问答，以及按“知识供给—能力场景—上线测试—接入发布—运行反馈”组织的应用构建闭环。当前交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
 
-仓库附带可重复执行的验收数据脚本：`tests/e2e/seed_acceptance_dataset.py` 用于文件、图谱、分析与问答数据，`tests/e2e/seed_source_acceptance.py` 用于数据源。2026-09-01 清空重建后的详细实测结果见 [全链路验收报告](docs/ACCEPTANCE_REGRESSION_20260901.md)。
+仓库附带可重复执行的验收数据脚本：`tests/e2e/seed_guolian_acceptance.py` 建立集团组织、角色、空间和 29 份真实业务多模态资料，`tests/e2e/seed_structured_acceptance.py` 建立 MySQL/PostgreSQL 经营数据、本体和激活映射，`tests/e2e/seed_source_acceptance.py` 用于协议数据源。标准答案与使用顺序见 [集团验收数据集](docs/GUOLIAN_ACCEPTANCE_DATASET.md) 和 [集团业务旅程](docs/GROUP_BUSINESS_USER_JOURNEY.md)。
 
 ## 完整启动
 
@@ -41,7 +41,7 @@ docker compose ps
 - 检索：OpenSearch 全文、Qdrant 向量、FalkorDB 图谱召回，RRF 融合、可选重排、排序依据和真实片段引用。
 - 对话：DeepSeek Harness Agent Loop、多轮 Session、SSE、停止、重试、重启恢复；桌面端三栏展示真实 Agent 执行事件、检索轨迹与按最终排名排列的召回依据，不展示模型私有思维链。
 - 应用构建：以业务应用为中心显示上线准备度和下一步；底层提供最小权限凭据、不可变知识供给、能力场景版本、真实上线测试、反馈转人工治理和调用审计。
-- 开放能力：REST/OpenAPI、MCP Server 和 `chuanshen` CLI。
+- 开放能力：REST/OpenAPI、MCP Server 和 `chuanshen` CLI；三种方式都可以访问权限化知识，MCP/CLI 的结构化查询只接受激活映射和自然语言问题，仍由 FastAPI 完成 Plan/IR 校验与参数化只读执行。
 
 Docker Compose 共启动 12 个服务：API、Worker、Scheduler、Agent Runtime、MCP Server、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB。前端只访问 FastAPI；Harness、MCP 不直接访问业务数据库或检索中间件。
 
@@ -96,6 +96,12 @@ E2E_BASE_URL=http://localhost:8080/api/v1 \
 BOOTSTRAP_ADMIN_PASSWORD='your-admin-password' \
 STRUCTURED_FIXTURE_PASSWORD=structured_fixture_password \
 python3 tests/e2e/seed_structured_acceptance.py
+
+# 国联集团固定业务断言、生命周期与四组 DSH 多轮问题
+ADMIN_PASSWORD='your-admin-password' GUOLIAN_ACCEPTANCE_USER_PASSWORD='acceptance-user-password' \
+  python3 tests/e2e/validate_guolian_business_platform.py
+ADMIN_PASSWORD='your-admin-password' python3 tests/e2e/validate_group_lifecycle.py
+ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/group_agent_quality.py
 ```
 
 ## 文档
@@ -127,6 +133,9 @@ python3 tests/e2e/seed_structured_acceptance.py
 - [结构化查询测试报告](docs/STRUCTURED_QUERY_TEST_REPORT.md)
 - [结构化功能浏览器测试报告](docs/BROWSER_TEST_REPORT.md)
 - [结构化功能开发留痕](docs/DEVELOPMENT_TRACE.md)
+- [集团业务用户手册](docs/BUSINESS_USER_GUIDE.md)
+- [管理员配置指南](docs/ADMIN_CONFIGURATION_GUIDE.md)
+- [知识应用开发者指南](docs/APPLICATION_BUILDER_GUIDE.md)
 - [多轮问答测试报告](docs/QA_REPORT.md)
 - [已知限制](docs/KNOWN_LIMITATIONS.md)
 - [故障排查](docs/TROUBLESHOOTING.md)
