@@ -16,7 +16,7 @@ def test_primary_navigation_uses_nine_business_domains() -> None:
         "知识服务",
         "知识洞察",
         "运营中心",
-        "应用支撑",
+        "应用构建",
         "配置中心",
         "系统管理",
     ):
@@ -35,7 +35,7 @@ def test_configuration_and_system_features_are_grouped() -> None:
 
 
 def test_business_routes_support_history_and_context_tabs() -> None:
-    for view in ("assets", "retrieval", "integrations", "operations", "applications", "products", "appscenarios", "evaluations", "feedback", "configuration", "system"):
+    for view in ("assets", "retrieval", "integrations", "operations", "applications", "products", "appscenarios", "evaluations", "appaccess", "feedback", "configuration", "system"):
         assert f"{view}:" in APP
     assert "history.pushState" in APP
     assert "window.addEventListener('popstate'" in APP

@@ -4,17 +4,17 @@ const VIEW_META={
   dashboard:{title:'工作台',group:'dashboard'},assets:{title:'知识资产',group:'assets'},spaces:{title:'空间与目录',group:'assets'},documents:{title:'文档资产',group:'assets'},curation:{title:'治理工作台',group:'assets'},
   sources:{title:'数据接入',group:'sources'},search:{title:'智能问答',group:'service'},retrieval:{title:'检索调试',group:'service'},integrations:{title:'服务开放',group:'service'},
   knowledge:{title:'知识图谱',group:'insights'},analysis:{title:'知识分析',group:'insights'},operations:{title:'运营中心',group:'operations'},jobs:{title:'任务中心',group:'operations'},capabilities:{title:'能力检测',group:'operations'},
-  applications:{title:'应用中心',group:'applications',admin:true},products:{title:'知识产品',group:'applications',admin:true},appscenarios:{title:'场景配置',group:'applications',admin:true},evaluations:{title:'质量评测',group:'applications',admin:true},feedback:{title:'反馈中心',group:'applications',admin:true},
+  applications:{title:'应用工作台',group:'applications',admin:true},products:{title:'知识供给',group:'applications',admin:true},appscenarios:{title:'能力场景',group:'applications',admin:true},evaluations:{title:'上线测试',group:'applications',admin:true},appaccess:{title:'接入发布',group:'applications',admin:true},feedback:{title:'运行反馈',group:'applications',admin:true},
   configuration:{title:'配置中心',group:'configuration',admin:true},models:{title:'模型服务',group:'configuration',admin:true},parsers:{title:'解析策略',group:'configuration',admin:true},processing:{title:'加工策略',group:'configuration',admin:true},ontologies:{title:'知识结构',group:'configuration',admin:true},
   system:{title:'系统管理',group:'system',admin:true},orgs:{title:'组织机构',group:'system',admin:true},users:{title:'用户管理',group:'system',admin:true},roles:{title:'角色权限',group:'system',admin:true},audits:{title:'审计日志',group:'system',admin:true},
 };
-const GROUP_TITLES={dashboard:'工作台',assets:'知识资产',sources:'数据接入',service:'知识服务',insights:'知识洞察',operations:'运营中心',applications:'应用支撑',configuration:'配置中心',system:'系统管理'};
+const GROUP_TITLES={dashboard:'工作台',assets:'知识资产',sources:'数据接入',service:'知识服务',insights:'知识洞察',operations:'运营中心',applications:'应用构建',configuration:'配置中心',system:'系统管理'};
 const MODULE_TABS={
   assets:[['assets','资产总览'],['spaces','空间与目录'],['documents','文档资产'],['curation','治理工作台']],
   service:[['search','智能问答'],['retrieval','检索调试'],['integrations','服务开放']],
   insights:[['knowledge','知识图谱'],['analysis','知识分析']],
   operations:[['operations','运营概览'],['jobs','任务中心'],['capabilities','能力检测']],
-  applications:[['applications','应用中心'],['products','知识产品'],['appscenarios','场景配置'],['evaluations','质量评测'],['feedback','反馈中心']],
+  applications:[['applications','应用工作台'],['products','知识供给'],['appscenarios','能力场景'],['evaluations','上线测试'],['appaccess','接入发布'],['feedback','运行反馈']],
   configuration:[['configuration','配置总览'],['models','模型服务'],['parsers','解析策略'],['processing','加工策略'],['ontologies','知识结构']],
   system:[['system','管理总览'],['orgs','组织机构'],['users','用户管理'],['roles','角色权限'],['audits','审计日志']],
 };
@@ -68,7 +68,7 @@ $('#logout').onclick=async()=>{try{await api('/auth/logout',{method:'POST'})}fin
 $('#sidebar-toggle').onclick=()=>{applySidebarState(!state.sidebarCollapsed);localStorage.setItem('chuanshen.sidebar',state.sidebarCollapsed?'collapsed':'expanded')};
 $('#nav').onclick=e=>{const b=e.target.closest('[data-view]');if(b)go(b.dataset.view)};
 function actions(html=''){$('#view-actions').innerHTML=html}
-function moduleTabs(){const meta=VIEW_META[state.view],tabs=MODULE_TABS[meta?.group];if(!tabs)return '';return `<nav class="module-tabs" aria-label="${esc(GROUP_TITLES[meta.group])}二级导航">${tabs.map(([view,label])=>`<button type="button" data-module-view="${view}" class="${state.view===view?'active':''}">${label}</button>`).join('')}</nav>`}
+function moduleTabs(){const meta=VIEW_META[state.view],tabs=MODULE_TABS[meta?.group];if(!tabs)return '';const guided=meta.group==='applications';return `<nav class="module-tabs ${guided?'application-flow-tabs':''}" aria-label="${esc(GROUP_TITLES[meta.group])}二级导航">${tabs.map(([view,label],index)=>`<button type="button" data-module-view="${view}" class="${state.view===view?'active':''}">${guided?`<i>${index+1}</i>`:''}${label}</button>`).join('')}</nav>`}
 function page(title,html,viewClass=''){
   const content=$('#content'),meta=VIEW_META[state.view]||{group:'dashboard',title};$('#view-title').textContent=title;$('#breadcrumb').textContent=meta.group==='dashboard'?'工作台':`${GROUP_TITLES[meta.group]} / ${title}`;
   content.className=viewClass;content.classList.add('content-view');content.innerHTML=`${moduleTabs()}<div class="view-body">${html}</div>`;
@@ -123,7 +123,7 @@ async function go(view,recordHistory=true){
   if(state.retrievalAbort){state.retrievalAbort.abort();state.retrievalAbort=null}
   state.sourceDetailId=null;state.view=view;syncNavigation(view);
   if(recordHistory&&location.hash!==`#${view}`)history.pushState({view},'',`#${view}`);else if(!location.hash)history.replaceState({view},'',`#${view}`);
-  const routes={dashboard:renderDashboard,assets:renderAssets,spaces:renderSpaces,documents:renderDocuments,curation:renderCuration,sources:renderSources,search:renderSearch,retrieval:renderRetrievalDebug,integrations:renderIntegrations,knowledge:renderKnowledge,analysis:renderAnalysis,operations:renderOperations,jobs:renderDocumentJobs,models:renderModels,parsers:renderParsers,processing:renderProcessingPolicies,ontologies:renderOntologies,configuration:renderConfiguration,capabilities:renderCapabilities,applications:renderApplications,products:renderKnowledgeProducts,appscenarios:renderApplicationScenarios,evaluations:renderEvaluations,feedback:renderApplicationFeedback,system:renderSystem,orgs:renderOrgs,users:renderUsers,roles:renderRoles,audits:renderAudits};
+  const routes={dashboard:renderDashboard,assets:renderAssets,spaces:renderSpaces,documents:renderDocuments,curation:renderCuration,sources:renderSources,search:renderSearch,retrieval:renderRetrievalDebug,integrations:renderIntegrations,knowledge:renderKnowledge,analysis:renderAnalysis,operations:renderOperations,jobs:renderDocumentJobs,models:renderModels,parsers:renderParsers,processing:renderProcessingPolicies,ontologies:renderOntologies,configuration:renderConfiguration,capabilities:renderCapabilities,applications:renderApplicationWorkbench,products:renderKnowledgeSupply,appscenarios:renderCapabilityScenarios,evaluations:renderLaunchTests,appaccess:renderApplicationAccess,feedback:renderRuntimeFeedback,system:renderSystem,orgs:renderOrgs,users:renderUsers,roles:renderRoles,audits:renderAudits};
   try{await routes[view]()}catch(err){page('错误',`<div class="panel empty">${esc(err.message)}</div>`);toast(err.message,true)}
 }
 
@@ -675,6 +675,298 @@ async function renderEvaluations(){actions('<button id="evaluation-add">新增�
 
 const FEEDBACK_LABELS={incorrect:'答案错误',incomplete:'答案不完整',outdated:'知识过期',bad_citation:'引用不准确',permission:'权限问题',suggestion:'改进建议',positive:'正向反馈'};
 async function renderApplicationFeedback(){actions('<button id="feedback-refresh">刷新</button>');const [rows,applications,scenarios]=await Promise.all([api('/application-feedback'),api('/applications'),api('/application-scenarios')]);const appNames=Object.fromEntries(applications.map(x=>[x.id,x.name])),scenarioNames=Object.fromEntries(scenarios.map(x=>[x.id,x.name]));page('反馈中心',`<div class="summary-strip"><div><span>待处理</span><b>${rows.filter(x=>x.status==='open').length}</b></div><div><span>已转治理</span><b>${rows.filter(x=>x.status==='converted').length}</b></div><div><span>已解决</span><b>${rows.filter(x=>x.status==='resolved').length}</b></div><div><span>反馈总数</span><b>${rows.length}</b></div></div>${table(['应用','场景','反馈类型','评分','内容','状态','时间','操作'],rows.map(x=>`<tr><td>${esc(appNames[x.application_id]||'已删除应用')}</td><td>${esc(scenarioNames[x.scenario_id]||'—')}</td><td>${esc(FEEDBACK_LABELS[x.feedback_type]||x.feedback_type)}</td><td>${x.rating?`${x.rating} / 5`:'—'}</td><td class="truncate">${esc(x.comment||'—')}</td><td>${status(x.status)}</td><td>${fmtDate(x.created_at)}</td><td class="actions">${!x.curation_case_id?btn('转治理任务','feedback-convert',x.id):'<span class="tag">已关联治理</span>'}${btn('标记解决','feedback-resolve',x.id)}${!x.curation_case_id?btn('删除','feedback-delete',x.id,'danger'):''}</td></tr>`))}`);$('#feedback-refresh').onclick=renderApplicationFeedback;$('#content').onclick=async e=>{const b=e.target.closest('[data-action]');if(!b)return;const x=rows.find(row=>row.id===b.dataset.id);try{if(b.dataset.action==='feedback-convert'){await api(`/application-feedback/${x.id}/convert-to-curation`,{method:'POST'});toast('已转入现有治理工作台');renderApplicationFeedback()}if(b.dataset.action==='feedback-resolve'){await api(`/application-feedback/${x.id}`,{method:'PUT',body:{status:'resolved'}});renderApplicationFeedback()}if(b.dataset.action==='feedback-delete'&&confirm('删除这条反馈？')){await api(`/application-feedback/${x.id}`,{method:'DELETE'});renderApplicationFeedback()}}catch(err){toast(err.message,true)}}}
+
+/* Application builder UX: business journey over the immutable A0 foundation. */
+const APP_SCENARIO_LABELS={search:'知识检索',chat:'智能问答',analysis:'知识分析',structured:'结构化输出'};
+const APPLICATION_GUIDES={
+  applications:{title:'应用工作台',purpose:'从一个业务应用出发，查看知识、能力、测试和接入是否准备完成。',action:'创建应用后，按照页面上的步骤逐项完成；“继续配置”会自动带你去当前缺失的环节。',output:'一个具备明确知识范围、能力场景、测试结果和接入权限的可上线应用。',next:'先选择知识供给，再配置能力场景。'},
+  products:{title:'知识供给',purpose:'把一个或多个知识空间组合成应用可以稳定使用的知识版本。',action:'选择知识空间并创建版本；验证完成后把正式供给指向准备上线的版本。',output:'可追溯、可切换且不会随空间变化而意外漂移的知识供给。',next:'完成正式供给后，到能力场景定义应用如何使用这些知识。'},
+  appscenarios:{title:'能力场景',purpose:'定义应用要提供的具体能力，例如知识检索、智能问答或知识分析。',action:'选择知识供给、检索通道和模型，并发布一个不可变场景版本。',output:'应用可以稳定调用的能力编码和执行配置。',next:'发布场景版本后，使用上线测试验证真实效果。'},
+  evaluations:{title:'上线测试',purpose:'使用标准业务问题验证检索结果是否命中正确依据。',action:'维护测试问题和标准依据，选择场景版本运行真实检索测试。',output:'Recall、MRR、NDCG 和明确的通过/未通过结论。',next:'测试通过后，到接入发布生成凭据并开放调用范围。'},
+  appaccess:{title:'接入发布',purpose:'控制哪个应用可以调用哪些知识与场景，并为业务系统生成接入凭据。',action:'授权知识供给和能力场景，创建最小权限凭据，再按接入说明换取短期 Token。',output:'可以撤销、轮换和审计的安全接入方式。',next:'接入后在运行反馈中持续处理知识质量问题。'},
+  feedback:{title:'运行反馈',purpose:'集中处理应用上线后出现的答案错误、知识过期和引用问题。',action:'查看用户反馈，必要时转成现有人工治理任务；处理完成后标记解决。',output:'从应用问题回到知识治理、修正和重新发布的闭环。',next:'高频问题应补充到上线测试集中，防止再次出现。'},
+};
+
+async function showApplicationGuide(view){
+  const item=APPLICATION_GUIDES[view];
+  if(!item)return;
+  $('#modal-cancel').classList.add('hidden');
+  try{
+    await modal(`${item.title} · 功能说明`,`<div class="feature-guide"><div><span>这个页面解决什么</span><p>${esc(item.purpose)}</p></div><div><span>你需要做什么</span><p>${esc(item.action)}</p></div><div><span>完成后得到什么</span><p>${esc(item.output)}</p></div><div class="semantica-guide"><b>下一步</b><p>${esc(item.next)}</p></div></div>`,async()=>{},'知道了');
+  }finally{$('#modal-cancel').classList.remove('hidden')}
+}
+
+function bindApplicationGuide(view){
+  const button=$('#application-guide');
+  if(button)button.onclick=()=>showApplicationGuide(view);
+}
+
+function allowedApplicationGrants(grants,type,permission){
+  const denied=new Set(grants.filter(x=>x.resource_type===type&&x.permission===permission&&x.effect==='deny').map(x=>x.resource_id));
+  return new Set(grants.filter(x=>x.resource_type===type&&x.permission===permission&&x.effect==='allow'&&!denied.has(x.resource_id)).map(x=>x.resource_id));
+}
+
+function applicationReadiness(application,credentials,grants,products,scenarios,runs,feedback){
+  const productIds=allowedApplicationGrants(grants,'knowledge_product','read');
+  const scenarioIds=allowedApplicationGrants(grants,'scenario','invoke');
+  const linkedProducts=products.filter(x=>productIds.has(x.id));
+  const linkedScenarios=scenarios.filter(x=>scenarioIds.has(x.id));
+  const supplyReady=linkedProducts.some(x=>Boolean(x.aliases?.production));
+  const scenarioReady=linkedScenarios.some(x=>Boolean(x.current_version_id));
+  const passedRuns=linkedScenarios.flatMap(s=>runs.filter(r=>r.scenario_version_id===s.current_version_id&&r.gate_passed===true));
+  const testReady=passedRuns.length>0;
+  const accessReady=credentials.some(x=>x.status==='active')&&productIds.size>0&&scenarioIds.size>0;
+  const completed=[supplyReady,scenarioReady,testReady,accessReady].filter(Boolean).length;
+  let next={view:'feedback',label:'查看运行反馈'};
+  if(!productIds.size)next={action:'select-product',label:'选择知识供给'};
+  else if(!supplyReady)next={view:'products',label:'发布正式知识供给'};
+  else if(!scenarioIds.size)next={action:'select-scenario',label:'选择能力场景'};
+  else if(!scenarioReady)next={view:'appscenarios',label:'发布能力场景'};
+  else if(!testReady)next={view:'evaluations',label:'运行上线测试'};
+  else if(!accessReady)next={view:'appaccess',label:'生成接入凭据'};
+  return {
+    productIds,scenarioIds,linkedProducts,linkedScenarios,supplyReady,scenarioReady,testReady,accessReady,
+    passedRuns,progress:completed*25,next,feedbackCount:feedback.filter(x=>x.application_id===application.id).length,
+    ready:completed===4&&application.status==='active'&&application.enabled,
+  };
+}
+
+function journeyCard(number,title,description,done,detail,action){
+  return `<article class="application-journey-card ${done?'done':'pending'}"><i>${done?'✓':number}</i><div><span>${done?'已完成':'待完成'}</span><h4>${title}</h4><p>${description}</p><small>${esc(detail)}</small></div>${action||''}</article>`;
+}
+
+async function editBusinessApplication(x){
+  await refreshLookups();
+  const ok=await modal(x?'编辑应用':'创建业务应用',applicationForm(x),async d=>{if(x)delete d.code;const saved=await api(x?`/applications/${x.id}`:'/applications',{method:x?'PUT':'POST',body:d});if(!x)state.applicationSelectedId=saved.id},x?'保存':'创建应用');
+  if(ok){toast('应用已保存');renderApplicationWorkbench()}
+}
+
+async function chooseApplicationResource(application,type,rows,grants){
+  const permission=type==='knowledge_product'?'read':'invoke';
+  const existing=allowedApplicationGrants(grants,type,permission);
+  const choices=rows.filter(x=>!existing.has(x.id));
+  const targetView=type==='knowledge_product'?'products':'appscenarios';
+  const label=type==='knowledge_product'?'知识供给':'能力场景';
+  if(!choices.length){toast(`没有可选择的${label}，请先创建或检查现有授权`,true);return go(targetView)}
+  const ok=await modal(`为 ${application.name} 选择${label}`,selectField('resource_id',label,choices.map(x=>[x.id,x.name]),'','required'),async d=>api(`/applications/${application.id}/grants`,{method:'POST',body:{resource_type:type,resource_id:d.resource_id,permission,effect:'allow'}}),'确认选择');
+  if(ok){toast(`${label}已关联到应用`);renderApplicationWorkbench()}
+}
+
+async function renderApplicationWorkbench(){
+  actions('<button id="application-guide" class="secondary">功能说明</button><button id="application-add">创建应用</button>');
+  const [rows,products,scenarios,runs,feedback]=await Promise.all([api('/applications'),api('/knowledge-products'),api('/application-scenarios'),api('/evaluation-runs'),api('/application-feedback')]);
+  if(!rows.some(x=>x.id===state.applicationSelectedId))state.applicationSelectedId=rows[0]?.id||null;
+  const selected=rows.find(x=>x.id===state.applicationSelectedId);
+  let credentials=[],grants=[];
+  if(selected)[credentials,grants]=await Promise.all([api(`/applications/${selected.id}/credentials`),api(`/applications/${selected.id}/grants`)]);
+  const readiness=selected?applicationReadiness(selected,credentials,grants,products,scenarios,runs,feedback):null;
+  const list=rows.length?rows.map(x=>`<button class="foundation-list-item ${x.id===selected?.id?'active':''}" data-app-select="${x.id}"><span><b>${esc(x.name)}</b>${status(x.status)}</span><small>${esc(APP_TYPE_LABELS[x.app_type]||x.app_type)} · ${esc(APP_ENV_LABELS[x.environment]||x.environment)}</small></button>`).join(''):'<div class="empty-action"><b>还没有业务应用</b><span>先创建应用，再按照步骤准备知识与能力</span></div>';
+  let detail='<div class="empty-action"><b>创建第一个业务应用</b><span>系统会引导你完成知识、能力、测试和接入配置</span><button id="application-empty-add">创建应用</button></div>';
+  if(selected){
+    const supplyNames=readiness.linkedProducts.map(x=>x.name).join('、')||'尚未选择';
+    const scenarioNames=readiness.linkedScenarios.map(x=>x.name).join('、')||'尚未选择';
+    const activeCredentials=credentials.filter(x=>x.status==='active').length;
+    const nextAttrs=readiness.next.view?`data-app-route="${readiness.next.view}"`:`data-journey="${readiness.next.action}"`;
+    detail=`<div class="application-workbench-head"><div><span class="application-state ${readiness.ready?'ready':'building'}">${readiness.ready?'可以接入':'准备中'}</span><h3>${esc(selected.name)}</h3><p>${esc(selected.description||'尚未填写这个应用要解决的业务问题')}</p></div><div class="application-readiness"><span>上线准备度</span><b>${readiness.progress}%</b>${progress(readiness.progress)}</div><div class="application-head-actions"><button ${nextAttrs}>${esc(readiness.next.label)}</button>${btn('编辑应用','app-edit',selected.id)}${btn('删除','app-delete',selected.id,'danger')}</div></div><div class="application-overview-strip"><div><span>知识供给</span><b>${readiness.linkedProducts.length}</b><small>${esc(supplyNames)}</small></div><div><span>能力场景</span><b>${readiness.linkedScenarios.length}</b><small>${esc(scenarioNames)}</small></div><div><span>通过测试</span><b>${readiness.passedRuns.length}</b><small>${readiness.testReady?'已有场景达到上线门槛':'尚未通过上线测试'}</small></div><div><span>有效凭据</span><b>${activeCredentials}</b><small>${readiness.accessReady?'接入权限已准备':'接入尚未完成'}</small></div></div><div class="application-journey"><div class="application-journey-title"><div><b>应用上线流程</b><span>按顺序完成下面四项即可接入业务系统</span></div></div>${journeyCard(1,'准备知识供给','确定这个应用可以使用哪些知识，并固定正式版本。',readiness.supplyReady,readiness.productIds.size?supplyNames:'还没有选择知识供给',readiness.productIds.size?'<button class="secondary small" data-app-route="products">管理知识供给</button>':'<button class="small" data-journey="select-product">选择知识供给</button>')}${journeyCard(2,'配置能力场景','确定应用提供检索、问答还是分析能力。',readiness.scenarioReady,readiness.scenarioIds.size?scenarioNames:'还没有选择能力场景',readiness.scenarioIds.size?'<button class="secondary small" data-app-route="appscenarios">管理能力场景</button>':'<button class="small" data-journey="select-scenario">选择能力场景</button>')}${journeyCard(3,'完成上线测试','用标准业务问题验证召回依据和排序效果。',readiness.testReady,readiness.testReady?`${readiness.passedRuns.length} 次测试已通过`:'还没有通过质量门禁','<button class="secondary small" data-app-route="evaluations">进入上线测试</button>')}${journeyCard(4,'发布接入','开放知识和场景权限，生成可撤销的接入凭据。',readiness.accessReady,readiness.accessReady?`${activeCredentials} 个有效凭据`:'还没有有效接入凭据','<button class="secondary small" data-app-route="appaccess">管理接入发布</button>')}</div><div class="application-feedback-link"><div><b>上线后的问题怎么处理？</b><span>当前应用已收到 ${readiness.feedbackCount} 条反馈，可直接转入现有人工治理工作台。</span></div><button class="secondary" data-app-route="feedback">查看运行反馈</button></div>`;
+  }
+  page('应用工作台',`<div class="foundation-layout application-workbench-layout"><aside class="foundation-list">${list}</aside><section class="foundation-detail application-workbench-detail">${detail}</section></div>`,'foundation-view application-builder-view');
+  bindApplicationGuide('applications');
+  $('#application-add').onclick=()=>editBusinessApplication();
+  if($('#application-empty-add'))$('#application-empty-add').onclick=()=>editBusinessApplication();
+  $('#content').onclick=async e=>{
+    const selectId=e.target.closest('[data-app-select]')?.dataset.appSelect;
+    if(selectId){state.applicationSelectedId=selectId;return renderApplicationWorkbench()}
+    const route=e.target.closest('[data-app-route]')?.dataset.appRoute;
+    if(route)return go(route);
+    const journey=e.target.closest('[data-journey]')?.dataset.journey;
+    if(journey==='select-product')return chooseApplicationResource(selected,'knowledge_product',products,grants);
+    if(journey==='select-scenario')return chooseApplicationResource(selected,'scenario',scenarios,grants);
+    const button=e.target.closest('[data-action]');
+    if(!button||!selected)return;
+    try{
+      if(button.dataset.action==='app-edit')editBusinessApplication(selected);
+      if(button.dataset.action==='app-delete'&&confirm(`删除应用 ${selected.name}？它的所有接入凭据会立即失效。`)){await api(`/applications/${selected.id}`,{method:'DELETE'});state.applicationSelectedId=null;renderApplicationWorkbench()}
+    }catch(err){toast(err.message,true)}
+  };
+}
+
+async function issueAccessCredential(application,old=null){
+  let result=null;
+  const defaults=old?.scopes||['scenario.invoke'];
+  const body=field('name','凭据用途',old?`${old.name}（轮换）`:'业务系统接入','text','required')+`<label class="field"><span>允许调用的能力</span>${selectedChecks('credential_scope',Object.entries(APP_SCOPE_LABELS),defaults)}</label>`+field('expires_at','到期时间（可选）','','datetime-local');
+  const ok=await modal(old?'轮换接入凭据':'生成接入凭据',body,async(d,form)=>{const scopes=[...form.querySelectorAll('[name=credential_scope]:checked')].map(x=>x.value);if(!scopes.length)throw new Error('至少选择一个可调用能力');result=await api(old?`/applications/${application.id}/credentials/${old.id}/rotate`:`/applications/${application.id}/credentials`,{method:'POST',body:{name:d.name,scopes,expires_at:d.expires_at?new Date(d.expires_at).toISOString():null}})},old?'确认轮换':'生成凭据');
+  if(ok){await showCredentialSecret(result);renderApplicationAccess()}
+}
+
+async function createAccessGrant(application,products,scenarios){
+  const body=selectField('resource_type','开放内容',[['knowledge_product','知识供给'],['scenario','能力场景']],'knowledge_product')+`<label class="field"><span>选择内容</span><select name="resource_id" id="grant-resource" required></select></label>`+selectField('permission','开放方式',[['read','使用知识'],['invoke','调用能力'],['manage','管理']],'read');
+  const ok=await modal('新增开放范围',body,async d=>api(`/applications/${application.id}/grants`,{method:'POST',body:{...d,effect:'allow'}}),'确认开放',form=>{const type=form.elements.namedItem('resource_type'),resource=form.elements.namedItem('resource_id'),permission=form.elements.namedItem('permission');const fill=()=>{const rows=type.value==='scenario'?scenarios:products;resource.innerHTML=rows.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');permission.value=type.value==='scenario'?'invoke':'read'};type.onchange=fill;fill()});
+  if(ok){toast('开放范围已更新');renderApplicationAccess()}
+}
+
+async function showAccessGuide(application){
+  $('#modal-cancel').classList.add('hidden');
+  try{
+    await modal(`${application.name} · 接入说明`,`<div class="access-guide"><article><i>1</i><div><b>保存一次性凭据</b><p>生成凭据后安全保存 Client ID 和 Client Secret；Secret 关闭弹窗后无法再次查看。</p></div></article><article><i>2</i><div><b>换取短期访问令牌</b><code>POST /api/v1/application-auth/token</code><p>使用凭据换取 15 分钟有效的 Token，不要把长期 Secret 放进浏览器。</p></div></article><article><i>3</i><div><b>调用已授权场景</b><code>POST /api/v1/application-runtime/scenarios/{场景编码}/search</code><p>应用只能访问本页明确开放的知识供给和能力场景。</p></div></article></div>`,async()=>{},'关闭');
+  }finally{$('#modal-cancel').classList.remove('hidden')}
+}
+
+async function renderApplicationAccess(){
+  actions('<button id="application-guide" class="secondary">功能说明</button>');
+  const [applications,products,scenarios]=await Promise.all([api('/applications'),api('/knowledge-products'),api('/application-scenarios')]);
+  if(!applications.some(x=>x.id===state.applicationSelectedId))state.applicationSelectedId=applications[0]?.id||null;
+  const selected=applications.find(x=>x.id===state.applicationSelectedId);
+  let credentials=[],grants=[];
+  if(selected)[credentials,grants]=await Promise.all([api(`/applications/${selected.id}/credentials`),api(`/applications/${selected.id}/grants`)]);
+  const productNames=Object.fromEntries(products.map(x=>[x.id,x.name])),scenarioNames=Object.fromEntries(scenarios.map(x=>[x.id,x.name]));
+  const productGrants=grants.filter(x=>x.resource_type==='knowledge_product'&&x.permission==='read'&&x.effect==='allow');
+  const scenarioGrants=grants.filter(x=>x.resource_type==='scenario'&&x.permission==='invoke'&&x.effect==='allow');
+  const activeCredentials=credentials.filter(x=>x.status==='active');
+  const ready=Boolean(productGrants.length&&scenarioGrants.length&&activeCredentials.length);
+  const list=applications.length?applications.map(x=>`<button class="foundation-list-item ${x.id===selected?.id?'active':''}" data-access-app="${x.id}"><span><b>${esc(x.name)}</b>${status(x.status)}</span><small>${esc(APP_ENV_LABELS[x.environment]||x.environment)}</small></button>`).join(''):'<div class="empty-action"><b>还没有业务应用</b></div>';
+  const detail=selected?`<div class="foundation-head access-head"><div><span>${esc(selected.code)}</span><h3>${esc(selected.name)}</h3><p>将准备好的知识能力安全开放给业务系统</p></div><div><button id="access-guide" class="secondary">查看接入说明</button><button id="credential-add">生成接入凭据</button></div></div><div class="access-readiness ${ready?'ready':''}"><div><span>${ready?'✓':'!'}</span><div><b>${ready?'接入条件已满足':'还不能正式接入'}</b><small>${ready?'业务系统可以使用有效凭据调用已开放场景':'请完成知识供给、能力场景和接入凭据三项配置'}</small></div></div><button id="go-workbench" class="secondary">返回应用工作台</button></div><div class="access-checklist"><article class="${productGrants.length?'done':''}"><i>${productGrants.length?'✓':'1'}</i><span>知识供给授权</span><b>${productGrants.length} 项</b></article><article class="${scenarioGrants.length?'done':''}"><i>${scenarioGrants.length?'✓':'2'}</i><span>能力场景授权</span><b>${scenarioGrants.length} 项</b></article><article class="${activeCredentials.length?'done':''}"><i>${activeCredentials.length?'✓':'3'}</i><span>有效接入凭据</span><b>${activeCredentials.length} 个</b></article></div><div class="foundation-section"><div class="panel-heading"><div><b>接入凭据</b><small>Secret 只在生成或轮换时显示一次</small></div></div>${table(['凭据用途','接入标识','可调用能力','最近使用','状态','操作'],credentials.map(x=>`<tr><td>${esc(x.name)}</td><td class="mono">${esc(x.client_id)}</td><td>${(x.scopes||[]).map(s=>`<span class="tag">${esc(APP_SCOPE_LABELS[s]||s)}</span>`).join(' ')}</td><td>${fmtDate(x.last_used_at)}</td><td>${status(x.status)}</td><td class="actions">${x.status==='active'?btn('轮换','access-rotate',x.id)+btn('撤销','access-revoke',x.id,'danger'):'—'}</td></tr>`))}</div><div class="foundation-section"><div class="panel-heading"><div><b>已开放范围</b><small>应用只有同时获得知识读取和场景调用授权才能运行</small></div><button id="grant-add" class="small">新增开放范围</button></div>${table(['内容类型','名称','开放方式','状态','操作'],grants.map(x=>`<tr><td>${x.resource_type==='scenario'?'能力场景':'知识供给'}</td><td>${esc((x.resource_type==='scenario'?scenarioNames:productNames)[x.resource_id]||'资源已删除')}</td><td>${x.permission==='invoke'?'调用能力':x.permission==='read'?'使用知识':'管理'}</td><td>${x.effect==='allow'?status('active'):status('suspended')}</td><td>${btn('移除','access-grant-delete',x.id,'danger')}</td></tr>`))}</div>`:'<div class="empty-action"><b>请先在应用工作台创建应用</b><button id="go-workbench">返回应用工作台</button></div>';
+  page('接入发布',`<div class="foundation-layout"><aside class="foundation-list">${list}</aside><section class="foundation-detail">${detail}</section></div>`,'foundation-view application-builder-view');
+  bindApplicationGuide('appaccess');
+  if($('#go-workbench'))$('#go-workbench').onclick=()=>go('applications');
+  if(!selected)return;
+  $('#access-guide').onclick=()=>showAccessGuide(selected);
+  $('#credential-add').onclick=()=>issueAccessCredential(selected);
+  $('#grant-add').onclick=()=>createAccessGrant(selected,products,scenarios);
+  $('#content').onclick=async e=>{
+    const appId=e.target.closest('[data-access-app]')?.dataset.accessApp;
+    if(appId){state.applicationSelectedId=appId;return renderApplicationAccess()}
+    const button=e.target.closest('[data-action]');
+    if(!button)return;
+    const credential=credentials.find(x=>x.id===button.dataset.id);
+    try{
+      if(button.dataset.action==='access-rotate')issueAccessCredential(selected,credential);
+      if(button.dataset.action==='access-revoke'&&confirm(`撤销凭据 ${credential.name}？已经签发的令牌也会立即失效。`)){await api(`/applications/${selected.id}/credentials/${credential.id}`,{method:'DELETE'});renderApplicationAccess()}
+      if(button.dataset.action==='access-grant-delete'&&confirm('移除这项开放范围？')){await api(`/applications/${selected.id}/grants/${button.dataset.id}`,{method:'DELETE'});renderApplicationAccess()}
+    }catch(err){toast(err.message,true)}
+  };
+}
+
+function knowledgeSupplyForm(x={}){
+  return `<div class="field-row">${field('code','内部编码',x.code||'','text',x.id?'disabled':'required pattern="[a-z][a-z0-9_-]{1,99}"')}${field('name','知识供给名称',x.name||'','text','required')}</div>`+area('description','这个知识供给服务什么业务',x.description||'')+`<label class="field"><span>包含的知识空间</span><div class="choice-grid">${state.spaces.map(space=>`<label class="check"><input type="checkbox" name="product_space" value="${space.id}" ${(x.space_ids||[]).includes(space.id)?'checked':''}>${esc(space.name)}</label>`).join('')}</div></label><div class="field-row">${selectField('owner_id','负责人',opt(state.users),x.owner_id||state.user.id,'required')}${selectField('status','状态',[['draft','准备中'],['active','可使用'],['retired','已停用']],x.status||'draft')}</div>`+check('enabled','允许应用使用',x.enabled??true);
+}
+
+async function editKnowledgeSupply(x){
+  await refreshLookups();
+  const ok=await modal(x?'编辑知识供给':'新增知识供给',knowledgeSupplyForm(x),async(d,form)=>{d.space_ids=[...form.querySelectorAll('[name=product_space]:checked')].map(el=>el.value);delete d.product_space;if(!d.space_ids.length)throw new Error('至少选择一个知识空间');if(x)delete d.code;const saved=await api(x?`/knowledge-products/${x.id}`:'/knowledge-products',{method:x?'PUT':'POST',body:d});if(!x)state.productSelectedId=saved.id});
+  if(ok){toast('知识供给已保存');renderKnowledgeSupply()}
+}
+
+async function moveSupplyAlias(product,alias,releases){
+  const label={development:'开发验证',testing:'测试验证',production:'正式供给'}[alias];
+  const ok=await modal(`设置${label}版本`,selectField('product_release_id','选择知识版本',releases.map(x=>[x.id,`V${x.version} · ${x.manifest?.note||'未填写说明'}`]),product.aliases?.[alias]||'','required')+field('reason','切换原因','','text','required'),async d=>api(`/knowledge-products/${product.id}/aliases/${alias}`,{method:'PUT',body:d}),'确认切换');
+  if(ok){toast(`${label}版本已更新`);renderKnowledgeSupply()}
+}
+
+async function renderKnowledgeSupply(){
+  actions('<button id="application-guide" class="secondary">功能说明</button><button id="product-add">新增知识供给</button>');
+  await refreshLookups();
+  const rows=await api('/knowledge-products');
+  if(!rows.some(x=>x.id===state.productSelectedId))state.productSelectedId=rows[0]?.id||null;
+  const selected=rows.find(x=>x.id===state.productSelectedId),releases=selected?await api(`/knowledge-products/${selected.id}/releases`):[];
+  const spaceNames=Object.fromEntries(state.spaces.map(x=>[x.id,x.name])),releaseById=Object.fromEntries(releases.map(x=>[x.id,x]));
+  const list=rows.length?rows.map(x=>`<button class="foundation-list-item ${x.id===selected?.id?'active':''}" data-product-select="${x.id}"><span><b>${esc(x.name)}</b>${status(x.status)}</span><small>${x.space_ids.length} 个知识空间 · ${x.aliases?.production?'已正式供给':'尚未正式供给'}</small></button>`).join(''):'<div class="empty-action"><b>还没有知识供给</b><span>把应用需要使用的知识空间组合起来</span></div>';
+  const detail=selected?`<div class="foundation-head"><div><span>知识供给</span><h3>${esc(selected.name)}</h3><p>${esc(selected.description||'尚未填写业务用途')}</p></div><div>${btn('编辑','supply-edit',selected.id)}${btn('删除','supply-delete',selected.id,'danger')}</div></div><div class="supply-space-block"><b>包含的知识</b><div class="product-spaces">${selected.space_ids.map(id=>`<span>${esc(spaceNames[id]||id)}</span>`).join('')||'<em>尚未选择知识空间</em>'}</div></div><div class="environment-grid">${['development','testing','production'].map(alias=>{const release=releaseById[selected.aliases?.[alias]],label={development:'开发验证',testing:'测试验证',production:'正式供给'}[alias];return `<article class="${alias==='production'?'production':''}"><span>${label}</span><b>${release?`V${release.version}`:'未设置'}</b><small>${release?fmtDate(release.published_at):'应用暂不能使用此环境'}</small><button class="secondary small" data-supply-alias="${alias}" ${releases.length?'':'disabled'}>选择版本</button></article>`}).join('')}</div><div class="foundation-section"><div class="panel-heading"><div><b>知识版本</b><small>每个版本固定当时的知识内容，可随时切换且不会覆盖历史</small></div><button id="product-release" class="small">创建知识版本</button></div>${table(['版本','知识范围','版本说明','创建时间','技术信息'],releases.map(x=>`<tr><td><b>V${x.version}</b></td><td>${x.items.length} 个知识空间</td><td>${esc(x.manifest?.note||'—')}</td><td>${fmtDate(x.published_at)}</td><td><details><summary>查看</summary><code>${esc(x.checksum.slice(0,16))}</code></details></td></tr>`))}</div>`:'<div class="empty-action"><b>选择一个知识供给</b></div>';
+  page('知识供给',`<div class="foundation-business-intro"><b>为应用准备稳定的知识范围</b><span>选择知识空间、创建版本，并把验证完成的版本设为“正式供给”。</span></div><div class="foundation-layout"><aside class="foundation-list">${list}</aside><section class="foundation-detail">${detail}</section></div>`,'foundation-view application-builder-view');
+  bindApplicationGuide('products');
+  $('#product-add').onclick=()=>editKnowledgeSupply();
+  $('#content').onclick=async e=>{
+    const id=e.target.closest('[data-product-select]')?.dataset.productSelect;
+    if(id){state.productSelectedId=id;return renderKnowledgeSupply()}
+    const alias=e.target.closest('[data-supply-alias]')?.dataset.supplyAlias;
+    if(alias&&selected)return moveSupplyAlias(selected,alias,releases);
+    const button=e.target.closest('[data-action]');
+    if(!button||!selected)return;
+    try{
+      if(button.dataset.action==='supply-edit')editKnowledgeSupply(selected);
+      if(button.dataset.action==='supply-delete'&&confirm(`删除知识供给 ${selected.name}？`)){await api(`/knowledge-products/${selected.id}`,{method:'DELETE'});state.productSelectedId=null;renderKnowledgeSupply()}
+    }catch(err){toast(err.message,true)}
+  };
+  if(selected)$('#product-release').onclick=async()=>{const ok=await modal('创建知识版本',field('note','这次版本包含什么变化','','text','required'),async d=>api(`/knowledge-products/${selected.id}/releases`,{method:'POST',body:d}),'创建版本');if(ok){toast('知识版本已创建');renderKnowledgeSupply()}};
+}
+
+function capabilityScenarioForm(x={}){
+  return `<div class="field-row">${field('code','内部编码',x.code||'','text',x.id?'disabled':'required pattern="[a-z][a-z0-9_-]{1,99}"')}${field('name','能力名称',x.name||'','text','required')}</div>`+area('description','这个能力帮助用户完成什么',x.description||'')+`<div class="field-row">${selectField('scenario_type','提供的能力',[['search','知识检索'],['chat','智能问答'],['analysis','知识分析'],['structured','结构化输出']],x.scenario_type||'search')}${selectField('owner_id','负责人',opt(state.users),x.owner_id||state.user.id,'required')}</div><div class="field-row">${selectField('status','状态',[['draft','准备中'],['active','可调用'],['retired','已停用']],x.status||'draft')}${check('enabled','允许应用调用',x.enabled??true)}</div>`;
+}
+
+async function editCapabilityScenario(x){
+  await refreshLookups();
+  const ok=await modal(x?'编辑能力场景':'新增能力场景',capabilityScenarioForm(x),async d=>{if(x)delete d.code;const saved=await api(x?`/application-scenarios/${x.id}`:'/application-scenarios',{method:x?'PUT':'POST',body:d});if(!x)state.scenarioSelectedId=saved.id});
+  if(ok){toast('能力场景已保存');renderCapabilityScenarios()}
+}
+
+async function createCapabilityVersion(scenario,products,models){
+  if(!products.length){toast('请先创建知识供给',true);return go('products')}
+  const body=selectField('product_id','使用的知识供给',products.map(x=>[x.id,x.name]),'','required')+`<div class="field-row">${selectField('product_alias','使用哪个环境',[['development','开发验证'],['testing','测试验证'],['production','正式供给']],'production')}${selectField('model_config_id','大语言模型',[['','不使用大模型'],...models.filter(x=>x.model_kind==='llm'&&x.enabled).map(x=>[x.id,x.name])],'')}</div><label class="field"><span>使用哪些检索方式</span>${selectedChecks('scenario_channel',[['keyword','全文'],['vector','向量'],['graph','图谱']],['keyword','vector','graph'])}</label><div class="field-row">${field('top_k','最多参考几条依据',8,'number','required min="1" max="100"')}${check('use_reranker','对召回结果再次排序',false)}</div>`+`<details class="technical-options"><summary>技术选项</summary>${area('response_schema','结构化输出 Schema',{},true)}</details>`;
+  const ok=await modal('发布能力版本',body,async(d,form)=>{const channels=[...form.querySelectorAll('[name=scenario_channel]:checked')].map(x=>x.value);if(!channels.length)throw new Error('至少启用一种检索方式');await api(`/application-scenarios/${scenario.id}/versions`,{method:'POST',body:{product_id:d.product_id,product_alias:d.product_alias,model_config_id:d.model_config_id||null,tool_whitelist:['knowledge_search','knowledge_get_fragment'],retrieval_policy:{top_k:Number(d.top_k),use_keyword:channels.includes('keyword'),use_vector:channels.includes('vector'),use_graph:channels.includes('graph'),use_reranker:Boolean(d.use_reranker)},system_policy:{},response_schema:d.response_schema||{},citation_policy:{required:true},fallback_policy:{insufficient_evidence:'disclose'},analysis_rule_set_ids:[]}})},'发布版本');
+  if(ok){toast('能力版本已发布');renderCapabilityScenarios()}
+}
+
+async function renderCapabilityScenarios(){
+  actions('<button id="application-guide" class="secondary">功能说明</button><button id="app-scenario-add">新增能力场景</button>');
+  await refreshLookups();
+  const [rows,products,models]=await Promise.all([api('/application-scenarios'),api('/knowledge-products'),api('/model-configs')]);
+  if(!rows.some(x=>x.id===state.scenarioSelectedId))state.scenarioSelectedId=rows[0]?.id||null;
+  const selected=rows.find(x=>x.id===state.scenarioSelectedId),versions=selected?await api(`/application-scenarios/${selected.id}/versions`):[],productNames=Object.fromEntries(products.map(x=>[x.id,x.name]));
+  const list=rows.length?rows.map(x=>`<button class="foundation-list-item ${x.id===selected?.id?'active':''}" data-scenario-select="${x.id}"><span><b>${esc(x.name)}</b>${status(x.status)}</span><small>${esc(APP_SCENARIO_LABELS[x.scenario_type]||x.scenario_type)} · ${x.current_version_id?'已有可用版本':'尚未发布版本'}</small></button>`).join(''):'<div class="empty-action"><b>还没有能力场景</b><span>定义应用是检索、问答还是分析知识</span></div>';
+  const detail=selected?`<div class="foundation-head"><div><span>${esc(APP_SCENARIO_LABELS[selected.scenario_type]||selected.scenario_type)}</span><h3>${esc(selected.name)}</h3><p>${esc(selected.description||'尚未填写业务用途')}</p></div><div>${btn('编辑','capability-edit',selected.id)}${btn('删除','capability-delete',selected.id,'danger')}</div></div><div class="capability-summary"><article><span>当前状态</span><b>${selected.current_version_id?'已发布，可供授权':'需要发布第一个版本'}</b></article><article><span>能力类型</span><b>${esc(APP_SCENARIO_LABELS[selected.scenario_type]||selected.scenario_type)}</b></article><article><span>历史版本</span><b>${versions.length}</b></article></div><div class="foundation-section"><div class="panel-heading"><div><b>能力版本</b><small>发布后的配置不可修改，调整会生成新版本并保留历史</small></div><button id="scenario-version-add" class="small">发布新版本</button></div>${table(['版本','使用的知识供给','环境','检索方式','状态','创建时间'],versions.map(x=>`<tr><td><b>V${x.version}</b></td><td>${esc(productNames[x.product_id]||'知识供给已删除')}</td><td>${esc({development:'开发验证',testing:'测试验证',production:'正式供给'}[x.product_alias]||x.product_alias)}</td><td>${['use_keyword','use_vector','use_graph','use_reranker'].filter(k=>x.retrieval_policy?.[k]).map(k=>`<span class="tag">${{use_keyword:'全文',use_vector:'向量',use_graph:'图谱',use_reranker:'重排'}[k]}</span>`).join(' ')}</td><td>${x.id===selected.current_version_id?status('active'):'历史版本'}</td><td>${fmtDate(x.created_at)}</td></tr>`))}</div>`:'<div class="empty-action"><b>选择一个能力场景</b></div>';
+  page('能力场景',`<div class="foundation-business-intro"><b>定义应用能够提供什么能力</b><span>选择知识供给和检索方式，发布后再通过上线测试验证效果。</span></div><div class="foundation-layout"><aside class="foundation-list">${list}</aside><section class="foundation-detail">${detail}</section></div>`,'foundation-view application-builder-view');
+  bindApplicationGuide('appscenarios');
+  $('#app-scenario-add').onclick=()=>editCapabilityScenario();
+  $('#content').onclick=async e=>{const id=e.target.closest('[data-scenario-select]')?.dataset.scenarioSelect;if(id){state.scenarioSelectedId=id;return renderCapabilityScenarios()}const button=e.target.closest('[data-action]');if(!button||!selected)return;try{if(button.dataset.action==='capability-edit')editCapabilityScenario(selected);if(button.dataset.action==='capability-delete'&&confirm(`删除能力场景 ${selected.name}？`)){await api(`/application-scenarios/${selected.id}`,{method:'DELETE'});state.scenarioSelectedId=null;renderCapabilityScenarios()}}catch(err){toast(err.message,true)}};
+  if(selected)$('#scenario-version-add').onclick=()=>createCapabilityVersion(selected,products,models);
+}
+
+function launchDatasetForm(x={}){return `<div class="field-row">${field('code','内部编码',x.code||'','text',x.id?'disabled':'required pattern="[a-z][a-z0-9_-]{1,99}"')}${field('name','测试集名称',x.name||'','text','required')}</div>`+area('description','这个测试集验证什么业务能力',x.description||'')+check('enabled','启用',x.enabled??true)}
+function launchCaseForm(x={}){return `<div class="field-row">${field('case_key','用例编号',x.case_key||'','text',x.id?'disabled':'required')}${field('tags__list','业务标签',(x.tags||[]).join(', '))}</div>`+area('question','标准业务问题',x.question||'')+area('expected_answer','期望答案（辅助说明）',x.expected_answer||'')+field('expected_chunks','标准依据片段 ID，多个用逗号分隔',(x.expected_chunk_ids||[]).join(', '))+check('enabled','参与测试',x.enabled??true)}
+
+async function editLaunchDataset(x){const ok=await modal(x?'编辑上线测试集':'新增上线测试集',launchDatasetForm(x),async d=>{if(x)delete d.code;const saved=await api(x?`/evaluation-datasets/${x.id}`:'/evaluation-datasets',{method:x?'PUT':'POST',body:d});if(!x)state.evaluationDatasetId=saved.id});if(ok){toast('上线测试集已保存');renderLaunchTests()}}
+async function editLaunchCase(dataset,x){const ok=await modal(x?'编辑标准问题':'新增标准问题',launchCaseForm(x),async d=>{const body={question:d.question,expected_answer:d.expected_answer,expected_chunk_ids:String(d.expected_chunks||'').split(',').map(v=>v.trim()).filter(Boolean),expected_facts:x?.expected_facts||[],expected_schema:x?.expected_schema||{},tags:d.tags||[],enabled:d.enabled};if(!body.expected_chunk_ids.length)throw new Error('至少填写一个标准依据片段 ID');if(!x)body.case_key=d.case_key;await api(x?`/evaluation-cases/${x.id}`:`/evaluation-datasets/${dataset.id}/cases`,{method:x?'PUT':'POST',body})});if(ok){toast('标准问题已保存');renderLaunchTests()}}
+
+async function runLaunchTest(dataset,scenarios){
+  const choices=[];
+  for(const scenario of scenarios){const versions=await api(`/application-scenarios/${scenario.id}/versions`);versions.forEach(version=>choices.push([version.id,`${scenario.name} · V${version.version}`]))}
+  if(!choices.length){toast('请先发布至少一个能力场景版本',true);return go('appscenarios')}
+  let run=null;
+  const body=selectField('scenario_version_id','要验证的能力版本',choices,'','required')+`<div class="field-row">${field('recall_at_k','标准依据命中率门槛',0.8,'number','min="0" max="1" step="0.01"')}${field('mrr','正确依据排名门槛',0.5,'number','min="0" max="1" step="0.01"')}</div>`;
+  const ok=await modal('运行上线测试',body,async d=>{run=await api('/evaluation-runs',{method:'POST',body:{dataset_id:dataset.id,scenario_version_id:d.scenario_version_id,gate_config:{recall_at_k:Number(d.recall_at_k),mrr:Number(d.mrr)}}})},'开始测试');
+  if(ok){toast(run.gate_passed?'上线测试通过':'上线测试未通过，请检查召回依据',!run.gate_passed);renderLaunchTests()}
+}
+
+async function viewLaunchRun(row){
+  const detail=await api(`/evaluation-runs/${row.id}`),m=detail.metrics||{};
+  $('#modal-cancel').classList.add('hidden');
+  try{await modal('上线测试结果',`<div class="launch-result ${detail.gate_passed?'passed':'failed'}"><span>${detail.gate_passed?'✓':'!'}</span><div><b>${detail.gate_passed?'达到上线标准':'未达到上线标准'}</b><p>${detail.gate_passed?'可以继续配置接入发布':'请查看未命中的标准问题，调整知识或场景后重新测试'}</p></div></div><div class="evaluation-metrics"><article><span>标准问题</span><b>${m.case_count??0}</b></article><article><span>依据命中率</span><b>${m.recall_at_k==null?'—':(m.recall_at_k*100).toFixed(1)+'%'}</b></article><article><span>首个正确依据排名</span><b>${m.mrr==null?'—':m.mrr.toFixed(3)}</b></article><article><span>综合排序质量</span><b>${m.ndcg_at_k==null?'—':m.ndcg_at_k.toFixed(3)}</b></article></div>${table(['标准问题','结果','命中依据','依据命中率','排名得分'],detail.results.map(x=>`<tr><td class="mono">${esc(x.case_id.slice(0,8))}</td><td>${status(x.status)}</td><td>${x.metrics?.hit_count??'—'}</td><td>${x.metrics?.recall_at_k??'—'}</td><td>${x.metrics?.mrr??'—'}</td></tr>`))}`,async()=>{},'关闭')}finally{$('#modal-cancel').classList.remove('hidden')}
+}
+
+async function renderLaunchTests(){
+  actions('<button id="application-guide" class="secondary">功能说明</button><button id="evaluation-add">新增测试集</button>');
+  const [datasets,runs,scenarios]=await Promise.all([api('/evaluation-datasets'),api('/evaluation-runs'),api('/application-scenarios')]);
+  if(!datasets.some(x=>x.id===state.evaluationDatasetId))state.evaluationDatasetId=datasets[0]?.id||null;
+  const selected=datasets.find(x=>x.id===state.evaluationDatasetId),cases=selected?await api(`/evaluation-datasets/${selected.id}/cases`):[],datasetRuns=selected?runs.filter(x=>x.dataset_id===selected.id):[];
+  const latest=datasetRuns[0];
+  const list=datasets.length?datasets.map(x=>`<button class="foundation-list-item ${x.id===selected?.id?'active':''}" data-evaluation-select="${x.id}"><span><b>${esc(x.name)}</b>${status(x.enabled?'available':'unavailable')}</span><small>${x.case_count} 个标准问题</small></button>`).join(''):'<div class="empty-action"><b>还没有上线测试集</b><span>先准备一组有明确依据的标准问题</span></div>';
+  const detail=selected?`<div class="foundation-head"><div><span>上线测试</span><h3>${esc(selected.name)}</h3><p>${esc(selected.description||'验证能力场景是否能够召回正确知识依据')}</p></div><div>${btn('运行测试','launch-run',selected.id,'primary')}${btn('编辑','launch-edit',selected.id)}${btn('删除','launch-delete',selected.id,'danger')}</div></div>${latest?`<div class="latest-launch-state ${latest.gate_passed?'passed':'failed'}"><div><span>${latest.gate_passed?'✓':'!'}</span><div><b>${latest.gate_passed?'最近一次测试通过':'最近一次测试未通过'}</b><small>${fmtDate(latest.created_at)} · ${latest.metrics?.case_count||0} 个标准问题</small></div></div><button class="secondary small" data-action="launch-view" data-id="${latest.id}">查看结果</button></div>`:'<div class="latest-launch-state"><div><span>1</span><div><b>还没有运行测试</b><small>准备好标准问题后，选择能力场景开始验证</small></div></div></div>'}<div class="foundation-section"><div class="panel-heading"><div><b>标准问题</b><small>每个问题都应关联可以核验的标准依据片段</small></div><button id="evaluation-case-add" class="small">新增标准问题</button></div>${table(['编号','标准问题','标准依据','标签','状态','操作'],cases.map(x=>`<tr><td class="mono">${esc(x.case_key)}</td><td>${esc(x.question)}</td><td>${x.expected_chunk_ids.length} 条</td><td>${(x.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join(' ')}</td><td>${status(x.enabled?'available':'unavailable')}</td><td class="actions">${btn('编辑','launch-case-edit',x.id)}${btn('删除','launch-case-delete',x.id,'danger')}</td></tr>`))}</div><div class="foundation-section"><div class="panel-heading"><div><b>历史测试</b><small>保留每次真实检索结果和上线门禁结论</small></div></div>${table(['时间','结果','进度','依据命中率','排名得分','操作'],datasetRuns.map(x=>`<tr><td>${fmtDate(x.created_at)}</td><td>${x.gate_passed===true?status('success'):x.gate_passed===false?status('failed'):status(x.status)}</td><td>${x.progress}%</td><td>${x.metrics?.recall_at_k==null?'—':(x.metrics.recall_at_k*100).toFixed(1)+'%'}</td><td>${x.metrics?.mrr??'—'}</td><td>${btn('查看','launch-view',x.id)}</td></tr>`))}</div>`:'<div class="empty-action"><b>选择一个上线测试集</b></div>';
+  page('上线测试',`<div class="foundation-business-intro"><b>用真实问题决定能否上线</b><span>测试会调用真实检索链路，不使用静态结果；通过后再生成接入凭据。</span></div><div class="foundation-layout"><aside class="foundation-list">${list}</aside><section class="foundation-detail">${detail}</section></div>`,'foundation-view application-builder-view');
+  bindApplicationGuide('evaluations');
+  $('#evaluation-add').onclick=()=>editLaunchDataset();
+  $('#content').onclick=async e=>{const id=e.target.closest('[data-evaluation-select]')?.dataset.evaluationSelect;if(id){state.evaluationDatasetId=id;return renderLaunchTests()}const button=e.target.closest('[data-action]');if(!button||!selected)return;const caseRow=cases.find(x=>x.id===button.dataset.id),run=datasetRuns.find(x=>x.id===button.dataset.id);try{if(button.dataset.action==='launch-run')runLaunchTest(selected,scenarios);if(button.dataset.action==='launch-edit')editLaunchDataset(selected);if(button.dataset.action==='launch-delete'&&confirm(`删除上线测试集 ${selected.name}？`)){await api(`/evaluation-datasets/${selected.id}`,{method:'DELETE'});state.evaluationDatasetId=null;renderLaunchTests()}if(button.dataset.action==='launch-case-edit')editLaunchCase(selected,caseRow);if(button.dataset.action==='launch-case-delete'&&confirm(`删除标准问题 ${caseRow.case_key}？`)){await api(`/evaluation-cases/${caseRow.id}`,{method:'DELETE'});renderLaunchTests()}if(button.dataset.action==='launch-view')viewLaunchRun(run)}catch(err){toast(err.message,true)}};
+  if(selected)$('#evaluation-case-add').onclick=()=>editLaunchCase(selected);
+}
+
+async function renderRuntimeFeedback(){
+  actions('<button id="application-guide" class="secondary">功能说明</button><button id="feedback-refresh">刷新</button>');
+  const [rows,applications,scenarios]=await Promise.all([api('/application-feedback'),api('/applications'),api('/application-scenarios')]);
+  const appNames=Object.fromEntries(applications.map(x=>[x.id,x.name])),scenarioNames=Object.fromEntries(scenarios.map(x=>[x.id,x.name]));
+  page('运行反馈',`<div class="foundation-business-intro"><b>把应用问题转回知识治理</b><span>答案错误、知识过期和引用问题可以直接生成治理任务，不需要在两个模块重复录入。</span></div><div class="summary-strip"><div><span>待处理</span><b>${rows.filter(x=>x.status==='open').length}</b></div><div><span>已转治理</span><b>${rows.filter(x=>x.status==='converted').length}</b></div><div><span>已解决</span><b>${rows.filter(x=>x.status==='resolved').length}</b></div><div><span>反馈总数</span><b>${rows.length}</b></div></div>${table(['业务应用','能力场景','问题类型','用户评分','反馈内容','处理状态','时间','操作'],rows.map(x=>`<tr><td>${esc(appNames[x.application_id]||'应用已删除')}</td><td>${esc(scenarioNames[x.scenario_id]||'—')}</td><td>${esc(FEEDBACK_LABELS[x.feedback_type]||x.feedback_type)}</td><td>${x.rating?`${x.rating} / 5`:'—'}</td><td class="truncate">${esc(x.comment||'—')}</td><td>${status(x.status)}</td><td>${fmtDate(x.created_at)}</td><td class="actions">${!x.curation_case_id?btn('转治理任务','runtime-feedback-convert',x.id):'<span class="tag">已进入治理</span>'}${btn('标记解决','runtime-feedback-resolve',x.id)}${!x.curation_case_id?btn('删除','runtime-feedback-delete',x.id,'danger'):''}</td></tr>`))}`,'application-builder-view');
+  bindApplicationGuide('feedback');
+  $('#feedback-refresh').onclick=renderRuntimeFeedback;
+  $('#content').onclick=async e=>{const button=e.target.closest('[data-action]');if(!button)return;const row=rows.find(x=>x.id===button.dataset.id);try{if(button.dataset.action==='runtime-feedback-convert'){await api(`/application-feedback/${row.id}/convert-to-curation`,{method:'POST'});toast('已转入现有治理工作台');renderRuntimeFeedback()}if(button.dataset.action==='runtime-feedback-resolve'){await api(`/application-feedback/${row.id}`,{method:'PUT',body:{status:'resolved'}});renderRuntimeFeedback()}if(button.dataset.action==='runtime-feedback-delete'&&confirm('删除这条运行反馈？')){await api(`/application-feedback/${row.id}`,{method:'DELETE'});renderRuntimeFeedback()}}catch(err){toast(err.message,true)}};
+}
 
 async function renderAudits(){actions();const rows=await api('/audit-events');page('审计日志',table(['时间','动作','对象','对象 ID','操作者','详情'],rows.map(x=>`<tr><td>${fmtDate(x.created_at)}</td><td class="mono">${esc(x.action)}</td><td>${esc(x.object_type)}</td><td class="mono">${esc(x.object_id||'—')}</td><td class="mono">${esc(x.actor_id||'—')}</td><td class="truncate mono">${esc(JSON.stringify(x.detail||{}))}</td></tr>`)))}
 

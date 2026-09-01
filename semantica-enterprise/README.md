@@ -1,6 +1,6 @@
 # 传神智库
 
-传神智库是基于 Semantica 0.6.6 源码增量开发的组织级知识平台。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理画像、OpenSearch/Qdrant/FalkorDB 三路检索、可编辑 3D 图谱、由 DeepSeek Harness 驱动的多轮知识问答，以及面向业务场景的应用中心、知识产品、场景版本、质量评测和反馈闭环。当前交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
+传神智库是基于 Semantica 0.6.6 源码增量开发的组织级知识平台。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理画像、OpenSearch/Qdrant/FalkorDB 三路检索、可编辑 3D 图谱、由 DeepSeek Harness 驱动的多轮知识问答，以及按“知识供给—能力场景—上线测试—接入发布—运行反馈”组织的应用构建闭环。当前交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
 
 仓库附带可重复执行的验收数据脚本：`tests/e2e/seed_acceptance_dataset.py` 用于文件、图谱、分析与问答数据，`tests/e2e/seed_source_acceptance.py` 用于数据源。2026-09-01 清空重建后的详细实测结果见 [全链路验收报告](docs/ACCEPTANCE_REGRESSION_20260901.md)。
 
@@ -39,7 +39,7 @@ docker compose ps
 - 分析：按“规则中心 → 场景分析 → 推理结果 → 高级查询”组织 Semantica Datalog 能力；提供业务化规则预览、真实校验、场景卡片、任务进度、可定位来源的证据链、SPARQL 与回滚影响预览。
 - 检索：OpenSearch 全文、Qdrant 向量、FalkorDB 图谱召回，RRF 融合、可选重排、排序依据和真实片段引用。
 - 对话：DeepSeek Harness Agent Loop、多轮 Session、SSE、停止、重试、重启恢复；桌面端三栏展示真实 Agent 执行事件、检索轨迹与按最终排名排列的召回依据，不展示模型私有思维链。
-- 应用支撑：应用凭据与最小权限、不可变知识产品发布、场景版本、真实检索评测、反馈转人工治理和调用审计；业务应用通过稳定场景编码调用，不直接绑定空间或检索中间件。
+- 应用构建：以业务应用为中心显示上线准备度和下一步；底层提供最小权限凭据、不可变知识供给、能力场景版本、真实上线测试、反馈转人工治理和调用审计。
 - 开放能力：REST/OpenAPI、MCP Server 和 `chuanshen` CLI。
 
 Docker Compose 共启动 12 个服务：API、Worker、Scheduler、Agent Runtime、MCP Server、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB。前端只访问 FastAPI；Harness、MCP 不直接访问业务数据库或检索中间件。
@@ -100,6 +100,7 @@ python3 tests/performance/live_load.py
 - [2026-09-01 清空重建与全链路验收](docs/ACCEPTANCE_REGRESSION_20260901.md)
 - [应用底座增强详细设计](docs/APPLICATION_FOUNDATION_DESIGN.md)
 - [应用底座 A0 实现与验收](docs/APPLICATION_FOUNDATION_IMPLEMENTATION.md)
+- [应用构建工作台业务化改造](docs/APPLICATION_BUILDER_UX.md)
 - [多轮问答测试报告](docs/QA_REPORT.md)
 - [已知限制](docs/KNOWN_LIMITATIONS.md)
 - [故障排查](docs/TROUBLESHOOTING.md)
