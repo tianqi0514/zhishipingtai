@@ -57,3 +57,25 @@ def test_shared_modal_resets_submit_state_between_crud_operations() -> None:
     assert "submitButton.textContent=submit;submitButton.disabled=false" in APP
     assert "finally{submitButton.disabled=false" in APP
     assert "dlg.addEventListener('close',()=>resolve(value),{once:true})" in APP
+
+
+def test_platform_permissions_drive_application_and_audit_navigation() -> None:
+    assert "permission:'application.manage'" in APP
+    assert "permission:'audit.read'" in APP
+    assert "function hasPlatformPermission" in APP
+    assert "function canView" in APP
+    assert "adminOnly:true" in APP
+    assert "state.users=state.user.is_admin?await api('/users'):[state.user]" in APP
+
+
+def test_background_jobs_use_business_labels() -> None:
+    assert "process_knowledge:'知识加工'" in APP
+    assert "sync_source:'数据源同步'" in APP
+    assert "jobTypeLabel(x.job_type)" in APP
+
+
+def test_dashboard_has_one_state_driven_recommended_next_step() -> None:
+    assert "建议下一步" in APP
+    assert "dashboard-next-step" in APP
+    assert "完成模型配置" in APP
+    assert "接入第一批真实知识" in APP

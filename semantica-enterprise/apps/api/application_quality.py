@@ -14,9 +14,10 @@ from apps.api.application_schemas import (
     EvaluationDatasetUpdate,
     EvaluationRunCreate,
     FeedbackCreate,
+    FeedbackResolutionVerify,
     FeedbackUpdate,
 )
-from apps.api.deps import ApplicationPrincipal, get_current_application, get_current_user, require_admin
+from apps.api.deps import ApplicationPrincipal, get_current_application, get_current_user, require_permission
 from apps.api.utils import apply_patch, serialize_row
 from packages.platform.application_services import (
     ApplicationConfigurationError,
@@ -47,6 +48,7 @@ from packages.platform.models import (
 
 
 router = APIRouter(tags=["application-quality"])
+require_admin = require_permission("application.manage")
 
 
 def _active(model: type):
@@ -57,6 +59,26 @@ def _must_tenant(db: Session, model: type, row_id: str, tenant_id: str, label: s
     row = db.get(model, row_id)
     if row is None or row.deleted_at is not None or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail=f"{label}不存在")
+    return row
+
+
+def _must_owned_dataset(db: Session, row_id: str, user: User) -> EvaluationDataset:
+    row = _must_tenant(db, EvaluationDataset, row_id, user.tenant_id, "评测集")
+    if not user.is_admin and row.owner_id != user.id:
+        raise HTTPException(status_code=404, detail="评测集不存在")
+    return row
+
+
+def _must_owned_application(db: Session, row_id: str, user: User) -> Application:
+    row = _must_tenant(db, Application, row_id, user.tenant_id, "应用")
+    if not user.is_admin and row.owner_id != user.id:
+        raise HTTPException(status_code=404, detail="应用不存在")
+    return row
+
+
+def _must_owned_case(db: Session, row_id: str, user: User) -> EvaluationCase:
+    row = _must_tenant(db, EvaluationCase, row_id, user.tenant_id, "评测用例")
+    _must_owned_dataset(db, row.dataset_id, user)
     return row
 
 
@@ -107,7 +129,7 @@ def update_evaluation_dataset(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    row = _must_tenant(db, EvaluationDataset, row_id, admin.tenant_id, "评测集")
+    row = _must_owned_dataset(db, row_id, admin)
     values = payload.model_dump(exclude_unset=True)
     apply_patch(row, values, {"name", "description", "enabled"})
     audit(db, admin.tenant_id, admin.id, "evaluation.dataset.update", "evaluation_dataset", row.id, values)
@@ -121,7 +143,7 @@ def delete_evaluation_dataset(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    row = _must_tenant(db, EvaluationDataset, row_id, admin.tenant_id, "评测集")
+    row = _must_owned_dataset(db, row_id, admin)
     if db.scalar(select(func.count()).select_from(EvaluationRun).where(EvaluationRun.dataset_id == row.id)):
         raise HTTPException(status_code=409, detail="评测集已有运行记录，不能删除；可停用保留历史")
     row.deleted_at = datetime.now(timezone.utc)
@@ -137,7 +159,7 @@ def list_evaluation_cases(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _must_tenant(db, EvaluationDataset, dataset_id, user.tenant_id, "评测集")
+    _must_owned_dataset(db, dataset_id, user)
     return [serialize_row(row) for row in db.scalars(select(EvaluationCase).where(
         EvaluationCase.dataset_id == dataset_id,
         _active(EvaluationCase),
@@ -151,7 +173,7 @@ def create_evaluation_case(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    _must_tenant(db, EvaluationDataset, dataset_id, admin.tenant_id, "评测集")
+    _must_owned_dataset(db, dataset_id, admin)
     row = EvaluationCase(dataset_id=dataset_id, tenant_id=admin.tenant_id, **payload.model_dump())
     db.add(row)
     audit(db, admin.tenant_id, admin.id, "evaluation.case.create", "evaluation_case", row.id)
@@ -166,7 +188,7 @@ def update_evaluation_case(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    row = _must_tenant(db, EvaluationCase, row_id, admin.tenant_id, "评测用例")
+    row = _must_owned_case(db, row_id, admin)
     values = payload.model_dump(exclude_unset=True)
     apply_patch(row, values, {
         "question", "expected_answer", "expected_chunk_ids", "expected_facts",
@@ -183,7 +205,7 @@ def delete_evaluation_case(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    row = _must_tenant(db, EvaluationCase, row_id, admin.tenant_id, "评测用例")
+    row = _must_owned_case(db, row_id, admin)
     if db.scalar(select(func.count()).select_from(EvaluationCaseResult).where(EvaluationCaseResult.case_id == row.id)):
         raise HTTPException(status_code=409, detail="评测用例已有运行结果，不能删除；可停用保留历史")
     row.deleted_at = datetime.now(timezone.utc)
@@ -200,13 +222,22 @@ def list_evaluation_runs(
 ):
     query = select(EvaluationRun).where(EvaluationRun.tenant_id == user.tenant_id, _active(EvaluationRun))
     if dataset_id:
+        _must_owned_dataset(db, dataset_id, user)
         query = query.where(EvaluationRun.dataset_id == dataset_id)
+    elif not user.is_admin:
+        owned_ids = select(EvaluationDataset.id).where(
+            EvaluationDataset.tenant_id == user.tenant_id,
+            EvaluationDataset.owner_id == user.id,
+            _active(EvaluationDataset),
+        )
+        query = query.where(EvaluationRun.dataset_id.in_(owned_ids))
     return [serialize_row(row) for row in db.scalars(query.order_by(EvaluationRun.created_at.desc()).limit(200))]
 
 
 @router.get("/evaluation-runs/{row_id}")
 def get_evaluation_run(row_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     row = _must_tenant(db, EvaluationRun, row_id, user.tenant_id, "评测运行")
+    _must_owned_dataset(db, row.dataset_id, user)
     data = serialize_row(row)
     data["results"] = [serialize_row(item) for item in db.scalars(select(EvaluationCaseResult).where(
         EvaluationCaseResult.run_id == row.id,
@@ -221,8 +252,11 @@ def run_evaluation(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    dataset = _must_tenant(db, EvaluationDataset, payload.dataset_id, admin.tenant_id, "评测集")
+    dataset = _must_owned_dataset(db, payload.dataset_id, admin)
     version = _must_tenant(db, ApplicationScenarioVersion, payload.scenario_version_id, admin.tenant_id, "场景版本")
+    scenario = _must_tenant(db, ApplicationScenario, version.scenario_id, admin.tenant_id, "应用场景")
+    if not admin.is_admin and scenario.owner_id != admin.id:
+        raise HTTPException(status_code=404, detail="应用场景不存在")
     if not dataset.enabled:
         raise HTTPException(status_code=409, detail="评测集已停用")
     try:
@@ -390,7 +424,15 @@ def list_application_feedback(
         _active(ApplicationFeedback),
     )
     if application_id:
+        _must_owned_application(db, application_id, admin)
         query = query.where(ApplicationFeedback.application_id == application_id)
+    elif not admin.is_admin:
+        owned_ids = select(Application.id).where(
+            Application.tenant_id == admin.tenant_id,
+            Application.owner_id == admin.id,
+            _active(Application),
+        )
+        query = query.where(ApplicationFeedback.application_id.in_(owned_ids))
     if status:
         query = query.where(ApplicationFeedback.status == status)
     return [serialize_row(row) for row in db.scalars(query.order_by(ApplicationFeedback.created_at.desc()).limit(limit))]
@@ -404,6 +446,7 @@ def update_application_feedback(
     db: Session = Depends(get_db),
 ):
     row = _must_tenant(db, ApplicationFeedback, row_id, admin.tenant_id, "应用反馈")
+    _must_owned_application(db, row.application_id, admin)
     values = payload.model_dump(exclude_unset=True)
     apply_patch(row, values, {"status", "comment"})
     audit(db, admin.tenant_id, admin.id, "application.feedback.update", "application_feedback", row.id, values)
@@ -418,6 +461,7 @@ def delete_application_feedback(
     db: Session = Depends(get_db),
 ):
     row = _must_tenant(db, ApplicationFeedback, row_id, admin.tenant_id, "应用反馈")
+    _must_owned_application(db, row.application_id, admin)
     if row.curation_case_id:
         raise HTTPException(status_code=409, detail="反馈已转为治理任务，不能删除")
     row.deleted_at = datetime.now(timezone.utc)
@@ -433,6 +477,7 @@ def convert_feedback_to_curation(
     db: Session = Depends(get_db),
 ):
     row = _must_tenant(db, ApplicationFeedback, row_id, admin.tenant_id, "应用反馈")
+    _must_owned_application(db, row.application_id, admin)
     if row.curation_case_id:
         existing = db.get(CurationCase, row.curation_case_id)
         return serialize_row(existing) if existing else {"id": row.curation_case_id}
@@ -485,6 +530,45 @@ def convert_feedback_to_curation(
     return serialize_row(case)
 
 
+@router.post("/application-feedback/{row_id}/verify-resolution")
+def verify_feedback_resolution(
+    row_id: str,
+    payload: FeedbackResolutionVerify,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Close a governed feedback item only after a passing real evaluation."""
+    row = _must_tenant(db, ApplicationFeedback, row_id, admin.tenant_id, "应用反馈")
+    _must_owned_application(db, row.application_id, admin)
+    if not row.curation_case_id:
+        raise HTTPException(status_code=409, detail="反馈尚未进入知识治理")
+    case = _must_tenant(db, CurationCase, row.curation_case_id, admin.tenant_id, "治理任务")
+    if case.status != "handled":
+        raise HTTPException(status_code=409, detail="治理任务尚未处理完成")
+    run = _must_tenant(db, EvaluationRun, payload.evaluation_run_id, admin.tenant_id, "上线测试")
+    if not run.gate_passed or run.status != "succeeded":
+        raise HTTPException(status_code=409, detail="请选择已经通过质量门禁的上线测试")
+    version = _must_tenant(db, ApplicationScenarioVersion, run.scenario_version_id, admin.tenant_id, "场景版本")
+    if row.scenario_id and version.scenario_id != row.scenario_id:
+        raise HTTPException(status_code=409, detail="上线测试与反馈的能力场景不一致")
+    row.status = "resolved"
+    row.evidence = {
+        **(row.evidence or {}),
+        "resolution_verification": {
+            "curation_case_id": case.id,
+            "evaluation_run_id": run.id,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "verified_by": admin.id,
+        },
+    }
+    audit(db, admin.tenant_id, admin.id, "application.feedback.verify_resolution", "application_feedback", row.id, {
+        "curation_case_id": case.id,
+        "evaluation_run_id": run.id,
+    })
+    db.commit()
+    return serialize_row(row)
+
+
 @router.get("/application-quality/capabilities")
 def quality_capabilities(user: User = Depends(get_current_user)):
     return {
@@ -494,4 +578,3 @@ def quality_capabilities(user: User = Depends(get_current_user)):
         "llm_judge": False,
         "note": "当前质量门禁使用可重复的确定性指标；模型裁判未启用。",
     }
-

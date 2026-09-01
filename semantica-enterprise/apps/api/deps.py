@@ -14,6 +14,7 @@ from packages.platform.models import (
     ApplicationCredential,
     KnowledgeSpace,
     OrgUnit,
+    Role,
     SpaceGrant,
     User,
     UserRole,
@@ -65,6 +66,58 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
+
+
+def get_user_permissions(db: Session, user: User) -> list[str]:
+    """Return the effective platform permissions granted by enabled roles.
+
+    Space access remains governed by ``SpaceGrant``.  These permissions only
+    control platform-wide workbenches such as application delivery and audit.
+    Keeping the two scopes separate prevents an application developer role
+    from implicitly gaining access to every knowledge space.
+    """
+    if user.is_admin:
+        return ["*"]
+    role_ids = list(db.scalars(select(UserRole.role_id).where(UserRole.user_id == user.id)))
+    if not role_ids:
+        return []
+    permissions: set[str] = set()
+    roles = db.scalars(
+        select(Role).where(
+            Role.id.in_(role_ids),
+            Role.tenant_id == user.tenant_id,
+            Role.enabled.is_(True),
+            Role.deleted_at.is_(None),
+        )
+    )
+    for role in roles:
+        permissions.update(str(item).strip() for item in (role.permissions or []) if str(item).strip())
+    return sorted(permissions)
+
+
+def permission_matches(granted: str, required: str) -> bool:
+    return granted == "*" or granted == required or (
+        granted.endswith(".*") and required.startswith(granted[:-1])
+    )
+
+
+def has_platform_permission(db: Session, user: User, required: str) -> bool:
+    return any(permission_matches(item, required) for item in get_user_permissions(db, user))
+
+
+def require_permission(permission: str) -> Callable:
+    def dependency(
+        user: User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> User:
+        if not has_platform_permission(db, user, permission):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"缺少平台权限：{permission}",
+            )
+        return user
+
+    return dependency
 
 
 def get_current_application(request: Request, db: Session = Depends(get_db)) -> ApplicationPrincipal:

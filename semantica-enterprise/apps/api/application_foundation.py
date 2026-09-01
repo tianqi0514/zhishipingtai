@@ -32,7 +32,8 @@ from apps.api.deps import (
     ApplicationPrincipal,
     get_current_application,
     get_current_user,
-    require_admin,
+    has_space_permission,
+    require_permission,
 )
 from apps.api.utils import apply_patch, serialize_row
 from packages.platform.audit import audit
@@ -72,6 +73,10 @@ from packages.platform.knowledge_search import execute_hybrid_search
 
 
 router = APIRouter(tags=["application-foundation"])
+# Application builders are ordinary business users with an explicit platform
+# role.  Keep the existing dependency call sites while replacing the previous
+# hard-coded ``is_admin`` gate in this module only.
+require_admin = require_permission("application.manage")
 
 
 def _active(model: type) -> Any:
@@ -81,6 +86,13 @@ def _active(model: type) -> Any:
 def _must_tenant(db: Session, model: type, row_id: str, tenant_id: str, label: str):
     row = db.get(model, row_id)
     if row is None or row.deleted_at is not None or row.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail=f"{label}不存在")
+    return row
+
+
+def _must_owned(db: Session, model: type, row_id: str, user: User, label: str):
+    row = _must_tenant(db, model, row_id, user.tenant_id, label)
+    if not user.is_admin and getattr(row, "owner_id", None) != user.id:
         raise HTTPException(status_code=404, detail=f"{label}不存在")
     return row
 
@@ -156,6 +168,8 @@ def create_application(
     db: Session = Depends(get_db),
 ):
     owner_id = payload.owner_id or admin.id
+    if not admin.is_admin and owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="只能将应用负责人设置为当前用户")
     _validate_owner(db, admin.tenant_id, owner_id)
     _validate_org(db, admin.tenant_id, payload.org_unit_id)
     values = payload.model_dump(exclude={"owner_id"})
@@ -195,9 +209,11 @@ def update_application(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    row = _must_tenant(db, Application, row_id, admin.tenant_id, "应用")
+    row = _must_owned(db, Application, row_id, admin, "应用")
     values = payload.model_dump(exclude_unset=True)
     if values.get("owner_id"):
+        if not admin.is_admin and values["owner_id"] != admin.id:
+            raise HTTPException(status_code=403, detail="不能将应用转交给其他用户")
         _validate_owner(db, admin.tenant_id, values["owner_id"])
     if "org_unit_id" in values:
         _validate_org(db, admin.tenant_id, values["org_unit_id"])
@@ -213,7 +229,7 @@ def update_application(
 
 @router.delete("/applications/{row_id}")
 def delete_application(row_id: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    row = _must_tenant(db, Application, row_id, admin.tenant_id, "应用")
+    row = _must_owned(db, Application, row_id, admin, "应用")
     now = datetime.now(timezone.utc)
     row.deleted_at = now
     row.enabled = False
@@ -234,7 +250,7 @@ def list_credentials(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    _must_tenant(db, Application, application_id, admin.tenant_id, "应用")
+    _must_owned(db, Application, application_id, admin, "应用")
     rows = db.scalars(
         select(ApplicationCredential).where(
             ApplicationCredential.application_id == application_id,
@@ -275,7 +291,7 @@ def create_credential(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    application = _must_tenant(db, Application, application_id, admin.tenant_id, "应用")
+    application = _must_owned(db, Application, application_id, admin, "应用")
     if _aware_datetime(payload.expires_at) and _aware_datetime(payload.expires_at) <= datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="凭据过期时间必须晚于当前时间")
     row, secret = _issue_credential(db, application=application, payload=payload)
@@ -295,7 +311,7 @@ def rotate_credential(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    application = _must_tenant(db, Application, application_id, admin.tenant_id, "应用")
+    application = _must_owned(db, Application, application_id, admin, "应用")
     old = _must_tenant(db, ApplicationCredential, credential_id, admin.tenant_id, "应用凭据")
     if old.application_id != application.id or old.revoked_at is not None:
         raise HTTPException(status_code=409, detail="应用凭据不可轮换")
@@ -316,7 +332,7 @@ def revoke_credential(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    _must_tenant(db, Application, application_id, admin.tenant_id, "应用")
+    _must_owned(db, Application, application_id, admin, "应用")
     row = _must_tenant(db, ApplicationCredential, credential_id, admin.tenant_id, "应用凭据")
     if row.application_id != application_id:
         raise HTTPException(status_code=404, detail="应用凭据不存在")
@@ -510,7 +526,7 @@ def list_application_grants(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    _must_tenant(db, Application, application_id, admin.tenant_id, "应用")
+    _must_owned(db, Application, application_id, admin, "应用")
     return [
         serialize_row(row)
         for row in db.scalars(
@@ -530,7 +546,7 @@ def create_application_grant(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    _must_tenant(db, Application, application_id, admin.tenant_id, "应用")
+    _must_owned(db, Application, application_id, admin, "应用")
     _validate_grant_resource(db, admin.tenant_id, payload.resource_type, payload.resource_id)
     row = ApplicationGrant(application_id=application_id, tenant_id=admin.tenant_id, **payload.model_dump())
     db.add(row)
@@ -546,6 +562,7 @@ def delete_application_grant(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    _must_owned(db, Application, application_id, admin, "应用")
     row = _must_tenant(db, ApplicationGrant, grant_id, admin.tenant_id, "应用授权")
     if row.application_id != application_id:
         raise HTTPException(status_code=404, detail="应用授权不存在")
@@ -558,10 +575,17 @@ def delete_application_grant(
 # ---- Knowledge products and immutable releases --------------------------------------
 
 
-def _replace_product_spaces(db: Session, product: KnowledgeProduct, space_ids: list[str]) -> None:
+def _replace_product_spaces(
+    db: Session,
+    product: KnowledgeProduct,
+    space_ids: list[str],
+    actor: User,
+) -> None:
     unique_ids = list(dict.fromkeys(space_ids))
     for space_id in unique_ids:
         _must_tenant(db, KnowledgeSpace, space_id, product.tenant_id, "知识空间")
+        if not has_space_permission(db, actor, space_id, "read"):
+            raise HTTPException(status_code=403, detail="知识供给包含无权读取的知识空间")
     db.query(KnowledgeProductSpace).filter(KnowledgeProductSpace.product_id == product.id).delete()
     for ordinal, space_id in enumerate(unique_ids):
         db.add(KnowledgeProductSpace(
@@ -589,6 +613,39 @@ def _product_view(db: Session, row: KnowledgeProduct) -> dict[str, Any]:
         )
     )
     data["aliases"] = {alias.alias: alias.product_release_id for alias in aliases}
+    production_release_id = data["aliases"].get("production")
+    release_items = {}
+    if production_release_id:
+        release_items = {
+            item.space_id: item
+            for item in db.scalars(select(KnowledgeProductReleaseItem).where(
+                KnowledgeProductReleaseItem.product_release_id == production_release_id,
+                _active(KnowledgeProductReleaseItem),
+            ))
+        }
+    changed_spaces: list[dict[str, Any]] = []
+    for space_id in data["space_ids"]:
+        latest = db.scalar(select(KnowledgeRelease).where(
+            KnowledgeRelease.tenant_id == row.tenant_id,
+            KnowledgeRelease.space_id == space_id,
+            KnowledgeRelease.status == "published",
+            _active(KnowledgeRelease),
+        ).order_by(KnowledgeRelease.release_number.desc()).limit(1))
+        pinned = release_items.get(space_id)
+        if latest and (pinned is None or pinned.knowledge_release_id != latest.id):
+            space = db.get(KnowledgeSpace, space_id)
+            changed_spaces.append({
+                "space_id": space_id,
+                "space_name": space.name if space else space_id,
+                "pinned_release_id": pinned.knowledge_release_id if pinned else None,
+                "latest_release_id": latest.id,
+                "latest_release_number": latest.release_number,
+            })
+    data["release_freshness"] = {
+        "has_production_release": bool(production_release_id),
+        "is_current": bool(production_release_id) and not changed_spaces,
+        "changed_spaces": changed_spaces,
+    }
     return data
 
 
@@ -614,6 +671,8 @@ def create_product(
     if existing:
         raise HTTPException(status_code=409, detail="知识产品编码已存在")
     owner_id = payload.owner_id or admin.id
+    if not admin.is_admin and owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="只能将知识供给负责人设置为当前用户")
     _validate_owner(db, admin.tenant_id, owner_id)
     row = KnowledgeProduct(
         tenant_id=admin.tenant_id,
@@ -622,7 +681,7 @@ def create_product(
     )
     db.add(row)
     db.flush()
-    _replace_product_spaces(db, row, payload.space_ids)
+    _replace_product_spaces(db, row, payload.space_ids, admin)
     audit(db, admin.tenant_id, admin.id, "knowledge_product.create", "knowledge_product", row.id)
     _commit(db, "知识产品编码已存在")
     return _product_view(db, row)
@@ -643,14 +702,16 @@ def update_product(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    row = _must_tenant(db, KnowledgeProduct, row_id, admin.tenant_id, "知识产品")
+    row = _must_owned(db, KnowledgeProduct, row_id, admin, "知识产品")
     values = payload.model_dump(exclude_unset=True)
     space_ids = values.pop("space_ids", None)
     if values.get("owner_id"):
+        if not admin.is_admin and values["owner_id"] != admin.id:
+            raise HTTPException(status_code=403, detail="不能将知识供给转交给其他用户")
         _validate_owner(db, admin.tenant_id, values["owner_id"])
     apply_patch(row, values, {"name", "description", "owner_id", "status", "config", "enabled"})
     if space_ids is not None:
-        _replace_product_spaces(db, row, space_ids)
+        _replace_product_spaces(db, row, space_ids, admin)
     audit(db, admin.tenant_id, admin.id, "knowledge_product.update", "knowledge_product", row.id, values)
     db.commit()
     return _product_view(db, row)
@@ -658,7 +719,7 @@ def update_product(
 
 @router.delete("/knowledge-products/{row_id}")
 def delete_product(row_id: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    row = _must_tenant(db, KnowledgeProduct, row_id, admin.tenant_id, "知识产品")
+    row = _must_owned(db, KnowledgeProduct, row_id, admin, "知识产品")
     if db.scalar(select(func.count()).select_from(ApplicationScenarioVersion).where(ApplicationScenarioVersion.product_id == row.id)):
         raise HTTPException(status_code=409, detail="知识产品已被场景版本引用，不能删除")
     row.deleted_at = datetime.now(timezone.utc)
@@ -675,7 +736,7 @@ def list_product_releases(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _must_tenant(db, KnowledgeProduct, product_id, user.tenant_id, "知识产品")
+    _must_owned(db, KnowledgeProduct, product_id, user, "知识产品")
     result = []
     for release in db.scalars(
         select(KnowledgeProductRelease).where(
@@ -704,7 +765,7 @@ def create_product_release(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    product = _must_tenant(db, KnowledgeProduct, product_id, admin.tenant_id, "知识产品")
+    product = _must_owned(db, KnowledgeProduct, product_id, admin, "知识产品")
     space_ids = list(
         db.scalars(select(KnowledgeProductSpace.space_id).where(
             KnowledgeProductSpace.product_id == product.id,
@@ -774,7 +835,7 @@ def move_product_alias(
 ):
     if alias not in {"development", "testing", "production"}:
         raise HTTPException(status_code=400, detail="别名仅支持 development、testing、production")
-    _must_tenant(db, KnowledgeProduct, product_id, admin.tenant_id, "知识产品")
+    _must_owned(db, KnowledgeProduct, product_id, admin, "知识产品")
     release = _must_tenant(db, KnowledgeProductRelease, payload.product_release_id, admin.tenant_id, "知识产品版本")
     if release.product_id != product_id or release.status != "published":
         raise HTTPException(status_code=409, detail="目标版本不属于当前知识产品或尚未发布")
@@ -833,6 +894,8 @@ def create_scenario(
     db: Session = Depends(get_db),
 ):
     owner_id = payload.owner_id or admin.id
+    if not admin.is_admin and owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="只能将场景负责人设置为当前用户")
     _validate_owner(db, admin.tenant_id, owner_id)
     row = ApplicationScenario(
         tenant_id=admin.tenant_id,
@@ -852,9 +915,11 @@ def update_scenario(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    row = _must_tenant(db, ApplicationScenario, row_id, admin.tenant_id, "应用场景")
+    row = _must_owned(db, ApplicationScenario, row_id, admin, "应用场景")
     values = payload.model_dump(exclude_unset=True)
     if values.get("owner_id"):
+        if not admin.is_admin and values["owner_id"] != admin.id:
+            raise HTTPException(status_code=403, detail="不能将场景转交给其他用户")
         _validate_owner(db, admin.tenant_id, values["owner_id"])
     apply_patch(row, values, {"name", "description", "scenario_type", "owner_id", "status", "enabled"})
     audit(db, admin.tenant_id, admin.id, "application_scenario.update", "application_scenario", row.id, values)
@@ -864,7 +929,7 @@ def update_scenario(
 
 @router.delete("/application-scenarios/{row_id}")
 def delete_scenario(row_id: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    row = _must_tenant(db, ApplicationScenario, row_id, admin.tenant_id, "应用场景")
+    row = _must_owned(db, ApplicationScenario, row_id, admin, "应用场景")
     if db.scalar(select(func.count()).select_from(ApplicationGrant).where(
         ApplicationGrant.resource_type == "scenario",
         ApplicationGrant.resource_id == row.id,
@@ -885,7 +950,7 @@ def list_scenario_versions(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _must_tenant(db, ApplicationScenario, scenario_id, user.tenant_id, "应用场景")
+    _must_owned(db, ApplicationScenario, scenario_id, user, "应用场景")
     return [
         serialize_row(row)
         for row in db.scalars(
@@ -904,8 +969,8 @@ def create_scenario_version(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    scenario = _must_tenant(db, ApplicationScenario, scenario_id, admin.tenant_id, "应用场景")
-    product = _must_tenant(db, KnowledgeProduct, payload.product_id, admin.tenant_id, "知识产品")
+    scenario = _must_owned(db, ApplicationScenario, scenario_id, admin, "应用场景")
+    product = _must_owned(db, KnowledgeProduct, payload.product_id, admin, "知识产品")
     alias = db.scalar(select(KnowledgeProductAlias).where(
         KnowledgeProductAlias.product_id == product.id,
         KnowledgeProductAlias.alias == payload.product_alias,
@@ -957,7 +1022,15 @@ def list_application_invocations(
         _active(ApplicationInvocation),
     )
     if application_id:
-        query = query.where(ApplicationInvocation.application_id == application_id)
+        application = _must_owned(db, Application, application_id, admin, "应用")
+        query = query.where(ApplicationInvocation.application_id == application.id)
+    elif not admin.is_admin:
+        owned_ids = select(Application.id).where(
+            Application.tenant_id == admin.tenant_id,
+            Application.owner_id == admin.id,
+            _active(Application),
+        )
+        query = query.where(ApplicationInvocation.application_id.in_(owned_ids))
     limit = max(1, min(limit, 500))
     return [serialize_row(row) for row in db.scalars(query.order_by(ApplicationInvocation.created_at.desc()).limit(limit))]
 

@@ -245,3 +245,7 @@ class FeedbackCreate(BaseModel):
 class FeedbackUpdate(BaseModel):
     status: Literal["open", "triaged", "converted", "resolved", "dismissed"] | None = None
     comment: str | None = Field(default=None, max_length=10000)
+
+
+class FeedbackResolutionVerify(BaseModel):
+    evaluation_run_id: str

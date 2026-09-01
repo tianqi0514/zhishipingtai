@@ -23,18 +23,19 @@ def main() -> int:
     with httpx.Client(base_url=BASE_URL, timeout=httpx.Timeout(30, read=180)) as client:
         def call(method: str, path: str, **kwargs):
             response = client.request(method, path, **kwargs)
-            response.raise_for_status()
+            if not response.is_success:
+                raise RuntimeError(f"{method} {path}: {response.status_code} {response.text[:1600]}")
             return response.json() if response.content else None
 
         login = call("POST", "/auth/login", json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD})
         client.headers["Authorization"] = f"Bearer {login['access_token']}"
 
         spaces = call("GET", "/spaces")
-        space = next((item for item in spaces if item["code"] == "structured-acceptance"), None)
+        space = next((item for item in spaces if item["code"] == "gl-structured-acceptance"), None)
         if space is None:
             space = call("POST", "/spaces", json={
-                "code": "structured-acceptance",
-                "name": "结构化经营数据验收库",
+                "code": "gl-structured-acceptance",
+                "name": "集团经营数据知识库",
                 "description": "MySQL/PostgreSQL 预览、语义映射、Text-to-SQL 与 DSH 多轮问答验收",
             })
 
@@ -46,19 +47,20 @@ def main() -> int:
             "username": "structured_reader",
             "schema": "public",
             "include_tables": [
-                "companies", "suppliers", "products", "customers", "orders",
-                "order_items", "sales_targets", "risk_events", "activity_log",
+                "companies", "departments", "suppliers", "products", "customers", "contracts",
+                "orders", "order_items", "sales_targets", "risk_events", "projects",
+                "project_members", "indicator_definitions", "activity_log",
             ],
             "knowledge_index_enabled": True,
             "realtime_query_enabled": True,
             "graph_materialization_enabled": False,
         }
         sources = call("GET", "/sources")
-        source = next((item for item in sources if item["name"] == "结构化经营数据验收库"), None)
+        source = next((item for item in sources if item["name"] == "集团经营数据库（PostgreSQL）"), None)
         if source is None:
             source = call("POST", "/sources", json={
                 "space_id": space["id"],
-                "name": "结构化经营数据验收库",
+                "name": "集团经营数据库（PostgreSQL）",
                 "source_type": "database",
                 "config": source_config,
                 "secret": FIXTURE_PASSWORD,
@@ -85,14 +87,47 @@ def main() -> int:
         if not required_objects <= object_ids:
             raise RuntimeError(f"fixture schema is incomplete: {sorted(required_objects - object_ids)}")
 
+        mysql_config = {
+            **source_config,
+            "dialect": "mysql",
+            "host": "structured-mysql",
+            "port": 3306,
+        }
+        mysql_config.pop("schema", None)
+        mysql_source = next((item for item in sources if item["name"] == "集团经营数据库（MySQL 灾备）"), None)
+        if mysql_source is None:
+            mysql_source = call("POST", "/sources", json={
+                "space_id": space["id"],
+                "name": "集团经营数据库（MySQL 灾备）",
+                "source_type": "database",
+                "config": mysql_config,
+                "secret": FIXTURE_PASSWORD,
+            })
+        else:
+            mysql_source = call("PUT", f"/sources/{mysql_source['id']}", json={
+                "name": mysql_source["name"],
+                "space_id": space["id"],
+                "config": mysql_config,
+                "enabled": True,
+            })
+        mysql_tested = call("POST", "/sources/test", json={
+            "source_id": mysql_source["id"], "source_type": "database", "config": mysql_config,
+        })
+        if mysql_tested["status"] != "success":
+            raise RuntimeError("MySQL fixture database connection test did not succeed")
+        mysql_schema = call("POST", f"/sources/{mysql_source['id']}/schema/discover")
+        mysql_objects = {item["id"] for item in (mysql_schema.get("catalog") or {}).get("objects") or []}
+        if {"customers", "orders", "products", "risk_events"} - mysql_objects:
+            raise RuntimeError("MySQL fixture schema is incomplete")
+
         ontologies = call("GET", "/ontologies")
-        ontology = next((item for item in ontologies if item["code"] == "structured-business"), None)
+        ontology = next((item for item in ontologies if item["code"] == "gl-structured-business"), None)
         if ontology is None:
             ontology = call("POST", "/ontologies", json={
                 "space_id": space["id"],
-                "code": "structured-business",
-                "name": "结构化经营业务本体",
-                "namespace": "urn:chuanshen:structured-business",
+                "code": "gl-structured-business",
+                "name": "国联集团结构化经营业务本体",
+                "namespace": "urn:chuanshen:guolian:structured-business",
             })
 
         term_specs = {
@@ -240,7 +275,9 @@ def main() -> int:
         print(json.dumps({
             "space_id": space["id"],
             "source_id": source["id"],
+            "mysql_source_id": mysql_source["id"],
             "schema_version_id": schema["id"],
+            "mysql_schema_version_id": mysql_schema["id"],
             "ontology_id": ontology["id"],
             "mapping_id": mapping["id"],
             "mapping_version_id": mapping["active_version_id"],

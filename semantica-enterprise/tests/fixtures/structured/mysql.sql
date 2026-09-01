@@ -8,6 +8,17 @@ CREATE TABLE companies (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) COMMENT='集团经营主体';
 
+CREATE TABLE departments (
+  id BIGINT PRIMARY KEY,
+  company_id BIGINT NOT NULL,
+  department_code VARCHAR(40) NOT NULL UNIQUE,
+  department_name VARCHAR(120) NOT NULL,
+  parent_id BIGINT,
+  cost_center VARCHAR(40),
+  CONSTRAINT fk_department_company FOREIGN KEY (company_id) REFERENCES companies(id),
+  CONSTRAINT fk_department_parent FOREIGN KEY (parent_id) REFERENCES departments(id)
+);
+
 CREATE TABLE suppliers (
   id BIGINT PRIMARY KEY,
   company_id BIGINT NOT NULL,
@@ -37,6 +48,55 @@ CREATE TABLE customers (
   mobile VARCHAR(30),
   password VARCHAR(120),
   registered_at DATETIME NOT NULL
+);
+
+CREATE TABLE contracts (
+  id BIGINT PRIMARY KEY,
+  contract_no VARCHAR(40) NOT NULL UNIQUE,
+  company_id BIGINT NOT NULL,
+  supplier_id BIGINT NOT NULL,
+  subject VARCHAR(200) NOT NULL,
+  signed_at DATE NOT NULL,
+  expires_at DATE NOT NULL,
+  amount DECIMAL(16,2) NOT NULL,
+  status VARCHAR(30) NOT NULL,
+  CONSTRAINT fk_contract_company FOREIGN KEY (company_id) REFERENCES companies(id),
+  CONSTRAINT fk_contract_supplier FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
+);
+
+CREATE TABLE projects (
+  id BIGINT PRIMARY KEY,
+  project_code VARCHAR(40) NOT NULL UNIQUE,
+  project_name VARCHAR(160) NOT NULL,
+  company_id BIGINT NOT NULL,
+  owner_department_id BIGINT NOT NULL,
+  start_date DATE NOT NULL,
+  end_date DATE,
+  budget DECIMAL(16,2) NOT NULL,
+  status VARCHAR(30) NOT NULL,
+  CONSTRAINT fk_project_company FOREIGN KEY (company_id) REFERENCES companies(id),
+  CONSTRAINT fk_project_department FOREIGN KEY (owner_department_id) REFERENCES departments(id)
+);
+
+CREATE TABLE project_members (
+  project_id BIGINT NOT NULL,
+  department_id BIGINT NOT NULL,
+  member_name VARCHAR(80) NOT NULL,
+  member_role VARCHAR(80) NOT NULL,
+  joined_at DATE NOT NULL,
+  PRIMARY KEY (project_id, department_id, member_name),
+  CONSTRAINT fk_member_project FOREIGN KEY (project_id) REFERENCES projects(id),
+  CONSTRAINT fk_member_department FOREIGN KEY (department_id) REFERENCES departments(id)
+);
+
+CREATE TABLE indicator_definitions (
+  id BIGINT PRIMARY KEY,
+  indicator_code VARCHAR(60) NOT NULL UNIQUE,
+  indicator_name VARCHAR(120) NOT NULL,
+  definition TEXT NOT NULL,
+  formula TEXT NOT NULL,
+  owner_department VARCHAR(120) NOT NULL,
+  effective_date DATE NOT NULL
 );
 
 CREATE TABLE orders (
@@ -90,6 +150,11 @@ CREATE TABLE activity_log (
 INSERT INTO companies VALUES
   (1, '国联数字科技有限公司', '华东', '负责集团数字化与人工智能产品', '2025-01-01 08:00:00'),
   (2, '国联供应链有限公司', '华东', '负责集团供应链业务', '2025-02-01 08:00:00');
+INSERT INTO departments VALUES
+  (1, 1, 'GLDT-AI', '人工智能中心', NULL, 'CC-AI-001'),
+  (2, 1, 'GLDT-PRODUCT', '产品研发部', NULL, 'CC-PD-001'),
+  (3, 2, 'GLSC-PROCURE', '采购管理部', NULL, 'CC-PC-001'),
+  (4, 2, 'GLSC-RISK', '风险管理部', NULL, 'CC-RM-001');
 INSERT INTO suppliers VALUES
   (1, 2, '华星核心器件', 'high', '13800138000', 'fixture-secret-token'),
   (2, 2, '江南云服务', 'low', '13900139000', NULL);
@@ -102,6 +167,21 @@ INSERT INTO customers VALUES
   (2, 'C002', '江北能源集团', '华北', 'energy@example.com', '13933334444', 'never-return-this', '2025-03-20 10:00:00'),
   (3, 'C003', '南方交通集团', '华南', NULL, NULL, 'never-return-this', '2026-01-08 11:00:00'),
   (4, 'C004', '尚未成交客户', '华东', 'lead@example.com', '13755556666', 'never-return-this', '2026-06-01 11:00:00');
+INSERT INTO contracts VALUES
+  (1, 'GL-SC-2026-008', 2, 1, 'NexusOne 关键器件采购框架协议', '2026-01-01', '2026-12-31', 680000.00, 'active'),
+  (2, 'GL-IT-2026-003', 1, 2, '集团云资源服务协议', '2026-02-01', '2027-01-31', 360000.00, 'active');
+INSERT INTO projects VALUES
+  (1, 'GL-AI-15FIVE', '集团人工智能十五五知识底座项目', 1, 1, '2026-01-01', '2026-12-31', 3000000.00, 'running'),
+  (2, 'GL-NX1-R2', 'NexusOne 企业版二期', 1, 2, '2026-03-01', '2026-10-31', 1800000.00, 'running');
+INSERT INTO project_members VALUES
+  (1, 1, '张明', '项目负责人', '2026-01-01'),
+  (1, 2, '李晓', '产品负责人', '2026-01-01'),
+  (1, 4, '王宁', '风险顾问', '2026-02-01'),
+  (2, 2, '陈宇', '技术负责人', '2026-03-01');
+INSERT INTO indicator_definitions VALUES
+  (1, 'SALES_AMOUNT', '销售额', '仅统计状态为 completed 的订单金额。', 'SUM(orders.sales_amount) WHERE status = completed', '经营管理部', '2026-01-01'),
+  (2, 'YOY_RATE', '同比增长率', '本期相对上年同期的增长百分比。', '(本期销售额-上年同期销售额)/上年同期销售额*100%', '经营管理部', '2026-01-01'),
+  (3, 'TARGET_COMPLETION', '目标完成率', '已完成销售额占同期销售目标的百分比。', '已完成销售额/销售目标*100%', '经营管理部', '2026-01-01');
 INSERT INTO orders VALUES
   (1, 'O20250101', 1, '2025-03-10', 'completed', '华东', 200000.00),
   (2, 'O20260101', 1, '2026-01-12', 'completed', '华东', 300000.00),

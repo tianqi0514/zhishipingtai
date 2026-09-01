@@ -52,7 +52,12 @@ def test_structured_schema_mapping_preview_and_query_end_to_end() -> None:
                 "username": "structured_reader",
                 "schema": "public",
                 "include_tables": ["customers", "orders", "order_items", "products", "sales_targets", "risk_events", "activity_log"],
-                "knowledge_index_enabled": True,
+                # This E2E validates database snapshot/preview, mapping and
+                # deterministic query.  Knowledge indexing has its own real
+                # Semantica contract and must not leave a long-running model
+                # extraction task behind after the temporary document is
+                # removed in cleanup.
+                "knowledge_index_enabled": False,
                 "realtime_query_enabled": True,
                 "graph_materialization_enabled": False,
             }

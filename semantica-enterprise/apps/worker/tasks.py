@@ -372,7 +372,13 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
             job.result = {"version_id": version.id, **summary}
             job.finished_at = now()
             db.commit()
-            if settings.knowledge_auto_process:
+            source = db.get(SourceConnector, document.source_id) if document.source_id else None
+            source_knowledge_enabled = not (
+                source is not None
+                and source.source_type == "database"
+                and (source.config or {}).get("knowledge_index_enabled") is False
+            )
+            if settings.knowledge_auto_process and source_knowledge_enabled:
                 process_job = db.scalar(select(Job).where(Job.idempotency_key == f"knowledge:{version.id}"))
                 if process_job is None:
                     process_job = Job(
@@ -846,10 +852,18 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         job = db.get(Job, job_id)
         if job is None:
             return {"status": "missing"}
+        if job.status == "cancelled":
+            return {"status": "cancelled"}
         version_id = (job.input or {}).get("version_id")
         version = db.get(DocumentVersion, version_id)
         document = db.get(Document, version.document_id) if version else None
-        if version is None or document is None or version.tenant_id != job.tenant_id:
+        if (
+            version is None
+            or document is None
+            or version.deleted_at is not None
+            or document.deleted_at is not None
+            or version.tenant_id != job.tenant_id
+        ):
             _fail(db, job, "VERSION_NOT_FOUND", "文档版本不存在")
             return {"status": "failed"}
         if version.status != "ready":
@@ -1127,6 +1141,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             selected_chunks = chunks[: extraction_policy.max_chunks]
             reused_chunk_count = 0
             model_chunk_count = 0
+            extraction_errors: list[dict[str, Any]] = []
             for index, chunk in enumerate(selected_chunks):
                 snapshot = reused_extractions.get(chunk.chunk_id)
                 if snapshot:
@@ -1175,22 +1190,33 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     reused_chunk_count += 1
                     _progress(db, job, 20 + round(30 * (index + 1) / max(1, len(selected_chunks))))
                     continue
-                output = extract_semantics(
-                    chunk.text,
-                    chunk_key=chunk.chunk_id,
-                    api_key=api_key,
-                    model=llm_model.model_name,
-                    base_url=llm_model.base_url,
-                    entity_types=extraction_policy.entity_types,
-                    relation_types=extraction_policy.relation_types,
-                    temperature=float((extraction_policy.config or {}).get("temperature", 0.1)),
-                    timeout=float((llm_model.config or {}).get("timeout", 60)),
-                    max_retries=int(
-                        (llm_model.config or {}).get(
-                            "max_retries", (llm_model.config or {}).get("retry", 2)
-                        )
-                    ),
-                )
+                try:
+                    output = extract_semantics(
+                        chunk.text,
+                        chunk_key=chunk.chunk_id,
+                        api_key=api_key,
+                        model=llm_model.model_name,
+                        base_url=llm_model.base_url,
+                        entity_types=extraction_policy.entity_types,
+                        relation_types=extraction_policy.relation_types,
+                        temperature=float((extraction_policy.config or {}).get("temperature", 0.1)),
+                        timeout=float((llm_model.config or {}).get("timeout", 60)),
+                        max_retries=int(
+                            (llm_model.config or {}).get(
+                                "max_retries", (llm_model.config or {}).get("retry", 2)
+                            )
+                        ),
+                    )
+                except Exception as exc:
+                    safe_message = str(exc).replace(api_key, "***")
+                    extraction_errors.append({
+                        "chunk_id": chunk.chunk_id,
+                        "chunk_ordinal": chunk.ordinal,
+                        "error_type": type(exc).__name__,
+                        "message": safe_message[:500],
+                    })
+                    _progress(db, job, 20 + round(30 * (index + 1) / max(1, len(selected_chunks))))
+                    continue
                 for item in output.entities:
                     if item["confidence"] < extraction_policy.min_confidence:
                         continue
@@ -1222,18 +1248,24 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     event_count += 1
                 model_chunk_count += 1
                 _progress(db, job, 20 + round(30 * (index + 1) / max(1, len(selected_chunks))))
-            run.status = "succeeded"
+            run.status = "partial" if extraction_errors else "succeeded"
             run.metrics = {
                 "chunks": len(selected_chunks),
                 "model_chunks": model_chunk_count,
                 "reused_chunks": reused_chunk_count,
+                "failed_chunks": len(extraction_errors),
                 "entities": entity_count,
                 "relations": relation_count,
                 "events": event_count,
             }
+            if extraction_errors:
+                run.metrics["errors"] = extraction_errors
+                run.error_message = (
+                    f"{len(extraction_errors)} 个片段语义抽取失败；文档仍已进入全文和向量索引，可重试知识加工"
+                )
             run.finished_at = now()
             db.commit()
-            _step(db, job.id, "semantic_extract", 3, "succeeded", run.metrics)
+            _step(db, job.id, "semantic_extract", 3, run.status, run.metrics)
             _progress(db, job, 52)
 
             _step(db, job.id, "governance", 4, "running")
@@ -1397,6 +1429,8 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             version.parse_summary = {
                 **(version.parse_summary or {}),
                 "knowledge_status": "published",
+                "semantic_extraction_status": run.status,
+                "semantic_extraction_failed_chunks": len(extraction_errors),
                 "chunks": len(chunks),
                 "entities": entity_count,
                 "facts": published_facts,
@@ -1419,8 +1453,13 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "knowledge_release": knowledge_release.release_number,
                 "structured_materialization": structured_materialization,
             }
+            if extraction_errors:
+                job.result["warnings"] = [
+                    f"{len(extraction_errors)} 个片段的模型语义抽取失败；全文、向量和已成功抽取的图谱知识均已发布"
+                ]
             job.finished_at = now()
-            curation_batch = db.get(CurationBatch, (job.input or {}).get("curation_batch_id"))
+            curation_batch_id = (job.input or {}).get("curation_batch_id")
+            curation_batch = db.get(CurationBatch, curation_batch_id) if curation_batch_id else None
             if curation_batch:
                 curation_batch.status = "published"
                 curation_batch.published_at = now()
@@ -1475,7 +1514,8 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     version.parse_summary = {**(version.parse_summary or {}), "knowledge_status": "failed", "knowledge_error": message[:1000]}
             if document:
                 document.status = "ready"
-            curation_batch = db.get(CurationBatch, (job.input or {}).get("curation_batch_id"))
+            curation_batch_id = (job.input or {}).get("curation_batch_id")
+            curation_batch = db.get(CurationBatch, curation_batch_id) if curation_batch_id else None
             if curation_batch:
                 curation_batch.status = "publish_failed"
                 curation_batch.publish_error = message[:2000]

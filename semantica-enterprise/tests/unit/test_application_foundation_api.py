@@ -17,8 +17,10 @@ from packages.platform.models import (
     KnowledgeRelease,
     KnowledgeSpace,
     QueryRun,
+    Role,
     Tenant,
     User,
+    UserRole,
 )
 from packages.platform.security import create_access_token, hash_password
 
@@ -134,6 +136,85 @@ def test_application_scope_escalation_and_invalid_code_are_rejected() -> None:
         assert escalation.status_code == 403
 
 
+def test_application_builder_permission_is_real_and_owner_isolation_is_enforced() -> None:
+    with application_client() as (client, db):
+        admin = db.query(User).filter(User.username == "app-admin").one()
+        role = Role(
+            tenant_id=admin.tenant_id,
+            code="application_builder",
+            name="应用开发者",
+            permissions=["application.manage"],
+            enabled=True,
+        )
+        builder = User(
+            tenant_id=admin.tenant_id,
+            username="application-builder",
+            password_hash=hash_password("Builder@12345"),
+            display_name="应用开发者",
+            enabled=True,
+        )
+        other = User(
+            tenant_id=admin.tenant_id,
+            username="other-builder",
+            password_hash=hash_password("Builder@12345"),
+            display_name="其他应用开发者",
+            enabled=True,
+        )
+        db.add_all([role, builder, other])
+        db.flush()
+        db.add_all([UserRole(user_id=builder.id, role_id=role.id), UserRole(user_id=other.id, role_id=role.id)])
+        db.commit()
+        builder_token = create_access_token(builder.id, admin.tenant_id, False)
+        other_token = create_access_token(other.id, admin.tenant_id, False)
+
+        created = client.post(
+            "/api/v1/applications",
+            headers={"Authorization": f"Bearer {builder_token}"},
+            json={"code": "builder-owned", "name": "开发者自有应用", "status": "active"},
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["owner_id"] == builder.id
+
+        reassigned = client.post(
+            "/api/v1/applications",
+            headers={"Authorization": f"Bearer {builder_token}"},
+            json={"code": "invalid-owner", "name": "越权负责人", "owner_id": other.id},
+        )
+        assert reassigned.status_code == 403
+
+        hidden = client.get(
+            f"/api/v1/applications/{created.json()['id']}",
+            headers={"Authorization": f"Bearer {other_token}"},
+        )
+        assert hidden.status_code in {403, 404}
+        assert client.get(
+            "/api/v1/applications",
+            headers={"Authorization": f"Bearer {other_token}"},
+        ).json() == []
+
+
+def test_application_mutation_without_platform_permission_is_rejected() -> None:
+    with application_client() as (client, db):
+        admin = db.query(User).filter(User.username == "app-admin").one()
+        reader = User(
+            tenant_id=admin.tenant_id,
+            username="knowledge-reader",
+            password_hash=hash_password("Reader@12345"),
+            display_name="知识读者",
+            enabled=True,
+        )
+        db.add(reader)
+        db.commit()
+        token = create_access_token(reader.id, admin.tenant_id, False)
+        denied = client.post(
+            "/api/v1/applications",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"code": "reader-app", "name": "读者不可创建"},
+        )
+        assert denied.status_code == 403
+        assert denied.json()["detail"] == "缺少平台权限：application.manage"
+
+
 def test_product_release_scenario_version_and_application_runtime_are_linked() -> None:
     with application_client() as (client, db):
         admin = db.query(User).filter(User.username == "app-admin").one()
@@ -214,6 +295,26 @@ def test_product_release_scenario_version_and_application_runtime_are_linked() -
             json={"product_release_id": product_release_id, "reason": "投入生产验证"},
         )
         assert alias.status_code == 200, alias.text
+        current = client.get(f"/api/v1/knowledge-products/{product_id}").json()
+        assert current["release_freshness"] == {
+            "has_production_release": True,
+            "is_current": True,
+            "changed_spaces": [],
+        }
+        db.add(KnowledgeRelease(
+            tenant_id=admin.tenant_id,
+            space_id=space.id,
+            release_number=2,
+            graph_release_id=graph.id,
+            index_release_id=index.id,
+            checksum="b" * 64,
+            status="published",
+        ))
+        db.commit()
+        stale = client.get(f"/api/v1/knowledge-products/{product_id}").json()
+        assert stale["release_freshness"]["is_current"] is False
+        assert stale["release_freshness"]["changed_spaces"][0]["space_name"] == "制度知识"
+        assert stale["release_freshness"]["changed_spaces"][0]["latest_release_number"] == 2
 
         scenario = client.post("/api/v1/application-scenarios", json={
             "code": "policy_search",

@@ -56,6 +56,20 @@ def test_product_release_and_scenario_version_actions_call_real_apis() -> None:
         assert route in APP
 
 
+def test_application_feedback_closes_through_governance_workbench() -> None:
+    assert "通过门禁的上线测试确认" in APP
+    assert "查看治理任务" in APP
+    assert "runtime-feedback-curation" in APP
+    assert "runtime-feedback-verify" in APP
+    assert "/verify-resolution" in APP
+
+
+def test_knowledge_supply_warns_when_upstream_release_changes() -> None:
+    assert "release_freshness" in APP
+    assert "上游知识已更新" in APP
+    assert "supply-update-release" in APP
+
+
 def test_foundation_layout_has_bounded_master_detail_responsiveness() -> None:
     assert ".foundation-layout" in STYLE
     assert "max-height:calc(100vh - 155px)" in STYLE

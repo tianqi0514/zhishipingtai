@@ -17,7 +17,14 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from apps.api.deps import get_current_user, has_space_permission, require_admin, require_space_permission
+from apps.api.deps import (
+    get_current_user,
+    get_user_permissions,
+    has_space_permission,
+    require_admin,
+    require_permission,
+    require_space_permission,
+)
 from apps.api.schemas import (
     AnalysisRuleCreate,
     AnalysisRuleSetCreate,
@@ -86,6 +93,7 @@ from packages.platform.models import (
     AnalysisRuleSet,
     AnalysisRuleVersion,
     AnalysisScenario,
+    ApplicationFeedback,
     AuditEvent,
     CanonicalEntity,
     Chunk,
@@ -352,7 +360,9 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
         path="/",
         max_age=settings.access_token_minutes * 60,
     )
-    return {"user": serialize_row(user), "access_token": token, "token_type": "bearer"}
+    user_data = serialize_row(user)
+    user_data["permissions"] = get_user_permissions(db, user)
+    return {"user": user_data, "access_token": token, "token_type": "bearer"}
 
 
 @router.post("/auth/logout")
@@ -365,6 +375,7 @@ def logout(response: Response):
 def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     data = serialize_row(user)
     data["role_ids"] = list(db.scalars(select(UserRole.role_id).where(UserRole.user_id == user.id)))
+    data["permissions"] = get_user_permissions(db, user)
     return data
 
 
@@ -883,16 +894,16 @@ def delete_document(row_id: str, user: User = Depends(get_current_user), db: Ses
         )
     )
     version_ids = {version.id for version in versions}
-    active_parse_jobs = db.scalars(
+    active_document_jobs = db.scalars(
         select(Job).where(
             Job.tenant_id == user.tenant_id,
-            Job.job_type == "parse_document",
+            Job.job_type.in_(["parse_document", "process_knowledge"]),
             Job.status.in_(["queued", "running"]),
             Job.deleted_at.is_(None),
         )
     )
-    if any((job.input or {}).get("version_id") in version_ids for job in active_parse_jobs):
-        raise HTTPException(409, "文档正在解析，完成后才能删除")
+    if any((job.input or {}).get("version_id") in version_ids for job in active_document_jobs):
+        raise HTTPException(409, "文档正在解析或加工，完成后才能删除")
     chunks = list(
         db.scalars(
             select(Chunk).where(
@@ -1343,8 +1354,8 @@ def delete_job(row_id: str, admin: User = Depends(require_admin), db: Session = 
 
 
 @router.get("/audit-events")
-def list_audit(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    return [serialize_row(x) for x in db.scalars(select(AuditEvent).where(AuditEvent.tenant_id == admin.tenant_id).order_by(AuditEvent.created_at.desc()).limit(300))]
+def list_audit(auditor: User = Depends(require_permission("audit.read")), db: Session = Depends(get_db)):
+    return [serialize_row(x) for x in db.scalars(select(AuditEvent).where(AuditEvent.tenant_id == auditor.tenant_id).order_by(AuditEvent.created_at.desc()).limit(300))]
 
 
 # ---- M5-M7 processing policy CRUD ----------------------------------------------------
@@ -2646,6 +2657,14 @@ def update_curation_case(case_id: str, payload: CurationCaseUpdate, user: User =
         "resolution_note": payload.reason_note.strip(),
         "resolved_at": datetime.now(timezone.utc).isoformat() if payload.status != "open" else None,
     }
+    # Application feedback and curation are one business loop. Once a linked
+    # governance case is handled, project the outcome back to feedback; when
+    # reopened, return it to the governance state. Semantica's automatic
+    # results stay immutable because only workflow records are synchronized.
+    if row.target_type == "application_feedback":
+        feedback = db.get(ApplicationFeedback, row.target_id)
+        if feedback and feedback.tenant_id == user.tenant_id and feedback.deleted_at is None:
+            feedback.status = "converted" if payload.status == "open" else "triaged"
     audit(db, user.tenant_id, user.id, "curation.case.update", "curation_case", row.id, {"status": row.status, "resolution": resolution})
     db.commit()
     return _curation_case_payload(db, row, detail=True)
