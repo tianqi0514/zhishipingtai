@@ -25,6 +25,9 @@ x-app-environment: &app-environment
   QDRANT_URL: http://qdrant:6333
   FALKORDB_HOST: falkordb
   FALKORDB_PORT: "6379"
+  # Empty by default. Local/private data sources stay blocked unless an
+  # operator explicitly allowlists exact fixture or intranet hosts.
+  SOURCE_PRIVATE_HOST_ALLOWLIST: ${SOURCE_PRIVATE_HOST_ALLOWLIST:-}
   SOURCE_SCHEDULER_SECONDS: "60"
   KNOWLEDGE_AUTO_PROCESS: "true"
   AGENT_RUNTIME_URL: http://agent-runtime:8090
@@ -68,9 +71,13 @@ services:
     ports:
       - "127.0.0.1:15672:15672"
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      # `ping` only proves that the Erlang node is alive.  The API may start
+      # before the AMQP listener is ready and lose the first published job.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
       interval: 8s
-      timeout: 5s
+      # The Erlang diagnostics command can take slightly over five seconds on
+      # a busy Docker Desktop host even while AMQP is accepting connections.
+      timeout: 10s
       retries: 20
     restart: unless-stopped
 

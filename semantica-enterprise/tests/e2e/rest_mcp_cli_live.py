@@ -18,6 +18,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 API = os.getenv("TEST_API", "http://api:8080/api/v1").rstrip("/")
 MCP_URL = os.getenv("TEST_MCP", "http://mcp-server:8091/mcp")
+SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
+SEARCH_QUERY = os.getenv("TEST_SEARCH_QUERY", "该产品的主要定位")
 
 
 def mcp_payload(result: Any) -> dict[str, Any]:
@@ -50,17 +52,17 @@ async def run_mcp(token: str, space_id: str, chunk_id: str, document_id: str) ->
             }
             assert required <= tools
             search = mcp_payload(await session.call_tool("knowledge_search", {
-                "query": "NexusOne 的定位",
+                "query": SEARCH_QUERY,
                 "space_ids": [space_id],
                 "top_k": 5,
             }))
             fragment = mcp_payload(await session.call_tool("knowledge_get_fragment", {"chunk_id": chunk_id}))
             graph = mcp_payload(await session.call_tool("knowledge_graph_query", {
-                "space_ids": [space_id], "entity_query": "NexusOne", "limit": 10,
+                "space_ids": [space_id], "entity_query": "传神智库", "limit": 10,
             }))
             profile = mcp_payload(await session.call_tool("knowledge_get_document_profile", {"document_id": document_id}))
             chat = mcp_payload(await session.call_tool("knowledge_chat", {
-                "message": "NexusOne 的主要定位是什么？请引用依据。",
+                "message": "该产品的主要定位是什么？请引用依据。",
                 "space_ids": [space_id],
             }))
     assert search.get("items") and fragment.get("has_access") is True
@@ -70,15 +72,15 @@ async def run_mcp(token: str, space_id: str, chunk_id: str, document_id: str) ->
 
 
 def main() -> None:
-    password = os.environ["TEST_ADMIN_PASSWORD"]
+    password = os.getenv("TEST_ADMIN_PASSWORD") or os.environ["BOOTSTRAP_ADMIN_PASSWORD"]
     with httpx.Client(base_url=API, timeout=600) as client:
         login = client.post("/auth/login", json={"username": "admin", "password": password})
         login.raise_for_status()
         token = login.json()["access_token"]
         client.headers["Authorization"] = f"Bearer {token}"
         spaces = client.get("/spaces").json()
-        space = next(item for item in spaces if item["name"] == "M10 系统验收")
-        search = client.post("/search", json={"query": "NexusOne 的定位", "space_ids": [space["id"]], "top_k": 5})
+        space = next(item for item in spaces if item["code"] == SPACE_CODE)
+        search = client.post("/search", json={"query": SEARCH_QUERY, "space_ids": [space["id"]], "top_k": 5})
         search.raise_for_status()
         first = search.json()["items"][0]
         fragment = client.get(f"/fragments/{first['chunk_id']}")
@@ -93,7 +95,7 @@ def main() -> None:
             "CHUANSHEN_API_URL": API,
         }
         cli_search = subprocess.run(
-            ["chuanshen", "search", "NexusOne 的定位", "--space", space["id"], "--top-k", "3"],
+            ["chuanshen", "search", SEARCH_QUERY, "--space", space["id"], "--top-k", "3"],
             capture_output=True,
             text=True,
             timeout=90,
@@ -111,7 +113,7 @@ def main() -> None:
         )
         assert json.loads(cli_fragment.stdout).get("has_access") is True
         cli_chat = subprocess.run(
-            ["chuanshen", "chat", "NexusOne 支持哪些数据源？", "--space", space["id"]],
+            ["chuanshen", "chat", "该产品支持哪些数据源？", "--space", space["id"]],
             capture_output=True,
             text=True,
             timeout=600,

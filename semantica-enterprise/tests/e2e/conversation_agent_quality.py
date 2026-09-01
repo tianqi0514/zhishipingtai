@@ -15,6 +15,7 @@ API = os.getenv("API_BASE", "http://127.0.0.1:8080/api/v1").rstrip("/")
 USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123456")
 KEEP = os.getenv("KEEP_CONVERSATION", "0") == "1"
+SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
 
 
 def request(method: str, path: str, token: str | None = None, body: dict | None = None, timeout: int = 300):
@@ -63,9 +64,9 @@ def main() -> int:
     login = request("POST", "/auth/login", body={"username": USERNAME, "password": PASSWORD})
     token = login["access_token"]
     spaces = request("GET", "/spaces", token)
-    selected = next((item for item in spaces if item.get("code") == "m10-acceptance"), None)
+    selected = next((item for item in spaces if item.get("code") == SPACE_CODE), None)
     if selected is None:
-        raise AssertionError("缺少 m10-acceptance 验收知识空间")
+        raise AssertionError(f"缺少 {SPACE_CODE} 验收知识空间")
     conversation = request(
         "POST",
         "/conversations",

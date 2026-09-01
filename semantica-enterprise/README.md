@@ -2,6 +2,8 @@
 
 传神智库是基于 Semantica 0.6.6 源码增量开发的组织级知识平台。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理画像、OpenSearch/Qdrant/FalkorDB 三路检索、可编辑 3D 图谱，以及由 DeepSeek Harness 驱动的多轮知识问答。当前交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
 
+仓库附带可重复执行的验收数据脚本：`tests/e2e/seed_acceptance_dataset.py` 用于文件、图谱、分析与问答数据，`tests/e2e/seed_source_acceptance.py` 用于数据源。2026-09-01 清空重建后的详细实测结果见 [全链路验收报告](docs/ACCEPTANCE_REGRESSION_20260901.md)。
+
 ## 完整启动
 
 推荐从仓库根目录使用部署脚本，它会生成本地 Secret、从 Semantica 源码构建 CPU 基础镜像、启动服务并等待健康检查：
@@ -94,6 +96,7 @@ python3 tests/performance/live_load.py
 - [模型配置](docs/MODELS.md)
 - [REST、MCP、CLI](docs/INTEGRATIONS.md)
 - [测试报告](docs/TEST_REPORT.md)
+- [2026-09-01 清空重建与全链路验收](docs/ACCEPTANCE_REGRESSION_20260901.md)
 - [多轮问答测试报告](docs/QA_REPORT.md)
 - [已知限制](docs/KNOWN_LIMITATIONS.md)
 - [故障排查](docs/TROUBLESHOOTING.md)

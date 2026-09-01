@@ -10,7 +10,7 @@ import threading
 import time
 import urllib.request
 
-from conversation_agent_quality import API, PASSWORD, USERNAME, request
+from conversation_agent_quality import API, PASSWORD, SPACE_CODE, USERNAME, request
 
 
 def stream(path: str, token: str, body: dict) -> list[tuple[str, dict]]:
@@ -45,7 +45,7 @@ def main() -> None:
         "POST", "/auth/login", body={"username": USERNAME, "password": PASSWORD}
     )["access_token"]
     spaces = request("GET", "/spaces", token)
-    space = next(item for item in spaces if item.get("code") == "m10-acceptance")
+    space = next(item for item in spaces if item.get("code") == SPACE_CODE)
     conversation = request(
         "POST",
         "/conversations",

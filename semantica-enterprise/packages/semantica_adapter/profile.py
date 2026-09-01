@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
 from .extract import _effective_temperature
+from .llm_transport import apply_model_transport_options
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,8 @@ def analyze_profile_with_model(
     taxonomy: list[str] | None = None,
     summary_length: int = 240,
     tag_count: int = 8,
+    timeout: float = 60,
+    max_retries: int = 2,
     generator: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     prompt = f"""你是组织级知识治理器。只输出 JSON 对象，不要 Markdown，不得补充原文不存在的事实。
@@ -154,7 +157,11 @@ def analyze_profile_with_model(
     if generator is None:
         from semantica.semantic_extract.providers import OpenAIProvider
 
-        provider = OpenAIProvider(api_key=api_key, model=model, base_url=base_url)
+        provider = apply_model_transport_options(
+            OpenAIProvider(api_key=api_key, model=model, base_url=base_url),
+            timeout=timeout,
+            max_retries=max_retries,
+        )
         generator = lambda value: provider.generate_structured(
             value, temperature=_effective_temperature(model, 0.1)
         )
@@ -171,4 +178,3 @@ def analyze_profile_with_model(
         "time_range": result.get("time_range") if isinstance(result.get("time_range"), dict) else {},
         "quality_issues": [str(item)[:500] for item in (result.get("quality_issues") or [])[:20]],
     }
-

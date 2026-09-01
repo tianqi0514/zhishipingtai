@@ -7,16 +7,16 @@ import json
 import sys
 import urllib.error
 
-from conversation_agent_quality import PASSWORD, USERNAME, request, stream_turn
+from conversation_agent_quality import PASSWORD, SPACE_CODE, USERNAME, request, stream_turn
 
 
 def main() -> int:
     login = request("POST", "/auth/login", body={"username": USERNAME, "password": PASSWORD})
     token = login["access_token"]
     spaces = request("GET", "/spaces", token)
-    selected = next((item for item in spaces if item.get("code") == "m10-acceptance"), None)
+    selected = next((item for item in spaces if item.get("code") == SPACE_CODE), None)
     if selected is None:
-        raise AssertionError("缺少 m10-acceptance 验收知识空间")
+        raise AssertionError(f"缺少 {SPACE_CODE} 验收知识空间")
 
     models = request("GET", "/model-configs", token)
     embedding = next(
@@ -57,7 +57,7 @@ def main() -> int:
         assert direct_answer["status"] == "completed", direct_answer
         assert "传神智库" in direct_answer["content"], direct_answer
 
-        knowledge_events = stream_turn(conversation_id, token, "NexusOne 支持哪些数据源？")
+        knowledge_events = stream_turn(conversation_id, token, "该产品支持哪些数据源？")
         knowledge_terminal = [name for name, _ in knowledge_events if name.startswith("turn_")]
         assert knowledge_terminal and knowledge_terminal[-1] == "turn_completed", knowledge_terminal
         assert any(name == "retrieval_ranked" for name, _ in knowledge_events), knowledge_events

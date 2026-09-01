@@ -11,6 +11,8 @@ import urllib.request
 API = os.getenv("API_BASE", "http://127.0.0.1:8080/api/v1").rstrip("/")
 USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123456")
+SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
+QUERY = os.getenv("TEST_SEARCH_QUERY", "传神智库")
 
 
 def request(method: str, path: str, token: str | None = None, body: dict | None = None, timeout: int = 120) -> dict:
@@ -28,13 +30,13 @@ def request(method: str, path: str, token: str | None = None, body: dict | None 
 
 def main() -> None:
     token = request("POST", "/auth/login", body={"username": USERNAME, "password": PASSWORD})["access_token"]
-    space = next(item for item in request("GET", "/spaces", token) if item.get("code") == "m10-acceptance")
+    space = next(item for item in request("GET", "/spaces", token) if item.get("code") == SPACE_CODE)
     result = request(
         "POST",
         "/search",
         token,
         {
-            "query": "NexusOne",
+            "query": QUERY,
             "space_ids": [space["id"]],
             "top_k": 5,
             "use_keyword": True,

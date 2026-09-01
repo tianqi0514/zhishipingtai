@@ -69,6 +69,13 @@ def test_knowledge_chat_exposes_observable_dsh_work_without_private_reasoning() 
     assert "返回最新回答" in javascript
     assert "chatPanelTab:'process'" in javascript
     assert "[['process','执行过程'],['trace','检索轨迹'],['evidence','召回依据']]" in javascript
+    assert "pairedToolCalls" in javascript
+    assert "hasLaterEvent" in javascript
+    assert "retrievalFinished" in javascript
+    assert "已完成 · 耗时" in javascript
+    assert "function evidenceLocationLabel" in javascript
+    assert "function evidenceSnippet" in javascript
+    assert "音频元数据" in javascript
     assert "<details><summary>检索范围与高级选项" not in javascript
     assert "grid-template-columns:205px minmax(360px,1fr) 380px" in stylesheet
     assert ".agent-step{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto" in stylesheet

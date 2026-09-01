@@ -9,7 +9,7 @@ import time
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
@@ -187,6 +187,61 @@ def _commit(db: Session, message: str = "数据冲突，请检查编码或名称
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(409, message) from exc
+
+
+def _mark_dispatch_target_failed(db: Session, job: Job, message: str) -> None:
+    """Keep a committed business object consistent when its Celery publish fails."""
+    payload = job.input or {}
+    if job.job_type == "parse_document" and payload.get("version_id"):
+        version = db.get(DocumentVersion, payload["version_id"])
+        if version:
+            version.status = "failed"
+            version.error_code = "QUEUE_DISPATCH_FAILED"
+            version.error_message = message
+            document = db.get(Document, version.document_id)
+            if document:
+                document.status = "failed"
+    elif job.job_type == "sync_source" and payload.get("source_id"):
+        source = db.get(SourceConnector, payload["source_id"])
+        if source:
+            source.last_sync_status = "failed"
+    elif job.job_type == "knowledge_inference" and payload.get("inference_run_id"):
+        run = db.get(InferenceRun, payload["inference_run_id"])
+        if run:
+            run.status = "failed"
+            run.error_code = "QUEUE_DISPATCH_FAILED"
+            run.error_message = message
+            run.finished_at = datetime.now(timezone.utc)
+
+
+def _dispatch_job(
+    db: Session,
+    job: Job,
+    task: Any,
+    *,
+    on_failure: Callable[[str], None] | None = None,
+) -> str | None:
+    """Publish a durable job and turn broker failures into retryable job state.
+
+    The database transaction has already committed before this function is
+    called.  Returning a warning prevents upload clients from retrying and
+    creating duplicate business objects while still exposing a failed job that
+    can be retried from the task centre.
+    """
+    try:
+        task.delay(job.id)
+        return None
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"[:4000]
+        job.status = "failed"
+        job.error_code = "QUEUE_DISPATCH_FAILED"
+        job.error_message = message
+        job.finished_at = datetime.now(timezone.utc)
+        _mark_dispatch_target_failed(db, job, message)
+        if on_failure:
+            on_failure(message)
+        db.commit()
+        return "任务队列暂不可用，任务已记录为失败，可在任务列表中重试"
 
 
 def _active(model):
@@ -779,8 +834,11 @@ async def upload_document(
         db.add(version); db.flush()
         job = Job(tenant_id=user.tenant_id, job_type="parse_document", idempotency_key=f"parse:{version.id}", input={"version_id": version.id})
         db.add(job); audit(db, user.tenant_id, user.id, "document.upload", "document", document.id, {"version_id": version.id}); _commit(db)
-        parse_version_task.delay(job.id)
-        return {"document": serialize_row(document), "version": serialize_row(version), "job": serialize_row(job)}
+        warning = _dispatch_job(db, job, parse_version_task)
+        response = {"document": serialize_row(document), "version": serialize_row(version), "job": serialize_row(job)}
+        if warning:
+            response["warning"] = warning
+        return response
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -1001,8 +1059,11 @@ def retry_version_profile(
     db.add(job)
     audit(db, user.tenant_id, user.id, "profile.retry", "document_version", version.id)
     db.commit()
-    process_version_task.delay(job.id)
-    return serialize_row(job)
+    warning = _dispatch_job(db, job, process_version_task)
+    response = serialize_row(job)
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 @router.get("/versions/{version_id}/download")
@@ -1183,7 +1244,12 @@ def sync_source(row_id: str, user: User = Depends(get_current_user), db: Session
     if _active_source_jobs(db, user.tenant_id, row.id):
         raise HTTPException(409, "该数据源已有同步任务正在运行")
     job = Job(tenant_id=user.tenant_id, job_type="sync_source", idempotency_key=f"sync:{row.id}:{datetime.now(timezone.utc).isoformat()}", input={"source_id": row.id})
-    db.add(job); db.commit(); sync_source_task.delay(job.id); return serialize_row(job)
+    db.add(job); db.commit()
+    warning = _dispatch_job(db, job, sync_source_task)
+    response = serialize_row(job)
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 @router.get("/jobs")
@@ -1251,13 +1317,21 @@ def retry_job(row_id: str, user: User = Depends(get_current_user), db: Session =
         job_input = {"inference_run_id": retry_run.id}
     job = Job(tenant_id=old.tenant_id, job_type=old.job_type, idempotency_key=f"retry:{old.id}:{datetime.now(timezone.utc).isoformat()}", input=job_input, max_attempts=old.max_attempts)
     db.add(job); db.commit()
-    if job.job_type == "parse_document": parse_version_task.delay(job.id)
-    elif job.job_type == "sync_source": sync_source_task.delay(job.id)
-    elif job.job_type == "process_knowledge": process_version_task.delay(job.id)
-    elif job.job_type == "curation_publish": publish_curation_task.delay(job.id)
-    elif job.job_type == "knowledge_inference": run_inference_task.delay(job.id)
-    else: raise HTTPException(400, "不支持重试该任务")
-    return _serialize_job(db, job)
+    tasks = {
+        "parse_document": parse_version_task,
+        "sync_source": sync_source_task,
+        "process_knowledge": process_version_task,
+        "curation_publish": publish_curation_task,
+        "knowledge_inference": run_inference_task,
+    }
+    task = tasks.get(job.job_type)
+    if task is None:
+        raise HTTPException(400, "不支持重试该任务")
+    warning = _dispatch_job(db, job, task)
+    response = _serialize_job(db, job)
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 @router.delete("/jobs/{row_id}")
@@ -1827,9 +1901,11 @@ def create_inference_run(
         {"space_ids": spaces, "mode": payload.mode},
     )
     db.commit()
-    run_inference_task.delay(job.id)
+    warning = _dispatch_job(db, job, run_inference_task)
     data = serialize_row(run)
     data["job_id"] = job.id
+    if warning:
+        data["warning"] = warning
     return data
 
 
@@ -3334,7 +3410,12 @@ def process_document(row_id: str, force: bool = False, user: User = Depends(get_
     active = list(db.scalars(select(Job).where(Job.tenant_id == user.tenant_id, Job.job_type == "process_knowledge", Job.status.in_(["queued", "running"]), _active(Job))))
     if any((row.input or {}).get("version_id") == document.current_version_id for row in active): raise HTTPException(409, "该文档已有知识加工任务")
     job = Job(tenant_id=user.tenant_id, job_type="process_knowledge", idempotency_key=f"knowledge:{document.current_version_id}:{datetime.now(timezone.utc).isoformat()}" if force else f"knowledge-manual:{document.current_version_id}:{datetime.now(timezone.utc).isoformat()}", input={"version_id": document.current_version_id, "force": force})
-    db.add(job); db.commit(); process_version_task.delay(job.id); return serialize_row(job)
+    db.add(job); db.commit()
+    warning = _dispatch_job(db, job, process_version_task)
+    response = serialize_row(job)
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 @router.get("/fragments/{chunk_id}")

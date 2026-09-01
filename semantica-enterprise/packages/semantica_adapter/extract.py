@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .llm_transport import apply_model_transport_options
+
 
 @dataclass(frozen=True)
 class ExtractionOutput:
@@ -43,6 +45,8 @@ def extract_semantics(
     entity_types: list[str] | None = None,
     relation_types: list[str] | None = None,
     temperature: float = 0.1,
+    timeout: float = 60,
+    max_retries: int = 2,
     generator: Callable[[str], dict[str, Any]] | None = None,
 ) -> ExtractionOutput:
     """Extract validated Chinese entities, relations and events using Semantica's LLM provider."""
@@ -57,7 +61,11 @@ def extract_semantics(
     if generator is None:
         from semantica.semantic_extract.providers import OpenAIProvider
 
-        provider = OpenAIProvider(api_key=api_key, model=model, base_url=base_url)
+        provider = apply_model_transport_options(
+            OpenAIProvider(api_key=api_key, model=model, base_url=base_url),
+            timeout=timeout,
+            max_retries=max_retries,
+        )
         generator = lambda value: provider.generate_structured(
             value,
             temperature=_effective_temperature(model, temperature),

@@ -362,7 +362,19 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                     )
                     db.add(process_job)
                     db.commit()
-                    process_version_task.delay(process_job.id)
+                    try:
+                        process_version_task.delay(process_job.id)
+                    except Exception as dispatch_error:
+                        # Parsing is already durable and valid.  Only the
+                        # downstream knowledge-processing job failed to queue.
+                        dispatch_message = f"{type(dispatch_error).__name__}: {dispatch_error}"
+                        process_job.status = "failed"
+                        process_job.error_code = "QUEUE_DISPATCH_FAILED"
+                        process_job.error_message = dispatch_message[:4000]
+                        process_job.finished_at = now()
+                        db.commit()
+                        job.result = {**(job.result or {}), "knowledge_dispatch_warning": True}
+                        db.commit()
             return job.result
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
@@ -1013,6 +1025,12 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                             taxonomy=profile_config.get("taxonomy") or profile_config.get("classification_taxonomy"),
                             summary_length=int(profile_config.get("summary_length", 240)),
                             tag_count=int(profile_config.get("tag_count", 8)),
+                            timeout=float((profile_model.config or {}).get("timeout", 60)),
+                            max_retries=int(
+                                (profile_model.config or {}).get(
+                                    "max_retries", (profile_model.config or {}).get("retry", 2)
+                                )
+                            ),
                         )
                         model_status = "succeeded"
                     except Exception as exc:
@@ -1145,6 +1163,12 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     entity_types=extraction_policy.entity_types,
                     relation_types=extraction_policy.relation_types,
                     temperature=float((extraction_policy.config or {}).get("temperature", 0.1)),
+                    timeout=float((llm_model.config or {}).get("timeout", 60)),
+                    max_retries=int(
+                        (llm_model.config or {}).get(
+                            "max_retries", (llm_model.config or {}).get("retry", 2)
+                        )
+                    ),
                 )
                 for item in output.entities:
                     if item["confidence"] < extraction_policy.min_confidence:
@@ -1625,6 +1649,14 @@ def schedule_due_sources() -> dict[str, int]:
             except Exception:
                 db.rollback()
                 continue
-            sync_source_task.delay(job.id)
-            queued += 1
+            try:
+                sync_source_task.delay(job.id)
+                queued += 1
+            except Exception as exc:
+                job.status = "failed"
+                job.error_code = "QUEUE_DISPATCH_FAILED"
+                job.error_message = f"{type(exc).__name__}: {exc}"[:4000]
+                job.finished_at = now()
+                source.last_sync_status = "failed"
+                db.commit()
     return {"queued": queued}

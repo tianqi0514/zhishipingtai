@@ -45,3 +45,11 @@ def test_every_open_service_has_a_preview_manual() -> None:
 def test_dashboard_grid_panels_do_not_inherit_sibling_margin() -> None:
     assert ".dashboard-grid>.panel+.panel" in STYLE
     assert ".dashboard-panel{display:flex" in STYLE
+
+
+def test_source_sync_history_uses_business_labels_instead_of_internal_json() -> None:
+    assert "function sourceJobResultLabel" in APP
+    assert "内容未变化" in APP
+    assert "已创建新版本，等待解析" in APP
+    assert "sourceJobResultLabel(j.result)" in APP
+    assert "esc(JSON.stringify(j.result||{}))" not in APP

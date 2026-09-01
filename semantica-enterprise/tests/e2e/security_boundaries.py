@@ -16,6 +16,7 @@ API = os.getenv("API_BASE", "http://127.0.0.1:8080/api/v1").rstrip("/")
 USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123456")
 SERVICE_SECRET_FILE = Path(os.getenv("AGENT_SERVICE_SECRET_FILE", "deploy/secrets/agent_service_secret"))
+SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
 
 
 def request(
@@ -51,16 +52,16 @@ def main() -> int:
     login = request("POST", "/auth/login", body={"username": USERNAME, "password": PASSWORD})
     admin_token = login["access_token"]
     spaces = request("GET", "/spaces", token=admin_token)
-    selected = next((item for item in spaces if item.get("code") == "m10-acceptance"), None)
+    selected = next((item for item in spaces if item.get("code") == SPACE_CODE), None)
     if selected is None:
-        raise AssertionError("缺少 m10-acceptance 验收知识空间")
+        raise AssertionError(f"缺少 {SPACE_CODE} 验收知识空间")
     space_id = selected["id"]
 
     search = request(
         "POST",
         "/search",
         token=admin_token,
-        body={"query": "NexusOne", "space_ids": [space_id], "top_k": 3},
+        body={"query": "传神智库", "space_ids": [space_id], "top_k": 3},
     )
     if not search.get("items"):
         raise AssertionError("验收空间没有可用于权限测试的知识片段")
@@ -101,7 +102,7 @@ def main() -> int:
             "POST",
             "/search",
             token=user_token,
-            body={"query": "NexusOne", "space_ids": [space_id], "top_k": 3},
+            body={"query": "传神智库", "space_ids": [space_id], "top_k": 3},
             expected=403,
         )
         request("GET", f"/fragments/{chunk_id}", token=user_token, expected=403)
@@ -127,7 +128,7 @@ def main() -> int:
             token=agent_token,
             body={
                 "conversation_id": conversation_id,
-                "query": "NexusOne",
+                "query": "传神智库",
                 "space_ids": [space_id],
                 "top_k": 2,
             },
@@ -138,7 +139,7 @@ def main() -> int:
             token=agent_token,
             body={
                 "conversation_id": "00000000-0000-0000-0000-000000000000",
-                "query": "NexusOne",
+                "query": "传神智库",
                 "space_ids": [space_id],
                 "top_k": 2,
             },
@@ -150,7 +151,7 @@ def main() -> int:
             token=agent_token,
             body={
                 "conversation_id": conversation_id,
-                "query": "NexusOne",
+                "query": "传神智库",
                 "space_ids": ["00000000-0000-0000-0000-000000000000"],
                 "top_k": 2,
             },
