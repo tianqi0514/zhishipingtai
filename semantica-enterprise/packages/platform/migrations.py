@@ -28,9 +28,16 @@ def run_migrations(engine: Engine) -> None:
                 continue
             statements = [item.strip() for item in path.read_text(encoding="utf-8").split(";\n") if item.strip()]
             for statement in statements:
+                if statement.startswith("-- dialect:"):
+                    directive, _, sql = statement.partition("\n")
+                    dialects = {item.strip() for item in directive.removeprefix("-- dialect:").split(",")}
+                    if engine.dialect.name not in dialects:
+                        continue
+                    statement = sql.strip()
+                    if not statement:
+                        continue
                 connection.exec_driver_sql(statement)
             connection.execute(
                 text("INSERT INTO schema_migrations(version) VALUES (:version)"),
                 {"version": path.stem},
             )
-

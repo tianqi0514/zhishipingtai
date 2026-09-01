@@ -5,10 +5,58 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from apps.api.conversations import _inherit_referenced_citations, _project_event, _reconcile_stale_turn
+from apps.api.conversations import (
+    _conversation_payload,
+    _inherit_referenced_citations,
+    _project_event,
+    _reconcile_stale_turn,
+    _validate_structured_citations,
+)
 from packages.platform import models  # noqa: F401
 from packages.platform.database import Base
-from packages.platform.models import AgentEventProjection, Citation, Conversation, ConversationMessage
+from packages.platform.models import (
+    AgentEventProjection,
+    Citation,
+    Conversation,
+    ConversationMessage,
+    StructuredQueryCitation,
+)
+
+
+def test_structured_data_citation_requires_real_query_citation() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000099",
+            harness_session_id="session-structured-citation",
+            tenant_id="tenant",
+            user_id="user",
+            title="structured citation test",
+        )
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000099",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="completed",
+            content="实时销售额为 100 万元【数据1】，另一个结论[数据2]。",
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+        db.add(StructuredQueryCitation(
+            tenant_id="tenant",
+            query_run_id="30000000-0000-0000-0000-000000000099",
+            message_id=assistant.id,
+            citation_number=1,
+            label="经营库 · 销售额",
+            summary={"source_name": "经营库"},
+        ))
+        db.flush()
+
+        assert _validate_structured_citations(db, assistant.id) == [2]
 
 
 def test_followup_citation_is_inherited_from_latest_verified_message() -> None:
@@ -247,3 +295,31 @@ def test_stale_generating_turn_is_reconciled_as_retryable_failure() -> None:
         assert conversation.status == "active"
         assert event is not None
         assert event.event_type == "turn_failed"
+
+
+def test_conversation_list_preview_ignores_empty_cancelled_or_failed_assistant() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            harness_session_id="session-list-preview",
+            tenant_id="tenant",
+            user_id="user",
+            title="preview",
+            status="active",
+        )
+        db.add(conversation)
+        db.flush()
+        db.add_all([
+            ConversationMessage(
+                conversation_id=conversation.id, tenant_id="tenant", user_id="user",
+                sequence=1, role="user", status="completed", content="其中华东地区是多少？",
+            ),
+            ConversationMessage(
+                conversation_id=conversation.id, tenant_id="tenant", user_id="user",
+                sequence=2, role="assistant", status="cancelled", content="",
+            ),
+        ])
+        db.flush()
+
+        assert _conversation_payload(db, conversation)["last_message"] == "其中华东地区是多少？"

@@ -26,6 +26,8 @@ from packages.platform.models import (
     ConversationMessage,
     KnowledgeSpace,
     RetrievalTrace,
+    StructuredQueryCitation,
+    StructuredQueryRun,
     User,
 )
 
@@ -138,6 +140,7 @@ def _conversation_payload(db: Session, conversation: Conversation, *, detail: bo
             select(ConversationMessage).where(
                 ConversationMessage.conversation_id == conversation.id,
                 _active(ConversationMessage),
+                func.length(func.trim(ConversationMessage.content)) > 0,
             ).order_by(ConversationMessage.sequence.desc()).limit(1)
         )
         value["last_message"] = (last.content[:120] if last else "")
@@ -163,6 +166,14 @@ def _conversation_payload(db: Session, conversation: Conversation, *, detail: bo
             serialize_row(row)
             for row in db.scalars(
                 select(Citation).where(Citation.message_id == message.id).order_by(Citation.citation_number)
+            )
+        ]
+        item["structured_citations"] = [
+            serialize_row(row)
+            for row in db.scalars(
+                select(StructuredQueryCitation)
+                .where(StructuredQueryCitation.message_id == message.id)
+                .order_by(StructuredQueryCitation.citation_number)
             )
         ]
         result_messages.append(item)
@@ -303,6 +314,14 @@ def clear_conversation_messages(
     if message_ids:
         db.execute(delete(Citation).where(Citation.message_id.in_(message_ids)))
         db.execute(delete(RetrievalTrace).where(RetrievalTrace.message_id.in_(message_ids)))
+        # Structured query runs are immutable audit records. Detach their UI
+        # projections before removing messages instead of deleting the audit.
+        for citation in db.scalars(
+            select(StructuredQueryCitation).where(StructuredQueryCitation.message_id.in_(message_ids))
+        ):
+            citation.message_id = None
+        for run in db.scalars(select(StructuredQueryRun).where(StructuredQueryRun.message_id.in_(message_ids))):
+            run.message_id = None
     db.execute(delete(AgentEventProjection).where(AgentEventProjection.conversation_id == conversation.id))
     db.execute(delete(AgentCredential).where(AgentCredential.conversation_id == conversation.id))
     db.execute(delete(ConversationMessage).where(ConversationMessage.conversation_id == conversation.id))
@@ -553,6 +572,22 @@ def _project_event(
                     snapshot=item,
                 )
             )
+    elif event_type == "structured_query_finished":
+        query_run_id = payload.get("query_run_id")
+        run = db.get(StructuredQueryRun, query_run_id) if query_run_id else None
+        if (
+            run is not None
+            and run.conversation_id == conversation_id
+            and run.tenant_id == assistant.tenant_id
+            and run.user_id == assistant.user_id
+        ):
+            run.message_id = assistant.id
+            for citation in db.scalars(
+                select(StructuredQueryCitation).where(
+                    StructuredQueryCitation.query_run_id == run.id
+                )
+            ):
+                citation.message_id = assistant.id
     elif event_type in {"turn_completed", "turn_failed", "turn_cancelled"}:
         target_status = {
             "turn_completed": "completed",
@@ -595,6 +630,24 @@ def _validate_citations(db: Session, assistant_id: str) -> list[int]:
     mentioned = {int(value) for value in re.findall(r"\[(\d{1,3})\]", assistant.content)}
     valid = set(
         db.scalars(select(Citation.citation_number).where(Citation.message_id == assistant_id))
+    )
+    return sorted(mentioned - valid)
+
+
+def _validate_structured_citations(db: Session, assistant_id: str) -> list[int]:
+    assistant = db.get(ConversationMessage, assistant_id)
+    if assistant is None:
+        return []
+    mentioned = {
+        int(value)
+        for value in re.findall(r"(?:【数据|\[数据)(\d{1,3})(?:】|\])", assistant.content)
+    }
+    valid = set(
+        db.scalars(
+            select(StructuredQueryCitation.citation_number).where(
+                StructuredQueryCitation.message_id == assistant_id
+            )
+        )
     )
     return sorted(mentioned - valid)
 
@@ -655,8 +708,13 @@ async def _stream_turn(
             raise RuntimeError("Agent Runtime 流提前结束")
         with SessionLocal() as db:
             invalid = _validate_citations(db, assistant_id)
-            if invalid:
-                payload = {"message": "回答包含无效引用编号", "invalid_citations": invalid}
+            invalid_data = _validate_structured_citations(db, assistant_id)
+            if invalid or invalid_data:
+                payload = {
+                    "message": "回答包含无法核验的引用编号",
+                    "invalid_citations": invalid,
+                    "invalid_data_citations": invalid_data,
+                }
                 _project_event(db, conversation_id, assistant_id, "warning", payload)
                 db.commit()
                 yield _sse("warning", payload)

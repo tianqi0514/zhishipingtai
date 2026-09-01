@@ -14,6 +14,14 @@ from apps.api.schemas import (
     AgentKnowledgeReasonRequest,
     AgentKnowledgeSearchRequest,
 )
+from apps.api.structured_schemas import (
+    AgentStructuredExecuteRequest,
+    AgentStructuredInspectValuesRequest,
+    AgentStructuredObjectRequest,
+    AgentStructuredRelationPathRequest,
+    AgentStructuredSchemaSearchRequest,
+    StructuredExecuteRequest,
+)
 from apps.api.utils import serialize_row
 from packages.platform.audit import audit
 from packages.platform.database import get_db
@@ -36,7 +44,18 @@ from packages.platform.models import (
     InferredFact,
     KnowledgeSpace,
     ModelConfig,
+    DataSourceSchemaVersion,
+    DataPreviewPolicy,
+    SemanticMappingSet,
+    SemanticMappingVersion,
+    SourceConnector,
     User,
+)
+from packages.platform.structured_data import (
+    StructuredDataError,
+    current_schema,
+    get_or_create_preview_policy,
+    inspect_distinct_values,
 )
 from packages.platform.security import (
     create_agent_access_token,
@@ -598,3 +617,288 @@ def agent_list_spaces(
         )
     ) if space_ids else []
     return [{"id": row.id, "code": row.code, "name": row.name} for row in rows]
+
+
+def _agent_mapping_version(
+    db: Session,
+    claims: dict[str, Any],
+    mapping_version_id: str,
+) -> tuple[SemanticMappingSet, SemanticMappingVersion, SourceConnector, DataSourceSchemaVersion]:
+    version = db.get(SemanticMappingVersion, mapping_version_id)
+    if version is None or version.deleted_at is not None or version.tenant_id != claims.get("tenant_id"):
+        raise HTTPException(404, "语义映射版本不存在")
+    mapping_set = db.get(SemanticMappingSet, version.mapping_set_id)
+    token_spaces = set(claims.get("space_ids") or [])
+    if (
+        mapping_set is None or mapping_set.deleted_at is not None
+        or mapping_set.active_version_id != version.id or version.status != "active"
+        or version.space_id not in token_spaces
+    ):
+        raise HTTPException(403, "语义映射未激活、已过期或超出凭据范围")
+    source = db.get(SourceConnector, version.source_id)
+    schema = db.get(DataSourceSchemaVersion, version.schema_version_id)
+    current = current_schema(db, version.source_id)
+    if source is None or source.deleted_at is not None or not source.enabled:
+        raise HTTPException(409, "结构化数据源不可用")
+    if schema is None or current is None or current.id != schema.id or current.schema_fingerprint != version.schema_fingerprint:
+        raise HTTPException(409, "Schema 已变化，语义映射必须重新验证")
+    return mapping_set, version, source, schema
+
+
+@router.post("/structured/schema-search")
+def agent_structured_schema_search(
+    payload: AgentStructuredSchemaSearchRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _require_conversation(claims, payload.conversation_id)
+    allowed_spaces = set(claims.get("space_ids") or [])
+    requested_spaces = set(payload.space_ids or allowed_spaces)
+    if not requested_spaces.issubset(allowed_spaces):
+        raise HTTPException(403, "工具请求超出凭据知识空间范围")
+    query = payload.query.casefold().strip()
+    source_filter = set(payload.source_ids)
+    candidates = list(db.scalars(select(SemanticMappingVersion).where(
+        SemanticMappingVersion.tenant_id == claims["tenant_id"],
+        SemanticMappingVersion.space_id.in_(requested_spaces),
+        SemanticMappingVersion.status == "active",
+        SemanticMappingVersion.deleted_at.is_(None),
+    ))) if requested_spaces else []
+    items: list[dict[str, Any]] = []
+    for version in candidates:
+        if source_filter and version.source_id not in source_filter:
+            continue
+        mapping_set = db.get(SemanticMappingSet, version.mapping_set_id)
+        if mapping_set is None or mapping_set.active_version_id != version.id:
+            continue
+        manifest = version.manifest or {}
+        attributes_by_entity: dict[str, list[dict[str, Any]]] = {}
+        for attribute in manifest.get("attributes") or []:
+            attributes_by_entity.setdefault(attribute["entity_id"], []).append(attribute)
+        relationships = manifest.get("relationships") or []
+        for entity in manifest.get("entities") or []:
+            attributes = attributes_by_entity.get(entity["id"], [])
+            related = [
+                item for item in relationships
+                if entity["id"] in {item.get("from_entity_id"), item.get("to_entity_id")}
+            ]
+            searchable = " ".join([
+                entity.get("id", ""), entity.get("label", ""), entity.get("description", ""),
+                *(item.get("label", "") for item in attributes),
+                *(item.get("label", "") for item in related),
+            ]).casefold()
+            score = 1.0 if query in searchable else sum(token in searchable for token in query.split()) / max(1, len(query.split()))
+            if score <= 0:
+                continue
+            items.append({
+                "semantic_object_id": entity["id"],
+                "label": entity.get("label"),
+                "description": entity.get("description"),
+                "attribute_ids": [item["id"] for item in attributes],
+                "relationship_ids": [item["id"] for item in related],
+                "mapping_version_id": version.id,
+                "source_id": version.source_id,
+                "space_id": version.space_id,
+                "score": round(float(score), 4),
+            })
+    items.sort(key=lambda item: (item["score"], item.get("label") or ""), reverse=True)
+    result = {
+        "query": payload.query,
+        "semantic_objects": items[: payload.limit],
+        "mapping_versions": sorted({item["mapping_version_id"] for item in items[: payload.limit]}),
+        "warnings": [] if items else ["未找到与问题匹配的已激活结构化语义对象"],
+    }
+    audit(db, claims["tenant_id"], claims["sub"], "agent.structured.schema_search", "conversation", payload.conversation_id, {"result_count": len(result["semantic_objects"]), "space_count": len(requested_spaces)})
+    db.commit()
+    return result
+
+
+@router.post("/structured/object")
+def agent_structured_get_object(
+    payload: AgentStructuredObjectRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _require_conversation(claims, payload.conversation_id)
+    _, version, source, schema = _agent_mapping_version(db, claims, payload.mapping_version_id)
+    manifest = version.manifest or {}
+    entity = next((item for item in manifest.get("entities") or [] if item.get("id") == payload.semantic_object_id), None)
+    if entity is None:
+        raise HTTPException(404, "业务对象不存在")
+    attributes = [item for item in manifest.get("attributes") or [] if item.get("entity_id") == entity["id"]]
+    relationships = [
+        item for item in manifest.get("relationships") or []
+        if entity["id"] in {item.get("from_entity_id"), item.get("to_entity_id")}
+    ]
+    return {
+        "semantic_object": entity,
+        "attributes": attributes,
+        "relationships": relationships,
+        "relationship_paths": [{
+            "relationship_id": item["id"],
+            "direction": "outgoing" if item.get("from_entity_id") == entity["id"] else "incoming",
+            "other_entity_id": item.get("to_entity_id") if item.get("from_entity_id") == entity["id"] else item.get("from_entity_id"),
+        } for item in relationships],
+        "mapping_version_id": version.id,
+        "mapping_status": version.status,
+        "schema_version_id": schema.id,
+        "data_freshness": source.last_sync_at.isoformat() if source.last_sync_at else None,
+        "query_contract": {
+            "plan_version": "chuanshen.semantic-query-plan/v1",
+            "ir_version": "chuanshen.query-ir/v1",
+            "binding_example": "e",
+            "expression_examples": {
+                "attribute": {
+                    "kind": "attribute",
+                    "attribute_id": attributes[0]["id"] if attributes else "attribute-id",
+                    "binding": "e",
+                },
+                "literal": {"kind": "literal", "value": "示例值"},
+                "comparison": {
+                    "kind": "binary",
+                    "operator": "=",
+                    "left": {
+                        "kind": "attribute",
+                        "attribute_id": attributes[0]["id"] if attributes else "attribute-id",
+                        "binding": "e",
+                    },
+                    "right": {"kind": "literal", "value": "示例值"},
+                },
+                "aggregate": {
+                    "kind": "aggregate",
+                    "function": "sum",
+                    "expression": {
+                        "kind": "attribute",
+                        "attribute_id": next((item["id"] for item in attributes if item.get("is_measure")), attributes[0]["id"] if attributes else "measure-id"),
+                        "binding": "e",
+                    },
+                },
+            },
+            "rules": [
+                "只能引用本响应中的语义 ID",
+                "比较表达式使用 kind=binary 和 SQL 白名单运算符",
+                "可选字段没有值时省略，不要传 null",
+            ],
+        },
+    }
+
+
+@router.post("/structured/relation-path")
+def agent_structured_relation_path(
+    payload: AgentStructuredRelationPathRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _require_conversation(claims, payload.conversation_id)
+    _, version, _, _ = _agent_mapping_version(db, claims, payload.mapping_version_id)
+    relationships = list((version.manifest or {}).get("relationships") or [])
+    queue: list[tuple[str, list[dict[str, Any]]]] = [(payload.from_entity_id, [])]
+    visited = {payload.from_entity_id}
+    found: list[dict[str, Any]] | None = None
+    while queue:
+        entity_id, path = queue.pop(0)
+        if entity_id == payload.to_entity_id:
+            found = path
+            break
+        if len(path) >= payload.max_depth:
+            continue
+        for relation in relationships:
+            if relation.get("from_entity_id") == entity_id:
+                other, direction = relation.get("to_entity_id"), "forward"
+            elif relation.get("to_entity_id") == entity_id:
+                other, direction = relation.get("from_entity_id"), "reverse"
+            else:
+                continue
+            if not other or other in visited:
+                continue
+            visited.add(other)
+            queue.append((other, [*path, {
+                "relationship_id": relation["id"],
+                "from_entity_id": entity_id,
+                "to_entity_id": other,
+                "direction": direction,
+                "cardinality": relation.get("cardinality", "unknown"),
+                "evidence": relation.get("evidence") or [],
+            }]))
+    return {
+        "found": found is not None,
+        "from_entity_id": payload.from_entity_id,
+        "to_entity_id": payload.to_entity_id,
+        "mapping_version_id": version.id,
+        "path": found or [],
+        "relationship_ids": [item["relationship_id"] for item in (found or [])],
+        "warnings": [] if found is not None else ["已激活映射中不存在可用关系路径"],
+    }
+
+
+@router.post("/structured/values")
+def agent_structured_inspect_values(
+    payload: AgentStructuredInspectValuesRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _require_conversation(claims, payload.conversation_id)
+    _, version, source, schema = _agent_mapping_version(db, claims, payload.mapping_version_id)
+    manifest = version.manifest or {}
+    attribute = next((item for item in manifest.get("attributes") or [] if item.get("id") == payload.attribute_id), None)
+    if attribute is None:
+        raise HTTPException(404, "业务属性不存在")
+    fragment = next((
+        fragment
+        for entity in manifest.get("entities") or []
+        for fragment in entity.get("fragments") or []
+        if fragment.get("id") == attribute.get("fragment_id")
+    ), None)
+    if fragment is None:
+        raise HTTPException(409, "业务属性的数据片段映射无效")
+    object_row = next(item for item in (schema.catalog or {}).get("objects") or [] if item.get("id") == fragment["object_id"])
+    column_row = next(item for item in object_row.get("columns") or [] if item.get("id") == attribute["column_id"])
+    policy = get_or_create_preview_policy(db, source)
+    try:
+        inspected = inspect_distinct_values(
+            source,
+            schema,
+            policy,
+            object_id=fragment["object_id"],
+            column_id=attribute["column_id"],
+            search=payload.search,
+            limit=payload.limit,
+        )
+    except StructuredDataError as exc:
+        raise HTTPException(exc.status_code, {"code": exc.code, "message": str(exc)}) from exc
+    return {
+        "attribute_id": attribute["id"],
+        "data_type": column_row.get("type_family"),
+        "values": inspected["values"],
+        "matched": inspected["matched"],
+        "elapsed_ms": inspected["elapsed_ms"],
+        "warnings": inspected["warnings"],
+    }
+
+
+@router.post("/structured/execute")
+def agent_structured_execute(
+    payload: AgentStructuredExecuteRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _require_conversation(claims, payload.conversation_id)
+    _, version, _, _ = _agent_mapping_version(db, claims, payload.mapping_version_id)
+    if version.space_id not in set(claims.get("space_ids") or []):
+        raise HTTPException(403, "结构化查询超出凭据知识空间范围")
+    user = db.get(User, claims["sub"])
+    if user is None or not user.enabled or user.deleted_at is not None:
+        raise HTTPException(403, "会话用户不可用")
+    from apps.api.structured_data import execute_structured_query_api
+
+    return execute_structured_query_api(
+        payload=StructuredExecuteRequest(
+            mapping_version_id=payload.mapping_version_id,
+            plan=payload.semantic_query_plan,
+            query_ir=payload.query_ir,
+            max_rows=payload.max_rows,
+            conversation_id=payload.conversation_id,
+        ),
+        user=user,
+        db=db,
+    )

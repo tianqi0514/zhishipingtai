@@ -13,6 +13,34 @@ export function requiresKnowledgeSearch(input) {
 }
 
 
+const STRUCTURED_QUERY_PATTERNS = [
+  /(?:多少|金额|总额|数量|销量|销售额|排名|最高|最低|平均|合计|统计|同比|环比|增长率|完成率|top\s*\d*|前\s*\d+|实时状态)/iu,
+  /(?:sum|count|average|ranking|year[- ]over[- ]year|month[- ]over[- ]month)/iu,
+]
+
+const DOCUMENT_EVIDENCE_PATTERNS = [
+  /(?:口径|依据|制度|规定|定义|说明|手册|合同|条款|政策|文档)/u,
+]
+
+export function requiresStructuredQuery(input) {
+  const query = String(input || '').trim()
+  if (!query || !requiresKnowledgeSearch(query)) return false
+  return STRUCTURED_QUERY_PATTERNS.some(pattern => pattern.test(query))
+}
+
+
+export function evidenceRequirements(input) {
+  const query = String(input || '').trim()
+  if (!requiresKnowledgeSearch(query)) return []
+  const structured = requiresStructuredQuery(query)
+  const document = !structured || DOCUMENT_EVIDENCE_PATTERNS.some(pattern => pattern.test(query))
+  return [
+    ...(document ? ['knowledge_search'] : []),
+    ...(structured ? ['structured_execute_query'] : []),
+  ]
+}
+
+
 export function currentUserQuery(events) {
   const message = [...(events || [])].reverse().find(event => (
     event?.type === 'user/message'

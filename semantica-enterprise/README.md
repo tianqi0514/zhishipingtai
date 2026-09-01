@@ -34,6 +34,7 @@ docker compose ps
 - 文档：上传、版本、解析百分比、元素、Chunk、治理画像、增量加工与历史溯源。
 - 人工治理：在 Semantica 自动画像、解析元素、Chunk、实体与事实之上叠加可回滚约束；治理工作台按“待处理—人工调整—发布记录”组织业务闭环，支持主动查找、批次归并、真实进度、失败重试和影响预览；原始自动结果不被覆盖。
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
+- 结构化数据：MySQL/PostgreSQL Schema 发现与版本差异、实时数据/同步快照预览、服务端分页筛选和脱敏、本体映射版本、严格 Semantic Query Plan/Query IR、确定性参数化 SQL、只读实时查询与结构化数据引用。
 - 模型：LLM、Embedding、Reranker、Vision、ASR 统一配置、默认项、启停和真实连接测试。
 - 图谱：白底 3D 力导图，节点与边真实 CRUD，版本校验并发布到 FalkorDB。
 - 分析：按“规则中心 → 场景分析 → 推理结果 → 高级查询”组织 Semantica Datalog 能力；提供业务化规则预览、真实校验、场景卡片、任务进度、可定位来源的证据链、SPARQL 与回滚影响预览。
@@ -79,6 +80,22 @@ python3 tests/e2e/conversation_agent_quality.py
 python3 tests/e2e/conversation_cancel_retry.py
 python3 tests/integration/restart_recovery.py
 python3 tests/performance/live_load.py
+
+# 结构化数据隔离集成环境（测试账号只存在于临时 fixture 容器）
+docker compose -f compose.yaml -f compose.structured-test.yaml up -d --build
+docker run --rm --network semantica-enterprise_default \
+  -e RUN_STRUCTURED_DB_TESTS=1 \
+  -e SOURCE_PRIVATE_HOST_ALLOWLIST=structured-postgres,structured-mysql \
+  -e STRUCTURED_FIXTURE_PG_ADMIN_PASSWORD=structured_fixture_admin_password \
+  -e STRUCTURED_FIXTURE_MYSQL_ADMIN_PASSWORD=structured_fixture_root_password \
+  -v "$PWD:/app" -w /app semantica-enterprise:0.10.0 \
+  pytest -q tests/integration/test_structured_databases.py
+
+# 创建可重复使用的结构化经营验收数据（密码从环境变量读取）
+E2E_BASE_URL=http://localhost:8080/api/v1 \
+BOOTSTRAP_ADMIN_PASSWORD='your-admin-password' \
+STRUCTURED_FIXTURE_PASSWORD=structured_fixture_password \
+python3 tests/e2e/seed_structured_acceptance.py
 ```
 
 ## 文档
@@ -101,6 +118,15 @@ python3 tests/performance/live_load.py
 - [应用底座增强详细设计](docs/APPLICATION_FOUNDATION_DESIGN.md)
 - [应用底座 A0 实现与验收](docs/APPLICATION_FOUNDATION_IMPLEMENTATION.md)
 - [应用构建工作台业务化改造](docs/APPLICATION_BUILDER_UX.md)
+- [结构化数据语义查询](docs/STRUCTURED_SEMANTIC_QUERY.md)
+- [数据库实时数据预览](docs/DATABASE_DATA_PREVIEW.md)
+- [本体与数据库映射](docs/ONTOLOGY_DATABASE_MAPPING.md)
+- [Schema 漂移处理](docs/SCHEMA_DRIFT.md)
+- [DeepSeek Harness 结构化工具](docs/DSH_STRUCTURED_TOOLS.md)
+- [Ontology2SQL 参考与边界](docs/ONTOLOGY2SQL_ADAPTATION.md)
+- [结构化查询测试报告](docs/STRUCTURED_QUERY_TEST_REPORT.md)
+- [结构化功能浏览器测试报告](docs/BROWSER_TEST_REPORT.md)
+- [结构化功能开发留痕](docs/DEVELOPMENT_TRACE.md)
 - [多轮问答测试报告](docs/QA_REPORT.md)
 - [已知限制](docs/KNOWN_LIMITATIONS.md)
 - [故障排查](docs/TROUBLESHOOTING.md)

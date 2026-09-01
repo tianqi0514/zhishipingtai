@@ -33,10 +33,31 @@ test('registers typed knowledge tools and turn enforcement', () => {
     'knowledge_graph_query',
     'knowledge_reason',
     'knowledge_get_document_profile',
+    'structured_schema_search',
+    'structured_get_object',
+    'structured_find_relation_path',
+    'structured_inspect_values',
+    'structured_execute_query',
     'knowledge_list_spaces',
   ])
   assert.equal(typeof listeners.get('agent/turn-stopping'), 'function')
   assert.equal(typeof listeners.get('agent/request'), 'function')
+})
+
+
+test('structured execute schema is aligned with the strict platform Plan and IR contracts', () => {
+  const { tools } = fixture()
+  const tool = tools.find(item => item.name === 'structured_execute_query')
+  const plan = tool.parameters.properties.semantic_query_plan
+  const ir = tool.parameters.properties.query_ir
+  assert.deepEqual(plan.properties.version.enum, ['chuanshen.semantic-query-plan/v1'])
+  assert.deepEqual(ir.properties.version.enum, ['chuanshen.query-ir/v1'])
+  assert.ok(ir.properties.select.items.properties.expression.required.includes('kind'))
+  assert.equal(ir.properties.select.items.properties.expression.properties.attribute_id.type, 'string')
+  assert.equal(ir.properties.select.items.properties.expression.properties.binding.type, 'string')
+  assert.equal(ir.properties.select.items.properties.expression.properties.arguments.type, 'array')
+  assert.equal(ir.properties.where.oneOf, undefined)
+  assert.equal(ir.properties.having.oneOf, undefined)
 })
 
 
@@ -58,7 +79,10 @@ test('steers an evidence search when a turn tries to finish without one', () => 
   const { listeners } = fixture()
   const steered = []
   const agent = {
-    session: { events: [] },
+    session: { events: [{
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: 'NexusOne 的定位是什么？' }], source: { kind: 'user' } },
+    }] },
     steer(message) { steered.push(message) },
   }
   listeners.get('agent/turn-stopping')({
@@ -71,12 +95,47 @@ test('steers an evidence search when a turn tries to finish without one', () => 
 })
 
 
+test('numeric questions require structured execution, not prose search', () => {
+  const { listeners } = fixture()
+  const steered = []
+  const agent = {
+    session: { events: [
+      { type: 'user/message', data: { content: [{ type: 'text', text: '销售总额是多少？' }], source: { kind: 'user' } } },
+      { type: 'tool/call', data: { turn: 4, name: 'knowledge_search' } },
+    ] },
+    steer(message) { steered.push(message) },
+  }
+  listeners.get('agent/turn-stopping')({ agent, turn: 4, signal: new AbortController().signal })
+  assert.equal(steered.length, 1)
+  assert.match(steered[0].content[0].text, /structured_execute_query/)
+})
+
+
+test('mixed metric definition questions require both evidence channels', () => {
+  const { listeners } = fixture()
+  const steered = []
+  const agent = {
+    session: { events: [
+      { type: 'user/message', data: { content: [{ type: 'text', text: '销售额是多少，口径依据什么制度？' }], source: { kind: 'user' } } },
+      { type: 'tool/call', data: { turn: 5, name: 'structured_execute_query' } },
+    ] },
+    steer(message) { steered.push(message) },
+  }
+  listeners.get('agent/turn-stopping')({ agent, turn: 5, signal: new AbortController().signal })
+  assert.equal(steered.length, 1)
+  assert.match(steered[0].content[0].text, /knowledge_search/)
+})
+
+
 test('does not steer after knowledge_search was durably logged', () => {
   const { listeners } = fixture()
   const steered = []
   const agent = {
     session: {
-      events: [{ type: 'tool/call', data: { turn: 2, name: 'knowledge_search' } }],
+      events: [
+        { type: 'tool/call', data: { turn: 2, callId: 'call-2', name: 'knowledge_search' } },
+        { type: 'tool/result', data: { callId: 'call-2', content: [] } },
+      ],
     },
     steer(message) { steered.push(message) },
   }
@@ -115,7 +174,7 @@ test('does not force retrieval for a direct identity question', () => {
 
 test('unloads every tool, prompt section and event listener', () => {
   const installed = fixture()
-  assert.equal(installed.tools.length, 6)
+  assert.equal(installed.tools.length, 11)
   assert.equal(installed.sections.length, 1)
   assert.equal(installed.listeners.size, 2)
   installed.dispose()

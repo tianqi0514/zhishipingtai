@@ -1,0 +1,47 @@
+services:
+  structured-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: structured_fixture
+      POSTGRES_USER: structured_admin
+      POSTGRES_PASSWORD: structured_fixture_admin_password
+    volumes:
+      - ./tests/fixtures/structured/postgresql.sql:/docker-entrypoint-initdb.d/001-fixture.sql:ro
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U structured_admin -d structured_fixture"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  structured-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: structured_fixture
+      MYSQL_USER: structured_reader
+      MYSQL_PASSWORD: structured_fixture_password
+      MYSQL_ROOT_PASSWORD: structured_fixture_root_password
+    command: ["mysqld", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - ./tests/fixtures/structured/mysql.sql:/docker-entrypoint-initdb.d/001-fixture.sql:ro
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u structured_reader -pstructured_fixture_password --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 15s
+
+  api:
+    environment:
+      SOURCE_PRIVATE_HOST_ALLOWLIST: structured-postgres,structured-mysql,postgres
+      # Isolated tmpfs fixture only; never use this credential in production.
+      STRUCTURED_FIXTURE_PASSWORD: structured_fixture_password
+      STRUCTURED_FIXTURE_PG_ADMIN_PASSWORD: structured_fixture_admin_password
+      STRUCTURED_FIXTURE_MYSQL_ADMIN_PASSWORD: structured_fixture_root_password
+
+  worker:
+    environment:
+      SOURCE_PRIVATE_HOST_ALLOWLIST: structured-postgres,structured-mysql,postgres

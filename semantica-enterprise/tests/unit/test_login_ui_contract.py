@@ -19,7 +19,8 @@ def test_login_401_keeps_the_server_error_message() -> None:
     javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
 
     assert "path!=='/auth/login'" in javascript
-    assert "typeof data?.detail==='string'?data.detail" in javascript
+    assert "let detail=data?.detail" in javascript
+    assert "typeof detail==='string'?detail" in javascript
     assert "setPasswordVisible" in javascript
 
 

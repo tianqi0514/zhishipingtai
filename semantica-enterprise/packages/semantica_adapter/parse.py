@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import re
 import subprocess
 import tempfile
 from datetime import date, datetime
@@ -86,6 +87,7 @@ def _element(
     page_number: int | None = None,
     bbox: list[float] | None = None,
     metadata: dict[str, Any] | None = None,
+    stable_key: str | None = None,
 ) -> ContentElementData:
     clean_text = (
         _clean_control_characters(text)
@@ -94,7 +96,11 @@ def _element(
     )
     return ContentElementData(
         element_id=_stable_element_id(
-            version_id, element_type, structural_path, ordinal, clean_text
+            version_id,
+            element_type,
+            structural_path,
+            0 if stable_key is not None else ordinal,
+            stable_key if stable_key is not None else clean_text,
         ),
         element_type=element_type,
         ordinal=ordinal,
@@ -341,8 +347,128 @@ def _parse_docling(path: Path, policy: dict[str, Any]) -> tuple[Any, str]:
     )
 
 
+def _database_safe_value(name: str, value: Any) -> tuple[bool, Any]:
+    normalized = re.sub(r"[^a-z0-9]+", "_", name.casefold()).strip("_")
+    tokens = set(filter(None, normalized.split("_"))) | {normalized}
+    if tokens & {
+        "password", "passwd", "secret", "token", "api_key", "apikey", "access_key",
+        "private_key", "credential",
+    }:
+        return False, None
+    if value is None:
+        return True, None
+    raw = str(value)
+    if "email" in tokens and "@" in raw:
+        local, domain = raw.split("@", 1)
+        return True, f"{local[:1]}***@{domain}"
+    if tokens & {"mobile", "phone"}:
+        digits = re.sub(r"\D", "", raw)
+        return True, f"{digits[:3]}****{digits[-4:]}" if len(digits) >= 7 else "***"
+    if tokens & {"id_card", "idcard"}:
+        return True, f"{raw[:4]}**********{raw[-4:]}" if len(raw) >= 8 else "***"
+    if tokens & {"bank_card", "bankcard"}:
+        return True, f"{raw[:4]} **** **** {raw[-4:]}" if len(raw) >= 8 else "***"
+    return True, _jsonable(value)
+
+
+def canonical_json_for_database(value: Any) -> str:
+    return json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _database_elements(
+    version_id: str,
+    data: dict[str, Any],
+    context: dict[str, Any],
+) -> list[ContentElementData]:
+    elements: list[ContentElementData] = []
+    schema_tables = {
+        str(item.get("name")): item
+        for item in ((data.get("schema") or {}).get("tables") or [])
+        if isinstance(item, dict)
+    }
+    default_schema = str(context.get("default_schema") or "").strip()
+    for table_name, table_data in sorted((data.get("tables") or {}).items()):
+        if not isinstance(table_data, dict):
+            continue
+        schema_entry = schema_tables.get(str(table_name)) or {}
+        primary_keys = list(schema_entry.get("primary_keys") or [])
+        object_id = f"{default_schema}.{table_name}" if default_schema else str(table_name)
+        columns = [str(item.get("name")) for item in table_data.get("columns") or [] if item.get("name")]
+        table_summary = {
+            "table": table_name,
+            "object_id": object_id,
+            "columns": columns,
+            "primary_key": primary_keys,
+            "row_count": int(table_data.get("row_count") or len(table_data.get("rows") or [])),
+        }
+        elements.append(_element(
+            version_id,
+            "table",
+            len(elements),
+            json.dumps(table_summary, ensure_ascii=False),
+            f"tables/{object_id}",
+            metadata={
+                "parser": "semantica-db-ingestor",
+                "database_snapshot": True,
+                "source_id": context.get("source_id"),
+                "schema_version_id": context.get("schema_version_id"),
+                "schema_fingerprint": context.get("schema_fingerprint"),
+                "object_id": object_id,
+                "table": table_name,
+                "primary_key": primary_keys,
+                "column_names": columns,
+                "sync_time": context.get("sync_time"),
+            },
+            stable_key=f"table:{object_id}",
+        ))
+        for row_index, raw_row in enumerate(table_data.get("rows") or []):
+            if not isinstance(raw_row, dict):
+                continue
+            safe_row: dict[str, Any] = {}
+            for name, value in raw_row.items():
+                allowed, protected = _database_safe_value(str(name), value)
+                if allowed:
+                    safe_row[str(name)] = protected
+            identity_values = [raw_row.get(name) for name in primary_keys]
+            stable_identity = bool(primary_keys) and all(value is not None for value in identity_values)
+            identity_payload = {
+                "source_id": context.get("source_id"),
+                "object_id": object_id,
+                "primary_key": primary_keys if stable_identity else [],
+                "values": identity_values if stable_identity else raw_row,
+            }
+            row_key = hashlib.sha256(canonical_json_for_database(identity_payload).encode("utf-8")).hexdigest()
+            path = f"tables/{object_id}/rows/{row_key}"
+            elements.append(_element(
+                version_id,
+                "record",
+                len(elements),
+                json.dumps(safe_row, ensure_ascii=False, sort_keys=True),
+                path,
+                metadata={
+                    "parser": "semantica-db-ingestor",
+                    "database_snapshot": True,
+                    "source_id": context.get("source_id"),
+                    "schema_version_id": context.get("schema_version_id"),
+                    "schema_fingerprint": context.get("schema_fingerprint"),
+                    "object_id": object_id,
+                    "table": table_name,
+                    "primary_key": primary_keys,
+                    "row_key": row_key,
+                    "stable_identity": stable_identity,
+                    "unstable_identity": not stable_identity,
+                    "column_names": sorted(safe_row),
+                    "row": safe_row,
+                    "sync_time": context.get("sync_time"),
+                    "row_number": row_index + 1,
+                },
+                stable_key=f"record:{object_id}:{row_key}",
+            ))
+    return elements
+
+
 def _elements_from_result(
-    version_id: str, parser_name: str, raw_result: Any
+    version_id: str, parser_name: str, raw_result: Any, context: dict[str, Any] | None = None
 ) -> list[ContentElementData]:
     result = _jsonable(raw_result)
     elements: list[ContentElementData] = []
@@ -425,9 +551,12 @@ def _elements_from_result(
             add("record", row, f"rows/{index}", metadata={"row_number": index + 1})
     elif parser_name == "json":
         data = result.get("data")
-        rows = data if isinstance(data, list) else [data]
-        for index, row in enumerate(rows):
-            add("record", row, f"items/{index}")
+        if isinstance(data, dict) and isinstance(data.get("tables"), dict):
+            elements.extend(_database_elements(version_id, data, context or {}))
+        else:
+            rows = data if isinstance(data, list) else [data]
+            for index, row in enumerate(rows):
+                add("record", row, f"items/{index}")
     elif parser_name == "xml":
         def walk(node: dict[str, Any], path: str) -> None:
             add(
@@ -656,7 +785,12 @@ def parse_document(
                         )
                     )
 
-    elements = _elements_from_result(version_id, parser_name, raw_result)
+    elements = _elements_from_result(
+        version_id,
+        parser_name,
+        raw_result,
+        context=dict(policy.get("database_context") or {}),
+    )
     attachment_summaries = []
     for attachment_index, (filename, child_elements, child_summary) in enumerate(attachment_results):
         attachment_summaries.append({"filename": filename, **child_summary})

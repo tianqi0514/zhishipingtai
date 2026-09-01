@@ -21,6 +21,7 @@ from packages.platform.models import (
     ConflictCase,
     ContentElement,
     CurationBatch,
+    DataSourceSchemaVersion,
     Document,
     DocumentProfile,
     DocumentVersion,
@@ -52,6 +53,7 @@ from packages.platform.graph_release import publish_graph_snapshot
 from packages.platform.index_release import activate_knowledge_release, publish_index_snapshot
 from packages.platform.security import decrypt_secret
 from packages.platform.storage import object_storage
+from packages.platform.structured_materialization import materialize_database_mapping
 from packages.semantica_adapter import ingest_source, parse_document, track_elements
 from packages.semantica_adapter.embedding import SemanticEmbedder
 from packages.semantica_adapter.extract import extract_semantics
@@ -291,12 +293,31 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                         )
                         _progress(db, job, 62)
                         return result
+                parse_policy = _policy_dict(policy)
+                if document.source_id:
+                    source = db.get(SourceConnector, document.source_id)
+                    schema_version = db.scalar(select(DataSourceSchemaVersion).where(
+                        DataSourceSchemaVersion.source_id == document.source_id,
+                        DataSourceSchemaVersion.status == "current",
+                        DataSourceSchemaVersion.deleted_at.is_(None),
+                    ).order_by(DataSourceSchemaVersion.version_number.desc()).limit(1))
+                    if source is not None and source.source_type == "database":
+                        parse_policy["database_context"] = {
+                            "source_id": source.id,
+                            "schema_version_id": schema_version.id if schema_version else None,
+                            "schema_fingerprint": schema_version.schema_fingerprint if schema_version else None,
+                            "default_schema": (
+                                (schema_version.catalog or {}).get("default_schema") if schema_version
+                                else (source.config or {}).get("schema")
+                            ),
+                            "sync_time": version.created_at.isoformat(),
+                        }
                 elements, summary = parse_document(
                     local_path,
                     # The document is the stable identity scope. Unchanged
                     # elements therefore retain their IDs across versions.
                     version_id=document.id,
-                    policy=_policy_dict(policy),
+                    policy=parse_policy,
                     supplied_mime=version.content_type,
                     media_transcriber=transcriber,
                     visual_describer=visual_describer,
@@ -1313,10 +1334,25 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             for mention in mentions:
                 mention.status = "published" if mention.mention_id in mention_entity else "rejected"
             db.commit()
+            structured_materialization = materialize_database_mapping(
+                db,
+                document=document,
+                version=version,
+            )
+            if structured_materialization.get("enabled"):
+                published_facts += int(structured_materialization.get("attribute_facts") or 0)
+                published_facts += int(structured_materialization.get("relationship_facts") or 0)
+            db.commit()
             conflicts = _detect_and_resolve_conflicts(db, tenant_id=version.tenant_id, space_id=document.space_id, policy=governance_policy)
             upsert_conflict_cases(db, version.tenant_id, document.space_id)
             db.commit()
-            governance_metrics = {"canonical_entities": len(governed), "facts": published_facts, "conflicts": conflicts, "decisions": len(decisions)}
+            governance_metrics = {
+                "canonical_entities": len(governed),
+                "facts": published_facts,
+                "conflicts": conflicts,
+                "decisions": len(decisions),
+                "structured_materialization": structured_materialization,
+            }
             _step(db, job.id, "governance", 4, "succeeded", governance_metrics)
             _progress(db, job, 68)
 
@@ -1358,11 +1394,31 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             )
             for row in chunks:
                 row.status = "published"
-            version.parse_summary = {**(version.parse_summary or {}), "knowledge_status": "published", "chunks": len(chunks), "entities": entity_count, "facts": published_facts, "graph_release": graph_number, "index_release": index_number}
+            version.parse_summary = {
+                **(version.parse_summary or {}),
+                "knowledge_status": "published",
+                "chunks": len(chunks),
+                "entities": entity_count,
+                "facts": published_facts,
+                "graph_release": graph_number,
+                "index_release": index_number,
+                "structured_materialization": structured_materialization,
+            }
             document.status = "ready"
             job.status = "succeeded"
             job.progress = 100
-            job.result = {"version_id": version.id, "chunks": len(chunks), "entities": entity_count, "relations": relation_count, "events": event_count, "facts": published_facts, "graph_release": graph_number, "index_release": index_number, "knowledge_release": knowledge_release.release_number}
+            job.result = {
+                "version_id": version.id,
+                "chunks": len(chunks),
+                "entities": entity_count,
+                "relations": relation_count,
+                "events": event_count,
+                "facts": published_facts,
+                "graph_release": graph_number,
+                "index_release": index_number,
+                "knowledge_release": knowledge_release.release_number,
+                "structured_materialization": structured_materialization,
+            }
             job.finished_at = now()
             curation_batch = db.get(CurationBatch, (job.input or {}).get("curation_batch_id"))
             if curation_batch:

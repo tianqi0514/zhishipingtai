@@ -15,6 +15,7 @@
 - Semantica Analyze 规则、场景、证据链、增量重算、发布和回滚。
 - DeepSeek Harness 驱动的多轮知识问答、引用、检索轨迹、停止和重试。
 - 数据源 CRUD、连接测试、手工/定时同步、游标、去重和新版本。
+- MySQL/PostgreSQL Schema 发现、实时数据预览、服务端脱敏、本体映射、严格 Plan/IR、确定性只读 SQL 和结构化数据引用。
 - REST/OpenAPI、MCP Server 和 `chuanshen` CLI。
 
 ## 系统组成
@@ -34,6 +35,8 @@ Semantica（解析、切分、抽取、归一化、图谱、检索、溯源、An
 ```
 
 DeepSeek Harness 只通过内部知识工具 API 访问平台，不直接连接业务数据库或检索中间件。浏览器只访问 FastAPI。
+
+数据库的“知识索引、实时语义查询、图谱物化”是三个独立模式：文本描述进入 Semantica 文档链路；金额、数量、排名等问题通过已激活本体映射生成严格 Query IR 并由平台确定性编译；需要关系供给时再按范围物化到现有 Semantica 图谱发布链路。模型和 Harness 均不能提交或执行任意 SQL。
 
 ## 仓库目录
 
@@ -154,6 +157,15 @@ SKIP_BUILD=1 ./scripts/deploy.sh
 
 该入口先检查 Compose 和全部服务健康状态，再在平台镜像中执行 Python 测试。更细的 API、数据源、多模态、Agent 与浏览器测试说明见 [测试报告](semantica-enterprise/docs/TEST_REPORT.md) 和 [部署说明](semantica-enterprise/docs/DEPLOYMENT.md)。
 
+结构化数据库验收使用独立、无持久卷的 fixture Compose，不应在生产环境启用：
+
+```bash
+cd semantica-enterprise
+docker compose -f compose.yaml -f compose.structured-test.yaml up -d --build
+```
+
+真实 MySQL/PostgreSQL、结构化 API 和浏览器验收结果见[结构化语义查询测试报告](semantica-enterprise/docs/STRUCTURED_QUERY_TEST_REPORT.md)。
+
 ## 配置与密钥
 
 - 平台非敏感部署参数位于 `semantica-enterprise/.env`。
@@ -191,6 +203,12 @@ PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB、应用�
 - [数据源支持矩阵](semantica-enterprise/docs/SOURCE_MATRIX.md)
 - [文件格式支持矩阵](semantica-enterprise/docs/FORMAT_MATRIX.md)
 - [模型配置](semantica-enterprise/docs/MODELS.md)
+- [结构化数据语义查询](semantica-enterprise/docs/STRUCTURED_SEMANTIC_QUERY.md)
+- [数据库实时数据预览](semantica-enterprise/docs/DATABASE_DATA_PREVIEW.md)
+- [本体与数据库映射](semantica-enterprise/docs/ONTOLOGY_DATABASE_MAPPING.md)
+- [Schema 漂移](semantica-enterprise/docs/SCHEMA_DRIFT.md)
+- [DSH 结构化工具](semantica-enterprise/docs/DSH_STRUCTURED_TOOLS.md)
+- [结构化语义查询测试报告](semantica-enterprise/docs/STRUCTURED_QUERY_TEST_REPORT.md)
 - [REST、MCP、CLI](semantica-enterprise/docs/INTEGRATIONS.md)
 - [故障排查](semantica-enterprise/docs/TROUBLESHOOTING.md)
 - [已知限制](semantica-enterprise/docs/KNOWN_LIMITATIONS.md)

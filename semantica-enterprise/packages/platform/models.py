@@ -162,6 +162,140 @@ class SourceConnector(Base, TimestampMixin):
     last_sync_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
+class DataSourceSchemaVersion(Base, TimestampMixin):
+    __tablename__ = "data_source_schema_versions"
+    __table_args__ = (
+        UniqueConstraint("source_id", "version_number", name="uq_source_schema_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("source_connectors.id"), index=True)
+    version_number: Mapped[int] = mapped_column(Integer)
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    catalog: Mapped[dict] = mapped_column(JSON, default=dict)
+    diff_from_previous: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="current", index=True)
+    object_count: Mapped[int] = mapped_column(Integer, default=0)
+    column_count: Mapped[int] = mapped_column(Integer, default=0)
+    primary_key_count: Mapped[int] = mapped_column(Integer, default=0)
+    foreign_key_count: Mapped[int] = mapped_column(Integer, default=0)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class DataPreviewPolicy(Base, TimestampMixin):
+    __tablename__ = "data_preview_policies"
+    __table_args__ = (UniqueConstraint("source_id", name="uq_data_preview_policy_source"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("source_connectors.id"), index=True)
+    live_preview_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    allowed_objects: Mapped[list] = mapped_column(JSON, default=list)
+    denied_objects: Mapped[list] = mapped_column(JSON, default=list)
+    allowed_columns: Mapped[dict] = mapped_column(JSON, default=dict)
+    sensitive_columns: Mapped[dict] = mapped_column(JSON, default=dict)
+    masking_rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    default_order: Mapped[dict] = mapped_column(JSON, default=dict)
+    default_page_size: Mapped[int] = mapped_column(Integer, default=20)
+    max_page_size: Mapped[int] = mapped_column(Integer, default=100)
+    max_text_length: Mapped[int] = mapped_column(Integer, default=500)
+    allow_full_cell: Mapped[bool] = mapped_column(Boolean, default=False)
+    allow_exact_count: Mapped[bool] = mapped_column(Boolean, default=False)
+    query_timeout_seconds: Mapped[int] = mapped_column(Integer, default=15)
+    max_filter_conditions: Mapped[int] = mapped_column(Integer, default=10)
+    max_result_bytes: Mapped[int] = mapped_column(Integer, default=2_000_000)
+
+
+class SemanticMappingSet(Base, TimestampMixin):
+    __tablename__ = "semantic_mapping_sets"
+    __table_args__ = (UniqueConstraint("source_id", "name", name="uq_semantic_mapping_source_name"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("source_connectors.id"), index=True)
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    active_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
+
+class SemanticMappingVersion(Base, TimestampMixin):
+    __tablename__ = "semantic_mapping_versions"
+    __table_args__ = (
+        UniqueConstraint("mapping_set_id", "version_number", name="uq_semantic_mapping_version"),
+        UniqueConstraint("mapping_set_id", "mapping_hash", name="uq_semantic_mapping_hash"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("source_connectors.id"), index=True)
+    mapping_set_id: Mapped[str] = mapped_column(ForeignKey("semantic_mapping_sets.id"), index=True)
+    schema_version_id: Mapped[str] = mapped_column(ForeignKey("data_source_schema_versions.id"), index=True)
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    mapping_hash: Mapped[str] = mapped_column(String(64), index=True)
+    version_number: Mapped[int] = mapped_column(Integer)
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    validation_report: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    activated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StructuredQueryRun(Base, TimestampMixin):
+    __tablename__ = "structured_query_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    source_id: Mapped[str] = mapped_column(ForeignKey("source_connectors.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    mapping_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("semantic_mapping_versions.id"), nullable=True, index=True
+    )
+    schema_version_id: Mapped[str] = mapped_column(ForeignKey("data_source_schema_versions.id"), index=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True, index=True)
+    message_id: Mapped[str | None] = mapped_column(ForeignKey("conversation_messages.id"), nullable=True, index=True)
+    original_question: Mapped[str] = mapped_column(Text, default="")
+    semantic_plan: Mapped[dict] = mapped_column(JSON, default=dict)
+    plan_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    query_ir: Mapped[dict] = mapped_column(JSON, default=dict)
+    ir_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    dialect: Mapped[str] = mapped_column(String(32))
+    sql_template: Mapped[str] = mapped_column(Text, default="")
+    parameter_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    referenced_objects: Mapped[list] = mapped_column(JSON, default=list)
+    referenced_columns: Mapped[list] = mapped_column(JSON, default=list)
+    result_columns: Mapped[list] = mapped_column(JSON, default=list)
+    result_rows: Mapped[list] = mapped_column(JSON, default=list)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    result_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    warnings: Mapped[list] = mapped_column(JSON, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StructuredQueryCitation(Base, TimestampMixin):
+    __tablename__ = "structured_query_citations"
+    __table_args__ = (
+        UniqueConstraint("query_run_id", "citation_number", name="uq_structured_query_citation"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    query_run_id: Mapped[str] = mapped_column(ForeignKey("structured_query_runs.id"), index=True)
+    message_id: Mapped[str | None] = mapped_column(ForeignKey("conversation_messages.id"), nullable=True, index=True)
+    citation_number: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String(500))
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 class Document(Base, TimestampMixin):
     __tablename__ = "documents"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

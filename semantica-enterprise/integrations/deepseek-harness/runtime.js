@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { DeepSeekHarness } from '/opt/deepseek-harness/packages/sdk/client/src/index.ts'
-import { requiresKnowledgeSearch } from './query-policy.js'
+import { evidenceRequirements } from './query-policy.js'
 
 const PORT = Number(process.env.PORT || 8090)
 const PLATFORM_API = (process.env.PLATFORM_API || 'http://api:8080/api/v1').replace(/\/$/, '')
@@ -9,6 +9,7 @@ const SERVICE_SECRET_FILE = process.env.AGENT_SERVICE_SECRET_FILE || '/run/secre
 const DSH_HOME = process.env.DSH_HOME || '/var/lib/chuanshen-harness'
 const PATCH = process.env.DSH_PATCH || '/opt/deepseek-harness/packages/integration/chuanshen-knowledge/cordis.patch.yml'
 const sessions = new Map()
+const closingSessions = new Map()
 
 function serviceSecret() {
   return readFileSync(SERVICE_SECRET_FILE, 'utf8').trim()
@@ -46,6 +47,8 @@ function safeModelFingerprint(model) {
 }
 
 async function harnessFor(sessionId) {
+  const closing = closingSessions.get(sessionId)
+  if (closing) await closing
   const model = await modelConfig(sessionId)
   const fingerprint = safeModelFingerprint(model)
   const current = sessions.get(sessionId)
@@ -70,12 +73,25 @@ async function harnessFor(sessionId) {
     model: model.model_name,
     maxTokens: model.max_tokens || 4096,
     env,
-    initializeTimeoutMs: 30000,
+    initializeTimeoutMs: Number(process.env.DSH_INITIALIZE_TIMEOUT_MS || 90000),
     requestTimeoutMs: Number(process.env.TURN_TIMEOUT_MS || 600000),
   })
   const value = { harness, fingerprint, running: false }
   sessions.set(sessionId, value)
   return value
+}
+
+async function disposeSession(sessionId, entry) {
+  if (sessions.get(sessionId) === entry) sessions.delete(sessionId)
+  const existing = closingSessions.get(sessionId)
+  if (existing) return await existing
+  const closing = entry.harness.close().catch(() => {})
+  closingSessions.set(sessionId, closing)
+  try {
+    await closing
+  } finally {
+    if (closingSessions.get(sessionId) === closing) closingSessions.delete(sessionId)
+  }
 }
 
 function sendEvent(res, type, payload) {
@@ -102,11 +118,12 @@ function toolResultEnvelope(data) {
     ? message.content.find(item => item?.type === 'tool-result')
     : null
   if (block) {
+    const blockError = block.isError ? blocksText(block.content) : ''
     return {
       callId: String(block.toolCallId || message?.source?.callId || ''),
       content: block.content,
       isError: Boolean(block.isError || data.error),
-      error: data.error || null,
+      error: data.error || normalizePublicError(blockError) || null,
     }
   }
   return {
@@ -117,11 +134,40 @@ function toolResultEnvelope(data) {
   }
 }
 
+function normalizePublicError(value) {
+  if (!value) return ''
+  if (typeof value === 'string') {
+    return value.replace(/^Error:\s*/i, '').replace(/\[object Object\](?:,\[object Object\])*/g, '请求参数不符合结构化查询协议').slice(0, 1000)
+  }
+  if (Array.isArray(value)) return value.slice(0, 5).map(normalizePublicError).filter(Boolean).join('；')
+  if (typeof value === 'object') {
+    return normalizePublicError(value.message || value.msg || value.detail || value.code || value.name)
+  }
+  return String(value).slice(0, 1000)
+}
+
+function safeToolArguments(name, value) {
+  const args = parsedJson(value, {}) || {}
+  if (name !== 'structured_execute_query') return args
+  return {
+    mapping_version_id: args.mapping_version_id,
+    max_rows: args.max_rows,
+    original_question: args.semantic_query_plan?.original_question,
+    entity_ids: args.semantic_query_plan?.entity_ids || [],
+    relationship_ids: args.semantic_query_plan?.relationship_ids || [],
+    output_count: args.semantic_query_plan?.outputs?.length || 0,
+  }
+}
+
+function evidenceSatisfied(turnState) {
+  return [...turnState.requiredTools].every(name => turnState.satisfiedTools.has(name))
+}
+
 function normalizeEvent(event, toolStarts, turnState) {
   const data = event?.data || {}
   switch (event?.type) {
     case 'turn/start': {
-      turnState.hasSearch = false
+      turnState.satisfiedTools.clear()
       turnState.suppressedAnswer = false
       turnState.startedAt = Date.now()
       return [['turn_started', {
@@ -133,16 +179,24 @@ function normalizeEvent(event, toolStarts, turnState) {
     case 'step/start': return [['step_started', { turn: data.turn, step: data.step, harness_seq: event.seq }]]
     case 'tool/call': {
       toolStarts.set(String(data.callId), { at: Date.now(), name: data.name })
-      if (data.name === 'knowledge_search') turnState.hasSearch = true
       const payload = {
         call_id: data.callId,
         name: data.name,
-        arguments: parsedJson(data.arguments, {}),
+        arguments: safeToolArguments(data.name, data.arguments),
         harness_seq: event.seq,
       }
-      return data.name === 'knowledge_search'
-        ? [['tool_started', payload], ['retrieval_started', payload]]
-        : [['tool_started', payload]]
+      if (data.name === 'knowledge_search') return [['tool_started', payload], ['retrieval_started', payload]]
+      if (data.name === 'structured_schema_search') {
+        return [['tool_started', payload], ['structured_schema_search_started', payload]]
+      }
+      if (data.name === 'structured_execute_query') {
+        return [
+          ['tool_started', payload],
+          ['structured_plan_started', payload],
+          ['structured_query_started', payload],
+        ]
+      }
+      return [['tool_started', payload]]
     }
     case 'tool/result': {
       const envelope = toolResultEnvelope(data)
@@ -153,15 +207,54 @@ function normalizeEvent(event, toolStarts, turnState) {
         call_id: envelope.callId,
         name: started?.name,
         success: !envelope.isError,
-        error: envelope.error,
+        error: normalizePublicError(envelope.error),
         duration_ms: started ? Date.now() - started.at : null,
         result: structured,
         harness_seq: event.seq,
       }
       toolStarts.delete(envelope.callId)
-      return started?.name === 'knowledge_search' && structured
-        ? [['tool_finished', payload], ['retrieval_ranked', payload]]
-        : [['tool_finished', payload]]
+      if (!envelope.isError && started?.name) turnState.satisfiedTools.add(started.name)
+      if (started?.name === 'knowledge_search' && structured) {
+        return [['tool_finished', payload], ['retrieval_ranked', payload]]
+      }
+      if (started?.name === 'structured_schema_search') {
+        return [['tool_finished', payload], ['structured_schema_search_finished', {
+          ...payload,
+          result_count: structured?.semantic_objects?.length || 0,
+          mapping_versions: structured?.mapping_versions || [],
+        }]]
+      }
+      if (started?.name === 'structured_get_object' && !envelope.isError) {
+        return [['tool_finished', payload], ['structured_object_loaded', {
+          ...payload,
+          semantic_object_id: structured?.semantic_object?.id,
+          attribute_count: structured?.attributes?.length || 0,
+          relationship_count: structured?.relationships?.length || 0,
+        }]]
+      }
+      if (started?.name === 'structured_execute_query') {
+        if (envelope.isError) {
+          const type = String(envelope.error || '').toLowerCase().includes('abort')
+            ? 'structured_query_cancelled'
+            : 'structured_query_failed'
+          return [['tool_finished', payload], [type, payload]]
+        }
+        return [
+          ['tool_finished', payload],
+          ['structured_plan_validated', { ...payload, fingerprint: structured?.validation?.plan_fingerprint }],
+          ['structured_ir_validated', { ...payload, fingerprint: structured?.validation?.ir_fingerprint }],
+          ['structured_query_compiled', { ...payload, summary: structured?.safe_query_summary || {} }],
+          ['structured_query_finished', {
+            ...payload,
+            query_run_id: structured?.query_run_id,
+            row_count: structured?.row_count || 0,
+            truncated: Boolean(structured?.truncated),
+            elapsed_ms: structured?.elapsed_ms,
+            source_citations: structured?.source_citations || [],
+          }],
+        ]
+      }
+      return [['tool_finished', payload]]
     }
     case 'assistant/chunk': {
       const chunk = data.chunk || {}
@@ -169,7 +262,7 @@ function normalizeEvent(event, toolStarts, turnState) {
         // Do not leak a model's pre-evidence answer. The plugin will steer a
         // new step that performs knowledge_search; only post-search text is
         // streamed to the platform projection.
-        if (turnState.requiresSearch && !turnState.hasSearch) {
+        if (!evidenceSatisfied(turnState)) {
           turnState.suppressedAnswer = true
           return null
         }
@@ -182,16 +275,21 @@ function normalizeEvent(event, toolStarts, turnState) {
         ? String(data.reason.kind || 'completed')
         : String(data.reason || 'completed')
       if (['aborted', 'interrupted', 'disposed'].includes(reason)) {
-        return [['turn_cancelled', {
+        const cancelled = [['turn_cancelled', {
           reason,
           duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
           harness_seq: event.seq,
         }]]
+        if ([...toolStarts.values()].some(item => item.name === 'structured_execute_query')) {
+          cancelled.unshift(['structured_query_cancelled', { reason, harness_seq: event.seq }])
+        }
+        return cancelled
       }
-      if (turnState.requiresSearch && !turnState.hasSearch) {
+      if (!evidenceSatisfied(turnState)) {
         return [['turn_failed', {
-          reason: 'knowledge-search-required',
-          code: 'KNOWLEDGE_SEARCH_REQUIRED',
+          reason: 'evidence-tools-required',
+          code: 'EVIDENCE_TOOLS_REQUIRED',
+          missing_tools: [...turnState.requiredTools].filter(name => !turnState.satisfiedTools.has(name)),
           duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
           harness_seq: event.seq,
         }]]
@@ -231,9 +329,9 @@ async function runTurn(req, res, sessionId) {
   })
   const toolStarts = new Map()
   const turnState = {
-    hasSearch: false,
+    requiredTools: new Set(evidenceRequirements(input.content)),
+    satisfiedTools: new Set(),
     suppressedAnswer: false,
-    requiresSearch: requiresKnowledgeSearch(input.content),
   }
   let completedSeen = false
   try {
@@ -263,6 +361,10 @@ async function runTurn(req, res, sessionId) {
       duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
       occurred_at: new Date().toISOString(),
     })
+    // A failure before turn/start means SDK initialization never completed.
+    // Evict that client so retry creates a fresh bridge instead of reusing a
+    // half-initialized child process or a stale persistence lock.
+    if (!turnState.startedAt) await disposeSession(sessionId, entry)
   } finally {
     entry.running = false
     res.end()
@@ -272,8 +374,7 @@ async function runTurn(req, res, sessionId) {
 async function cancelSession(res, sessionId) {
   const entry = sessions.get(sessionId)
   if (!entry) return json(res, 200, { ok: true, status: 'idle' })
-  await entry.harness.close()
-  sessions.delete(sessionId)
+  await disposeSession(sessionId, entry)
   return json(res, 200, { ok: true, status: 'cancelled' })
 }
 

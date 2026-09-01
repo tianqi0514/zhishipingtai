@@ -8,7 +8,13 @@ RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 
 WORKDIR /opt/deepseek-harness
 COPY deepseek-harness/ /opt/deepseek-harness/
-COPY semantica-enterprise/integrations/deepseek-harness/ /opt/deepseek-harness/packages/integration/chuanshen-knowledge/
+# Keep the expensive filtered workspace install cacheable while adapter source
+# files change. Only files that affect dependency resolution or the pinned SDK
+# overlay are copied before pnpm install; the complete out-of-tree adapter is
+# copied afterwards.
+COPY semantica-enterprise/integrations/deepseek-harness/package.json /opt/deepseek-harness/packages/integration/chuanshen-knowledge/package.json
+COPY semantica-enterprise/integrations/deepseek-harness/HARNESS_COMMIT /opt/deepseek-harness/packages/integration/chuanshen-knowledge/HARNESS_COMMIT
+COPY semantica-enterprise/integrations/deepseek-harness/patch-sdk-server.mjs /opt/deepseek-harness/packages/integration/chuanshen-knowledge/patch-sdk-server.mjs
 RUN test "$(cat packages/integration/chuanshen-knowledge/HARNESS_COMMIT)" = "cd5ef8148158c3a752a658978873241fdf8e2bbc"
 # The pinned SDK JSON-RPC bridge creates an empty session after a subprocess
 # restart even when the JSONL event log already exists.  Apply an exact,
@@ -20,6 +26,7 @@ RUN --mount=type=cache,id=chuanshen-dsh-filtered-pnpm,target=/root/.local/share/
     pnpm install --filter chuanshen-knowledge-harness... --prod --no-frozen-lockfile --ignore-scripts \
     && pnpm rebuild esbuild koffi node-pty \
     && pnpm --filter @deepseek-ai/dsh-subprocess-local run postinstall
+COPY semantica-enterprise/integrations/deepseek-harness/ /opt/deepseek-harness/packages/integration/chuanshen-knowledge/
 # The source-launch path resolves its TypeScript loader from the SDK package,
 # while the filtered workspace install links tsx only into our out-of-tree
 # plugin. Expose the same reviewed package at the workspace root so the locked
