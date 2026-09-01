@@ -179,6 +179,27 @@ def sparql(
     _print(_request("POST", "/analysis/sparql", payload={"space_ids": space, "query": query}))
 
 
+@app.command("structured-query")
+def structured_query(
+    question: str,
+    mapping_version: str = typer.Option(..., "--mapping-version", help="已激活的语义映射版本 ID"),
+    max_rows: int = typer.Option(100, min=1, max=1000),
+) -> None:
+    """通过严格 Plan/IR 和确定性编译执行只读结构化查询。"""
+    _print(
+        _request(
+            "POST",
+            "/structured-query/natural-language",
+            payload={
+                "mapping_version_id": mapping_version,
+                "question": question,
+                "execute": True,
+                "max_rows": max_rows,
+            },
+        )
+    )
+
+
 @app.command("sync-source")
 def sync_source(source_id: str) -> None:
     """手工同步数据源。"""

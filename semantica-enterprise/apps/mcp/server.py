@@ -230,6 +230,31 @@ async def knowledge_get_document_profile(
     return await _request("GET", f"/versions/{version_id}/profile")
 
 
+@mcp.tool()
+async def structured_query(
+    mapping_version_id: str,
+    question: str,
+    max_rows: int = 100,
+) -> dict[str, Any]:
+    """用已激活本体映射执行安全、只读的自然语言结构化查询。
+
+    MCP 客户端不能传入 SQL、物理表名或字段名。FastAPI 会生成并严格
+    校验 Semantic Query Plan 与 Query IR，再确定性编译参数化 SQL。
+    """
+    if not 1 <= max_rows <= 1000:
+        raise ValueError("max_rows 必须在 1 到 1000 之间")
+    return await _request(
+        "POST",
+        "/structured-query/natural-language",
+        payload={
+            "mapping_version_id": mapping_version_id,
+            "question": question,
+            "execute": True,
+            "max_rows": max_rows,
+        },
+    )
+
+
 def main() -> None:
     app = BearerContextMiddleware(mcp.streamable_http_app())
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

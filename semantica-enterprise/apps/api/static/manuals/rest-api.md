@@ -54,5 +54,8 @@ curl -N http://服务器地址:8080/api/v1/conversations/CONVERSATION_ID/message
 - POST /knowledge/graph/query：图谱查询
 - GET /versions/{id}/profile：文档治理画像
 - POST /analysis/sparql：只读知识查询
+- POST /structured-query/natural-language：基于激活本体映射的安全结构化查询
+
+结构化查询请求只传 `mapping_version_id`、自然语言 `question`、`execute` 和 `max_rows`。调用者不能提交任意 SQL；平台会验证 Plan/IR 并使用参数绑定执行只读查询。
 
 遇到 401 需要重新登录，403 表示当前用户无权访问目标空间，429 或 5xx 应按指数退避重试。

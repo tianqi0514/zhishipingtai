@@ -35,4 +35,13 @@ chuanshen reason RULE_SET_ID --space SPACE_ID --publish
 chuanshen sparql 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20' --space SPACE_ID
 ```
 
+## 结构化经营数据
+
+```bash
+chuanshen structured-query '2026 年已完成订单销售总额是多少？' \
+  --mapping-version MAPPING_VERSION_ID --max-rows 100
+```
+
+该命令不接收原始 SQL。平台会使用已激活本体映射生成并校验严格 Plan/IR，再确定性编译参数化只读查询；返回值包含真实结果、QueryRun 和结构化数据引用。
+
 CLI 在超时、权限错误、非 JSON 响应或服务不可用时返回非零退出码，可直接用于脚本和流水线判断。不要在命令行参数、Shell 历史或仓库文件中明文保存令牌。

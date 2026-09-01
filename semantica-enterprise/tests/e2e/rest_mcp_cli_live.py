@@ -20,6 +20,9 @@ API = os.getenv("TEST_API", "http://api:8080/api/v1").rstrip("/")
 MCP_URL = os.getenv("TEST_MCP", "http://mcp-server:8091/mcp")
 SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
 SEARCH_QUERY = os.getenv("TEST_SEARCH_QUERY", "该产品的主要定位")
+GRAPH_QUERY = os.getenv("TEST_GRAPH_QUERY", "传神智库")
+DOCUMENT_TITLE = os.getenv("TEST_DOCUMENT_TITLE", "fact.docx")
+MAPPING_VERSION_ID = os.getenv("TEST_MAPPING_VERSION_ID", "")
 
 
 def mcp_payload(result: Any) -> dict[str, Any]:
@@ -50,6 +53,8 @@ async def run_mcp(token: str, space_id: str, chunk_id: str, document_id: str) ->
                 "knowledge_search", "knowledge_chat", "knowledge_get_fragment",
                 "knowledge_graph_query", "knowledge_get_document_profile",
             }
+            if MAPPING_VERSION_ID:
+                required.add("structured_query")
             assert required <= tools
             search = mcp_payload(await session.call_tool("knowledge_search", {
                 "query": SEARCH_QUERY,
@@ -58,17 +63,33 @@ async def run_mcp(token: str, space_id: str, chunk_id: str, document_id: str) ->
             }))
             fragment = mcp_payload(await session.call_tool("knowledge_get_fragment", {"chunk_id": chunk_id}))
             graph = mcp_payload(await session.call_tool("knowledge_graph_query", {
-                "space_ids": [space_id], "entity_query": "传神智库", "limit": 10,
+                "space_ids": [space_id], "entity_query": GRAPH_QUERY, "limit": 10,
             }))
             profile = mcp_payload(await session.call_tool("knowledge_get_document_profile", {"document_id": document_id}))
             chat = mcp_payload(await session.call_tool("knowledge_chat", {
                 "message": "该产品的主要定位是什么？请引用依据。",
                 "space_ids": [space_id],
             }))
+            structured = None
+            if MAPPING_VERSION_ID:
+                structured = mcp_payload(await session.call_tool("structured_query", {
+                    "mapping_version_id": MAPPING_VERSION_ID,
+                    "question": "2026 年已完成订单销售总额是多少？",
+                    "max_rows": 20,
+                }))
     assert search.get("items") and fragment.get("has_access") is True
     assert graph.get("entities") and profile.get("summary")
     assert chat.get("status") == "completed" and chat.get("answer") and chat.get("citations")
-    return {"tools": len(tools), "conversation_id": chat["conversation_id"], "events": len(chat.get("event_types") or [])}
+    if structured is not None:
+        assert structured["result"]["status"] == "succeeded"
+        assert str(structured["result"]["rows"][0]["total_sales"]) == "910000.00"
+        assert structured["result"]["source_citations"]
+    return {
+        "tools": len(tools),
+        "conversation_id": chat["conversation_id"],
+        "events": len(chat.get("event_types") or []),
+        "structured_query": "passed" if structured is not None else "not_requested",
+    }
 
 
 def main() -> None:
@@ -86,7 +107,7 @@ def main() -> None:
         fragment = client.get(f"/fragments/{first['chunk_id']}")
         fragment.raise_for_status()
         documents = client.get("/documents", params={"space_id": space["id"]}).json()
-        profiled_document = next(item for item in documents if item["title"] == "fact.docx")
+        profiled_document = next(item for item in documents if item["title"] == DOCUMENT_TITLE)
         mcp_result = asyncio.run(run_mcp(token, space["id"], first["chunk_id"], profiled_document["id"]))
 
         environment = {
@@ -122,6 +143,22 @@ def main() -> None:
         )
         conversation_line = next(line for line in reversed(cli_chat.stdout.splitlines()) if line.startswith("conversation_id="))
         cli_conversation = conversation_line.split("=", 1)[1]
+        cli_structured = "not_requested"
+        if MAPPING_VERSION_ID:
+            structured_process = subprocess.run(
+                [
+                    "chuanshen", "structured-query", "2026 年已完成订单销售总额是多少？",
+                    "--mapping-version", MAPPING_VERSION_ID, "--max-rows", "20",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=environment,
+                check=True,
+            )
+            structured_result = json.loads(structured_process.stdout)
+            assert str(structured_result["result"]["rows"][0]["total_sales"]) == "910000.00"
+            cli_structured = "passed"
         client.delete(f"/conversations/{mcp_result['conversation_id']}").raise_for_status()
         client.delete(f"/conversations/{cli_conversation}").raise_for_status()
 
@@ -132,6 +169,8 @@ def main() -> None:
         "cli_search": "passed",
         "cli_fragment": "passed",
         "cli_chat": "passed",
+        "mcp_structured_query": mcp_result["structured_query"],
+        "cli_structured_query": cli_structured,
     }, ensure_ascii=False))
 
 

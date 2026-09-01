@@ -42,6 +42,16 @@ def test_every_open_service_has_a_preview_manual() -> None:
         assert len(text) > 300
 
 
+def test_mcp_and_cli_guides_expose_safe_structured_query() -> None:
+    mcp = (STATIC / "manuals" / "mcp.md").read_text(encoding="utf-8")
+    cli = (STATIC / "manuals" / "cli.md").read_text(encoding="utf-8")
+    assert "structured_query" in mcp
+    assert "不能提交 SQL" in mcp
+    assert "chuanshen structured-query" in cli
+    assert "不接收原始 SQL" in cli
+    assert "安全经营数据查询" in APP
+
+
 def test_dashboard_grid_panels_do_not_inherit_sibling_margin() -> None:
     assert ".dashboard-grid>.panel+.panel" in STYLE
     assert ".dashboard-panel{display:flex" in STYLE

@@ -33,8 +33,11 @@ MCP Server 使用 Streamable HTTP：`http://127.0.0.1:8091/mcp`。客户端请�
 - `knowledge_reason`
 - `knowledge_sparql`
 - `knowledge_get_document_profile`
+- `structured_query`
 
 MCP 层只调用 FastAPI，不持有数据库/中间件连接。超时由 `MCP_REQUEST_TIMEOUT` 控制，平台 401/403/404/5xx 会转换为结构化 MCP 错误。已通过真实 MCP ClientSession 初始化、工具枚举、Semantica 推理与 SPARQL 调用。
+
+`structured_query` 只接收已激活映射版本、自然语言问题和最大行数。MCP 客户端不能提供 SQL、物理表/字段或数据库凭据；FastAPI 继续负责权限、Plan/IR 校验、确定性参数化编译、只读执行、服务端脱敏和 QueryRun 审计。
 
 ## CLI
 
@@ -48,8 +51,9 @@ chuanshen chat '它支持哪些数据源？' --space SPACE_ID
 chuanshen fragment CHUNK_ID
 chuanshen reason RULE_SET_ID --space SPACE_ID
 chuanshen sparql 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 20' --space SPACE_ID
+chuanshen structured-query '2026 年已完成订单销售总额是多少？' --mapping-version MAPPING_VERSION_ID
 chuanshen sync-source SOURCE_ID
 chuanshen job JOB_ID
 ```
 
-Token 不应写入 shell 历史或仓库文件。CLI 对 HTTP 超时、权限错误和非 JSON 错误均返回非零退出码。search、chat、fragment、reason、sparql 已完成真实调用；同步和任务命令由 API CRUD/E2E 覆盖。
+Token 不应写入 shell 历史或仓库文件。CLI 对 HTTP 超时、权限错误和非 JSON 错误均返回非零退出码。search、chat、fragment、reason、sparql、structured-query 已完成真实调用；同步和任务命令由 API CRUD/E2E 覆盖。
