@@ -7,8 +7,8 @@ APP = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "apps/api/static/style.css").read_text(encoding="utf-8")
 
 
-def test_primary_navigation_uses_eight_business_domains() -> None:
-    assert INDEX.count('class="nav-group') == 8
+def test_primary_navigation_uses_nine_business_domains() -> None:
+    assert INDEX.count('class="nav-group') == 9
     for label in (
         "工作台",
         "知识资产",
@@ -16,6 +16,7 @@ def test_primary_navigation_uses_eight_business_domains() -> None:
         "知识服务",
         "知识洞察",
         "运营中心",
+        "应用支撑",
         "配置中心",
         "系统管理",
     ):
@@ -34,7 +35,7 @@ def test_configuration_and_system_features_are_grouped() -> None:
 
 
 def test_business_routes_support_history_and_context_tabs() -> None:
-    for view in ("assets", "retrieval", "integrations", "operations", "configuration", "system"):
+    for view in ("assets", "retrieval", "integrations", "operations", "applications", "products", "appscenarios", "evaluations", "feedback", "configuration", "system"):
         assert f"{view}:" in APP
     assert "history.pushState" in APP
     assert "window.addEventListener('popstate'" in APP
@@ -55,3 +56,4 @@ def test_light_theme_overrides_graph_and_scroll_layout() -> None:
 def test_shared_modal_resets_submit_state_between_crud_operations() -> None:
     assert "submitButton.textContent=submit;submitButton.disabled=false" in APP
     assert "finally{submitButton.disabled=false" in APP
+    assert "dlg.addEventListener('close',()=>resolve(value),{once:true})" in APP

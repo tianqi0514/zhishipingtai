@@ -1,12 +1,42 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Callable
+
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from packages.platform.database import get_db
-from packages.platform.models import KnowledgeSpace, OrgUnit, SpaceGrant, User, UserRole
-from packages.platform.security import decode_access_token
+from packages.platform.models import (
+    Application,
+    ApplicationCredential,
+    KnowledgeSpace,
+    OrgUnit,
+    SpaceGrant,
+    User,
+    UserRole,
+)
+from packages.platform.security import decode_access_token, decode_application_access_token
+
+
+@dataclass(frozen=True)
+class ApplicationPrincipal:
+    application: Application
+    credential: ApplicationCredential
+    scopes: frozenset[str]
+    jti: str
+
+    @property
+    def tenant_id(self) -> str:
+        return self.application.tenant_id
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
@@ -35,6 +65,58 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     if not user.is_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
+
+
+def get_current_application(request: Request, db: Session = Depends(get_db)) -> ApplicationPrincipal:
+    """Resolve a short-lived application token and re-check its live credential state."""
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少应用访问令牌")
+    try:
+        payload = decode_application_access_token(authorization[7:].strip())
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="应用访问令牌无效或已过期")
+    application = db.get(Application, payload.get("application_id"))
+    credential = db.get(ApplicationCredential, payload.get("credential_id"))
+    now = datetime.now(timezone.utc)
+    if (
+        application is None
+        or application.deleted_at is not None
+        or not application.enabled
+        or application.status != "active"
+        or application.id != payload.get("sub")
+        or application.tenant_id != payload.get("tenant_id")
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="应用已停用或不可用")
+    if (
+        credential is None
+        or credential.deleted_at is not None
+        or credential.application_id != application.id
+        or credential.tenant_id != application.tenant_id
+        or credential.client_id != payload.get("client_id")
+        or credential.revoked_at is not None
+        or (_aware(credential.expires_at) is not None and _aware(credential.expires_at) <= now)
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="应用凭据已撤销或过期")
+    token_scopes = frozenset(str(payload.get("scope") or "").split())
+    credential_scopes = frozenset(credential.scopes or [])
+    if not token_scopes.issubset(credential_scopes):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="应用令牌权限已失效")
+    return ApplicationPrincipal(
+        application=application,
+        credential=credential,
+        scopes=token_scopes,
+        jti=str(payload["jti"]),
+    )
+
+
+def require_application_scope(scope: str) -> Callable:
+    def dependency(principal: ApplicationPrincipal = Depends(get_current_application)) -> ApplicationPrincipal:
+        if scope not in principal.scopes and "*" not in principal.scopes:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"应用缺少权限：{scope}")
+        return principal
+
+    return dependency
 
 
 _PERMISSION_RANK = {"read": 1, "write": 2, "manage": 3}

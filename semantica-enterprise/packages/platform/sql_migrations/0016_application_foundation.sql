@@ -1,0 +1,13 @@
+CREATE INDEX IF NOT EXISTS ix_applications_tenant_status ON applications (tenant_id, status, enabled);
+CREATE INDEX IF NOT EXISTS ix_application_credentials_app_active ON application_credentials (application_id, revoked_at, expires_at);
+CREATE INDEX IF NOT EXISTS ix_application_grants_resource ON application_grants (tenant_id, resource_type, resource_id, effect);
+CREATE INDEX IF NOT EXISTS ix_knowledge_products_tenant_status ON knowledge_products (tenant_id, status, enabled);
+CREATE INDEX IF NOT EXISTS ix_knowledge_product_spaces_product_order ON knowledge_product_spaces (product_id, sort_order);
+CREATE INDEX IF NOT EXISTS ix_knowledge_product_releases_product_version ON knowledge_product_releases (product_id, version);
+CREATE INDEX IF NOT EXISTS ix_knowledge_product_alias_history_alias ON knowledge_product_alias_history (alias_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_application_scenarios_tenant_status ON application_scenarios (tenant_id, status, enabled);
+CREATE INDEX IF NOT EXISTS ix_application_scenario_versions_scenario_version ON application_scenario_versions (scenario_id, version);
+CREATE INDEX IF NOT EXISTS ix_evaluation_cases_dataset_enabled ON evaluation_cases (dataset_id, enabled);
+CREATE INDEX IF NOT EXISTS ix_evaluation_runs_dataset_recent ON evaluation_runs (dataset_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_application_feedback_app_status ON application_feedback (application_id, status, created_at);
+CREATE INDEX IF NOT EXISTS ix_application_invocations_app_recent ON application_invocations (application_id, created_at);

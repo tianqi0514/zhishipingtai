@@ -12,6 +12,8 @@ from sqlalchemy import text
 from apps.api.routes import router
 from apps.api.agent_internal import router as agent_internal_router
 from apps.api.conversations import router as conversation_router
+from apps.api.application_foundation import router as application_foundation_router
+from apps.api.application_quality import router as application_quality_router
 from packages.platform.bootstrap import bootstrap
 from packages.platform.config import get_settings
 from packages.platform.database import SessionLocal, init_db
@@ -42,6 +44,8 @@ app.add_middleware(
 app.include_router(router, prefix=settings.api_prefix)
 app.include_router(agent_internal_router, prefix=settings.api_prefix)
 app.include_router(conversation_router, prefix=settings.api_prefix)
+app.include_router(application_foundation_router, prefix=settings.api_prefix)
+app.include_router(application_quality_router, prefix=settings.api_prefix)
 
 
 @app.get("/health/live")

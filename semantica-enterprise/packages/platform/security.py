@@ -38,6 +38,17 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
+def hash_service_secret(secret: str) -> str:
+    """Hash a generated service credential without treating it as a user password."""
+    if len(secret) < 32:
+        raise ValueError("服务密钥长度不足")
+    return hash_password(secret)
+
+
+def verify_service_secret(secret: str, encoded: str) -> bool:
+    return verify_password(secret, encoded)
+
+
 def create_access_token(user_id: str, tenant_id: str, is_admin: bool) -> str:
     settings = get_settings()
     now = datetime.now(timezone.utc)
@@ -54,6 +65,52 @@ def create_access_token(user_id: str, tenant_id: str, is_admin: bool) -> str:
 def decode_access_token(token: str) -> dict:
     settings = get_settings()
     return jwt.decode(token, settings.app_secret_key, algorithms=["HS256"])
+
+
+def create_application_access_token(
+    *,
+    application_id: str,
+    credential_id: str,
+    client_id: str,
+    tenant_id: str,
+    scopes: list[str],
+) -> tuple[str, str, datetime]:
+    settings = get_settings()
+    issued = datetime.now(timezone.utc)
+    expires = issued + timedelta(minutes=settings.application_access_token_minutes)
+    jti = uuid.uuid4().hex
+    payload = {
+        "sub": application_id,
+        "application_id": application_id,
+        "credential_id": credential_id,
+        "client_id": client_id,
+        "tenant_id": tenant_id,
+        "scope": " ".join(sorted(set(scopes))),
+        "aud": "chuanshen-application",
+        "jti": jti,
+        "iat": issued,
+        "exp": expires,
+    }
+    return (
+        jwt.encode(payload, settings.app_secret_key, algorithm="HS256"),
+        jti,
+        expires,
+    )
+
+
+def decode_application_access_token(token: str) -> dict:
+    return jwt.decode(
+        token,
+        get_settings().app_secret_key,
+        algorithms=["HS256"],
+        audience="chuanshen-application",
+        options={
+            "require": [
+                "exp", "iat", "jti", "sub", "scope", "tenant_id",
+                "credential_id", "client_id",
+            ]
+        },
+    )
 
 
 def _agent_service_secret() -> str:

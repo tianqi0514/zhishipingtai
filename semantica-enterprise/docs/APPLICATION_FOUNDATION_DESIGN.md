@@ -167,12 +167,11 @@ PUT    /api/v1/applications/{id}
 DELETE /api/v1/applications/{id}
 POST   /api/v1/applications/{id}/credentials
 GET    /api/v1/applications/{id}/credentials
-POST   /api/v1/application-credentials/{id}/rotate
-POST   /api/v1/application-credentials/{id}/revoke
+POST   /api/v1/applications/{id}/credentials/{credential_id}/rotate
+DELETE /api/v1/applications/{id}/credentials/{credential_id}
 POST   /api/v1/applications/{id}/grants
 GET    /api/v1/applications/{id}/grants
-PUT    /api/v1/application-grants/{id}
-DELETE /api/v1/application-grants/{id}
+DELETE /api/v1/applications/{id}/grants/{grant_id}
 ```
 
 凭据删除使用撤销，不物理删除审计记录。

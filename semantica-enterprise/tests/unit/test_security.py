@@ -10,13 +10,17 @@ from packages.platform.config import get_settings
 from packages.platform.security import (
     create_access_token,
     create_agent_access_token,
+    create_application_access_token,
+    decode_application_access_token,
     decode_agent_access_token,
     decode_access_token,
     decrypt_secret,
     encrypt_secret,
     hash_password,
+    hash_service_secret,
     masked_secret,
     verify_password,
+    verify_service_secret,
 )
 
 
@@ -94,6 +98,38 @@ class SecurityContractTest(unittest.TestCase):
             decode_agent_access_token(expired)
         with pytest.raises(jwt.InvalidAudienceError):
             decode_agent_access_token(wrong_audience)
+
+    def test_application_secret_is_salted_and_never_plaintext(self) -> None:
+        secret = "css_" + "a" * 48
+        encoded = hash_service_secret(secret)
+
+        self.assertNotIn(secret, encoded)
+        self.assertTrue(verify_service_secret(secret, encoded))
+        self.assertFalse(verify_service_secret("css_" + "b" * 48, encoded))
+
+    def test_application_token_has_independent_audience_and_scopes(self) -> None:
+        token, jti, expires = create_application_access_token(
+            application_id="application-1",
+            credential_id="credential-1",
+            client_id="client-1",
+            tenant_id="tenant-1",
+            scopes=["scenario.invoke", "feedback.write"],
+        )
+        payload = decode_application_access_token(token)
+
+        self.assertEqual(payload["sub"], "application-1")
+        self.assertEqual(payload["credential_id"], "credential-1")
+        self.assertEqual(payload["jti"], jti)
+        self.assertEqual(set(payload["scope"].split()), {"scenario.invoke", "feedback.write"})
+        self.assertGreater(expires, datetime.now(timezone.utc))
+
+        with pytest.raises(jwt.InvalidAudienceError):
+            jwt.decode(
+                token,
+                get_settings().app_secret_key,
+                algorithms=["HS256"],
+                audience="knowledge-internal-api",
+            )
 
 
 if __name__ == "__main__":

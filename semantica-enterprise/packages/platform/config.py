@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     app_secret_key: str = "dev-only-change-this-secret-at-least-32-bytes"
     access_token_minutes: int = 480
+    application_access_token_minutes: int = 15
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = "Admin@123456"
 
