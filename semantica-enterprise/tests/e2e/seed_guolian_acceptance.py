@@ -230,6 +230,14 @@ def seed_documents(platform: Platform, spaces: dict[str, dict[str, Any]]) -> lis
     for filename in (
         "集团经营指标口径.md",
         "国联集团知识管理办法V1.0.docx",
+        "国联集团人工智能十五五规划.pdf",
+        "集团数据治理管理办法.docx",
+        "供应商分级管理制度.docx",
+        "国联集团采购管理办法.pdf",
+        "重大风险事件报告制度.docx",
+        "信息系统安全管理规范.docx",
+        "人工智能十五五规划宣贯材料.pptx",
+        "国联集团知识管理办法V2.0盖章扫描版.pdf",
     ):
         results.append(upload_once("gl-policy-acceptance", filename))
 
@@ -248,13 +256,22 @@ def seed_documents(platform: Platform, spaces: dict[str, dict[str, Any]]) -> lis
         "NexusOne产品手册V2.0.pdf",
         "NexusOne技术参数与数据源.xlsx",
         "NexusOne产品介绍.pptx",
+        "NexusOne常见问题FAQ.md",
+        "NexusOne售后服务说明.docx",
+        "NexusOne产品架构图.png",
+        "NexusOne培训录音.wav",
         "NexusOne培训录音.mp3",
         "NexusOne部署演示.mp4",
+        "NexusOne销售方案邮件.eml",
         "NexusOne交付资料包.zip",
     ):
         results.append(upload_once("gl-product-acceptance", filename))
     for filename in (
         "关键器件采购框架协议.docx",
+        "华星核心器件供应商准入材料.docx",
+        "2026供应商评分表.xlsx",
+        "华星核心器件风险处置会议纪要.docx",
+        "华星核心器件产品目录.pdf",
         "供应商资质审查扫描件.pdf",
         "供应商风险评估报告.md",
         "供应商风险处置通知.eml",
