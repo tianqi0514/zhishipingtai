@@ -97,6 +97,7 @@ python3 tests/performance/live_load.py
 - [REST、MCP、CLI](docs/INTEGRATIONS.md)
 - [测试报告](docs/TEST_REPORT.md)
 - [2026-09-01 清空重建与全链路验收](docs/ACCEPTANCE_REGRESSION_20260901.md)
+- [应用底座增强详细设计](docs/APPLICATION_FOUNDATION_DESIGN.md)
 - [多轮问答测试报告](docs/QA_REPORT.md)
 - [已知限制](docs/KNOWN_LIMITATIONS.md)
 - [故障排查](docs/TROUBLESHOOTING.md)
