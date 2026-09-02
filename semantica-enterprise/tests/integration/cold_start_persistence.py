@@ -16,6 +16,21 @@ API = os.getenv("API_BASE", "http://127.0.0.1:8080/api/v1").rstrip("/")
 USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123456")
 SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
+MODEL_TURN_ATTEMPTS = max(1, int(os.getenv("MODEL_TURN_ATTEMPTS", "4")))
+REQUIRED_SERVICES = {
+    "agent-runtime",
+    "api",
+    "falkordb",
+    "mcp-server",
+    "minio",
+    "opensearch",
+    "postgres",
+    "qdrant",
+    "rabbitmq",
+    "redis",
+    "scheduler",
+    "worker",
+}
 
 
 def request(method: str, path: str, token: str | None = None, body: dict | None = None, timeout: int = 900):
@@ -35,10 +50,20 @@ def login() -> str:
     return request("POST", "/auth/login", body={"username": USERNAME, "password": PASSWORD})["access_token"]
 
 
-def stream_turn(token: str, conversation_id: str, content: str) -> list[str]:
+def stream_turn(
+    token: str,
+    conversation_id: str,
+    content: str,
+    retry_message_id: str | None = None,
+) -> list[str]:
+    path = (
+        f"/conversations/{conversation_id}/messages/{retry_message_id}/retry"
+        if retry_message_id
+        else f"/conversations/{conversation_id}/messages"
+    )
     req = urllib.request.Request(
-        f"{API}/conversations/{conversation_id}/messages",
-        data=json.dumps({"content": content}, ensure_ascii=False).encode(),
+        f"{API}{path}",
+        data=None if retry_message_id else json.dumps({"content": content}, ensure_ascii=False).encode(),
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -52,9 +77,31 @@ def stream_turn(token: str, conversation_id: str, content: str) -> list[str]:
             line = raw.decode(errors="replace").strip()
             if line.startswith("event:"):
                 events.append(line[6:].strip())
-    assert events and events[-1] == "turn_completed", events[-5:]
-    assert "retrieval_ranked" in events
     return events
+
+
+def complete_turn_with_retry(token: str, conversation_id: str, content: str) -> tuple[list[str], int]:
+    """Use the platform's real retry API when an external model turn is transiently unavailable."""
+    failed_message_id: str | None = None
+    for attempt in range(1, MODEL_TURN_ATTEMPTS + 1):
+        events = stream_turn(token, conversation_id, content, failed_message_id)
+        if events and events[-1] == "turn_completed":
+            assert "retrieval_ranked" in events
+            return events, attempt
+        detail = request("GET", f"/conversations/{conversation_id}", token)
+        failed = next(
+            (
+                message
+                for message in reversed(detail["messages"])
+                if message["role"] == "assistant" and message["status"] in {"failed", "cancelled"}
+            ),
+            None,
+        )
+        assert failed is not None, events[-5:]
+        failed_message_id = failed["id"]
+        if attempt < MODEL_TURN_ATTEMPTS:
+            time.sleep(min(5 * attempt, 15))
+    raise AssertionError(f"Agent turn failed after {MODEL_TURN_ATTEMPTS} attempts: {events[-5:]}")
 
 
 def compose(*args: str, quiet: bool = False) -> None:
@@ -78,8 +125,13 @@ def wait_stack(timeout: int = 600) -> list[str]:
             text=True,
         ).stdout.splitlines()
         last = [json.loads(row) for row in rows if row.strip()]
-        if len(last) == 12 and all(row.get("State") == "running" and row.get("Health") == "healthy" for row in last):
-            return sorted(row["Service"] for row in last)
+        healthy_services = {
+            row["Service"]
+            for row in last
+            if row.get("State") == "running" and row.get("Health") == "healthy"
+        }
+        if REQUIRED_SERVICES <= healthy_services:
+            return sorted(REQUIRED_SERVICES)
         time.sleep(3)
     raise TimeoutError({row.get("Service"): (row.get("State"), row.get("Health")) for row in last})
 
@@ -111,9 +163,12 @@ def main() -> None:
         {"title": "全栈冷启动持久化验收", "space_ids": [space["id"]], "top_k": 3},
     )
     conversation_id = conversation["id"]
-    first_events = stream_turn(token, conversation_id, "NexusOne 的主要定位是什么？")
+    first_events, first_attempts = complete_turn_with_retry(
+        token, conversation_id, "NexusOne 的主要定位是什么？"
+    )
     before = request("GET", f"/conversations/{conversation_id}", token)
     session_id = before["harness_session_id"]
+    message_count_before = len(before["messages"])
     stack_stopped = False
     try:
         compose("stop", quiet=True)
@@ -125,7 +180,7 @@ def main() -> None:
         token = login()
         after_restart = request("GET", f"/conversations/{conversation_id}", token)
         assert after_restart["harness_session_id"] == session_id
-        assert len(after_restart["messages"]) == 2
+        assert len(after_restart["messages"]) == message_count_before
         assert len(request("GET", f"/documents?space_id={space['id']}", token)) == document_count
         assert migration_count() == migrations_before
         search = request(
@@ -135,10 +190,13 @@ def main() -> None:
             {"query": "NexusOne enterprise knowledge", "space_ids": [space["id"]], "top_k": 5},
         )
         assert search["items"] and len([value for value in search["channel_counts"].values() if value]) >= 2
-        second_events = stream_turn(token, conversation_id, "它支持哪些数据源？请结合上一轮对象回答。")
+        second_events, second_attempts = complete_turn_with_retry(
+            token, conversation_id, "它支持哪些数据源？请结合上一轮对象回答。"
+        )
         final = request("GET", f"/conversations/{conversation_id}", token)
         assistants = [item for item in final["messages"] if item["role"] == "assistant"]
-        assert len(assistants) == 2 and all(item["status"] == "completed" for item in assistants)
+        completed_assistants = [item for item in assistants if item["status"] == "completed"]
+        assert len(completed_assistants) == 2
         assert "NexusOne" in assistants[-1]["content"]
         assert "没有可调取的上一轮" not in assistants[-1]["content"]
         assert assistants[-1]["traces"] and assistants[-1]["citations"]
@@ -151,6 +209,8 @@ def main() -> None:
             "harness_session_preserved": True,
             "first_turn_events": len(first_events),
             "second_turn_events": len(second_events),
+            "first_turn_attempts": first_attempts,
+            "second_turn_attempts": second_attempts,
             "retrieval_channels": search["channel_counts"],
         }, ensure_ascii=False))
     finally:

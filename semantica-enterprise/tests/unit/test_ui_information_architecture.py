@@ -79,3 +79,16 @@ def test_dashboard_has_one_state_driven_recommended_next_step() -> None:
     assert "dashboard-next-step" in APP
     assert "完成模型配置" in APP
     assert "接入第一批真实知识" in APP
+
+
+def test_audit_log_uses_business_labels_and_hides_raw_identifiers_by_default() -> None:
+    render_audits = APP.split("async function renderAudits()", 1)[1].split(
+        "window.addEventListener", 1
+    )[0]
+    assert "业务操作" in render_audits
+    assert "业务对象" in render_audits
+    assert "auditActionLabel" in render_audits
+    assert "auditActorLabel" in render_audits
+    assert "data-audit-detail" in render_audits
+    assert "JSON.stringify(x.detail" not in render_audits
+    assert "对象 ID" not in render_audits
