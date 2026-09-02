@@ -136,6 +136,8 @@ def main() -> int:
     sources = {row["name"]: row for row in admin.call("GET", "/sources")}
     postgres = sources["集团经营数据库（PostgreSQL）"]
     mysql = sources["集团经营数据库（MySQL 灾备）"]
+    assert postgres["config"]["graph_materialization_enabled"] is True
+    assert mysql["config"]["graph_materialization_enabled"] is False
     for source, object_id, order_id in (
         (postgres, "public.customers", "public.customers.id"),
         (mysql, "customers", "customers.id"),
@@ -162,6 +164,25 @@ def main() -> int:
     )
     mapping_version_id = mapping["active_version_id"]
     assert mapping_version_id
+
+    graph_entities = admin.call(
+        "GET", f"/knowledge/entities?space_id={spaces['gl-structured-acceptance']['id']}&limit=500"
+    )["items"]
+    materialized_entities = [
+        row for row in graph_entities
+        if (row.get("properties") or {}).get("source_id") == postgres["id"]
+        and (row.get("properties") or {}).get("materialization") == "database_mapping"
+    ]
+    assert materialized_entities
+    materialized_ids = {row["id"] for row in materialized_entities}
+    graph_facts = admin.call(
+        "GET", f"/knowledge/facts?space_id={spaces['gl-structured-acceptance']['id']}&limit=500"
+    )["items"]
+    materialized_facts = [
+        row for row in graph_facts
+        if row.get("subject_entity_id") in materialized_ids and row.get("source_chunk_id")
+    ]
+    assert materialized_facts
 
     total_ir = {
         "version": "chuanshen.query-ir/v1",
@@ -266,6 +287,8 @@ def main() -> int:
         "acceptance_documents": len(expected_titles),
         "postgres_preview_rows": 4,
         "mysql_preview_rows": 4,
+        "materialized_entities": len(materialized_entities),
+        "materialized_facts": len(materialized_facts),
         "total_sales_2026": str(total_result["rows"][0]["total_sales"]),
         "nexusone_sales_2026": str(nexus_result["rows"][0]["nexusone_sales"]),
         "search_results": len(search["items"]),

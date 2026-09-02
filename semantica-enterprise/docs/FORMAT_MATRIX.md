@@ -2,6 +2,8 @@
 
 状态说明：`Docker 实测` 表示在交付镜像内读取真实文件；`路由/安全测试` 表示解析路由与安全规则自动化通过但未逐扩展名做本轮 Docker 实件；`协议模型实测` 表示真实 HTTP/multipart 调用了本地兼容服务，不代表外部商业账号验证。
 
+交付镜像明确安装 LibreOffice、ffmpeg、Tesseract 中文/英文、libmagic 和文泉驿正黑中文字体，避免中文 Office 转换或扫描件 fixture 隐式依赖开发机字体。
+
 | 格式 | 实现 | 系统/模型依赖 | 当前验证 |
 |---|---|---|---|
 | txt | Semantica/Text | 无 | Docker 实测 |

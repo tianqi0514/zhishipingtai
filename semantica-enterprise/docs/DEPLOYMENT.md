@@ -6,6 +6,17 @@
 - 建议至少 8 核 CPU、16GB 内存、30GB 可用磁盘
 - `8080`、`8091`、`9001`、`9200`、`6333`、`6380`、`15672` 本机端口可用
 
+应用镜像已内置 `ffmpeg/ffprobe`、LibreOffice headless、Tesseract 中英文语言包、`file/libmagic` 和文泉驿正黑中文字体。中文 Office 转换、扫描件 OCR 和验收数据生成不依赖宿主机字体或本地安装的软件。
+
+Dockerfile 默认使用 Debian 官方软件源。受限网络环境可以在构建时传入 `DEBIAN_MIRROR` 和 `DEBIAN_SECURITY_MIRROR`，例如：
+
+```bash
+docker compose build \
+  --build-arg DEBIAN_MIRROR=https://mirrors.aliyun.com/debian \
+  --build-arg DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security \
+  api
+```
+
 ## Secret 与环境
 
 复制 `.env.example` 为 `.env`，修改 `APP_SECRET_KEY`、初始管理员密码、MinIO 凭据。创建：

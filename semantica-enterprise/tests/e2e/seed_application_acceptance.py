@@ -160,6 +160,7 @@ def invoke(
         "result_count": len(result["items"]),
         "top_chunk_id": top["chunk_id"],
         "top_space_id": top["space_id"],
+        "product_release_id": result["knowledge_product_release"]["id"],
         "feedback_id": feedback["id"],
     }
 
@@ -248,6 +249,7 @@ def main() -> int:
     ]
     results = []
     versions = []
+    products = []
     for spec in specs:
         product, _ = ensure_product(platform, spec["product"])
         scenario, version = ensure_scenario(platform, spec["scenario"], product)
@@ -261,12 +263,15 @@ def main() -> int:
             feedback_comment=spec.get("feedback_comment", "全业务验收：答案依据可核验。"),
         ))
         versions.append(version)
+        products.append(product)
     curation_case = platform.call(
         "POST",
         f"/application-feedback/{results[0]['feedback_id']}/convert-to-curation",
     )
     admin = Platform("admin", ADMIN_PASSWORD)
     fragment = admin.call("GET", f"/fragments/{results[0]['top_chunk_id']}")
+    boundary = "适用边界：面向集团总部、所属企业及获得知识空间授权的业务部门。"
+    corrected_text = fragment["text"] if boundary in fragment["text"] else f"{fragment['text']}\n{boundary}"
     correction = admin.call("POST", "/curation/decisions", json={
         "space_id": results[0]["top_space_id"],
         "target_type": "chunk",
@@ -274,7 +279,7 @@ def main() -> int:
         "version_id": fragment["version_id"],
         "field_path": "text",
         "operation": "override",
-        "value": fragment["text"] + "\n适用边界：面向集团总部、所属企业及获得知识空间授权的业务部门。",
+        "value": corrected_text,
         "scope": "version_only",
         "reason_code": "application_feedback",
         "reason_note": "根据应用反馈补充产品适用边界，并保留 Semantica 自动结果。",
@@ -282,11 +287,37 @@ def main() -> int:
     })
     if correction.get("job"):
         admin.wait_job(correction["job"]["id"])
-    admin.call("PUT", f"/curation/cases/{curation_case['id']}", json={
+    curation_case = admin.call("PUT", f"/curation/cases/{curation_case['id']}", json={
         "status": "handled",
         "resolution": "corrected",
         "reason_note": "已通过人工治理覆盖补充适用边界并重新发布知识索引。",
     })
+    current_fragment = admin.call("GET", f"/fragments/{results[0]['top_chunk_id']}")
+    if boundary not in current_fragment["text"]:
+        raise RuntimeError("人工治理发布后，当前知识片段未体现修正内容")
+    remediated_release = platform.call(
+        "POST",
+        f"/knowledge-products/{products[0]['id']}/releases",
+        json={"note": "应用反馈治理修复后的回归版本"},
+    )
+    platform.call(
+        "PUT",
+        f"/knowledge-products/{products[0]['id']}/aliases/production",
+        json={
+            "product_release_id": remediated_release["id"],
+            "reason": "反馈治理发布后重新评测并切换生产供给",
+        },
+    )
+    remediation_invocation = invoke(
+        platform,
+        {"id": results[0]["application_id"]},
+        {"id": results[0]["scenario_id"], "code": "guolian_employee_qa"},
+        specs[0]["question"],
+        feedback_type="positive",
+        feedback_comment="全业务验收：人工治理修复后重新调用通过。",
+    )
+    if remediation_invocation["product_release_id"] != remediated_release["id"]:
+        raise RuntimeError("应用重新测试没有使用治理修复后的生产知识版本")
     evaluation = ensure_evaluation(platform, versions[0], results[0], specs[0]["question"])
     resolved_feedback = platform.call(
         "POST",
@@ -309,6 +340,8 @@ def main() -> int:
             "publish_job_id": correction.get("job", {}).get("id") if correction.get("job") else None,
             "feedback_final_status": resolved_feedback["status"],
             "verified_by_evaluation_run_id": evaluation["id"],
+            "remediated_product_release_id": remediated_release["id"],
+            "remediation_query_id": remediation_invocation["query_id"],
         },
     }, ensure_ascii=False, indent=2))
     return 0

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import httpx
 
@@ -53,7 +54,7 @@ def main() -> int:
             ],
             "knowledge_index_enabled": True,
             "realtime_query_enabled": True,
-            "graph_materialization_enabled": False,
+            "graph_materialization_enabled": True,
         }
         sources = call("GET", "/sources")
         source = next((item for item in sources if item["name"] == "集团经营数据库（PostgreSQL）"), None)
@@ -92,6 +93,10 @@ def main() -> int:
             "dialect": "mysql",
             "host": "structured-mysql",
             "port": 3306,
+            # PostgreSQL is the authoritative materialization source in this
+            # acceptance dataset.  The MySQL replica remains available for
+            # preview/query parity without publishing duplicate graph facts.
+            "graph_materialization_enabled": False,
         }
         mysql_config.pop("schema", None)
         mysql_source = next((item for item in sources if item["name"] == "集团经营数据库（MySQL 灾备）"), None)
@@ -272,6 +277,67 @@ def main() -> int:
             raise RuntimeError(json.dumps(validation["validation"], ensure_ascii=False))
         mapping = call("POST", f"/semantic-mappings/{mapping['id']}/activate?version_id={version['id']}")
 
+        def wait_job(job_id: str, timeout: int = 1200) -> dict:
+            deadline = time.monotonic() + timeout
+            last = {}
+            while time.monotonic() < deadline:
+                last = call("GET", f"/jobs/{job_id}")
+                if last.get("status") in {"succeeded", "failed", "cancelled"}:
+                    if last["status"] != "succeeded":
+                        raise RuntimeError(json.dumps(last, ensure_ascii=False)[:3000])
+                    return last
+                time.sleep(1.5)
+            raise TimeoutError(f"job {job_id} timed out: {last}")
+
+        def wait_knowledge_job(version_id: str, timeout: int = 1200) -> dict:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                for candidate in call("GET", "/jobs"):
+                    if (
+                        candidate.get("job_type") == "process_knowledge"
+                        and (candidate.get("input") or {}).get("version_id") == version_id
+                        and candidate.get("status") in {"queued", "running", "succeeded", "failed", "cancelled"}
+                    ):
+                        return wait_job(candidate["id"], max(1, int(deadline - time.monotonic())))
+                time.sleep(1)
+            raise TimeoutError(f"knowledge job was not created for version {version_id}")
+
+        sync = wait_job(call("POST", f"/sources/{source['id']}/sync")["id"])
+        version_id = sync["result"]["version_id"]
+        if sync["result"].get("unchanged"):
+            documents = call("GET", f"/documents?space_id={space['id']}")
+            document = next((item for item in documents if item.get("source_id") == source["id"]), None)
+            if document is None:
+                raise RuntimeError("unchanged database snapshot has no source document")
+            knowledge = wait_job(call("POST", f"/documents/{document['id']}/process?force=true")["id"])
+        else:
+            wait_job(sync["result"]["parse_job_id"])
+            knowledge = wait_knowledge_job(version_id)
+        materialization = (knowledge.get("result") or {}).get("structured_materialization") or {}
+        if not materialization.get("enabled"):
+            raise RuntimeError(f"structured graph materialization was not enabled: {materialization}")
+        if int(materialization.get("entities") or 0) < 1:
+            raise RuntimeError(f"structured graph materialization produced no entities: {materialization}")
+        if int(materialization.get("attribute_facts") or 0) < 1:
+            raise RuntimeError(f"structured graph materialization produced no attribute facts: {materialization}")
+
+        graph_entities = call("GET", f"/knowledge/entities?space_id={space['id']}&limit=500")
+        materialized_entities = [
+            item for item in graph_entities["items"]
+            if (item.get("properties") or {}).get("source_id") == source["id"]
+            and (item.get("properties") or {}).get("materialization") == "database_mapping"
+        ]
+        if not materialized_entities:
+            raise RuntimeError("materialized database entities are absent from the active graph projection")
+        graph_facts = call("GET", f"/knowledge/facts?space_id={space['id']}&limit=500")
+        materialized_ids = {item["id"] for item in materialized_entities}
+        materialized_facts = [
+            item for item in graph_facts["items"]
+            if item.get("subject_entity_id") in materialized_ids and item.get("source_chunk_id")
+        ]
+        if not materialized_facts:
+            raise RuntimeError("materialized graph facts do not retain source-chunk provenance")
+
         print(json.dumps({
             "space_id": space["id"],
             "source_id": source["id"],
@@ -284,6 +350,10 @@ def main() -> int:
             "entities": len(entities),
             "attributes": len(attributes),
             "relationships": len(relationships),
+            "snapshot_version_id": version_id,
+            "materialized_entities": len(materialized_entities),
+            "materialized_facts": len(materialized_facts),
+            "graph_release": (knowledge.get("result") or {}).get("graph_release"),
         }, ensure_ascii=False))
     return 0
 

@@ -1,14 +1,22 @@
 FROM semantica-local:0.6.6-cce5ea1
 
+ARG DEBIAN_MIRROR=http://deb.debian.org/debian
+ARG DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security
+
 USER root
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
+RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec \
+    sed -i \
+      -e "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+      -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" {} +
+
 RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
     && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
-       ffmpeg file git libmagic1 \
+       ffmpeg file git libmagic1 fonts-wqy-zenhei \
        libreoffice-calc libreoffice-impress libreoffice-writer \
        tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
