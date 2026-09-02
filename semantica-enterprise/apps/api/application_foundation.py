@@ -173,6 +173,44 @@ def create_application(
     _validate_owner(db, admin.tenant_id, owner_id)
     _validate_org(db, admin.tenant_id, payload.org_unit_id)
     values = payload.model_dump(exclude={"owner_id"})
+    recycled = db.scalar(
+        select(Application).where(
+            Application.tenant_id == admin.tenant_id,
+            Application.code == payload.code,
+        )
+    )
+    if recycled is not None:
+        if recycled.deleted_at is None:
+            raise HTTPException(status_code=409, detail="应用编码已存在")
+        if not admin.is_admin and recycled.owner_id != admin.id:
+            raise HTTPException(status_code=409, detail="应用编码被已删除应用占用，请联系管理员恢复")
+        recycled.owner_id = owner_id
+        recycled.deleted_at = None
+        apply_patch(
+            recycled,
+            values,
+            {"name", "description", "app_type", "environment", "org_unit_id", "status", "config", "enabled"},
+        )
+        # Credentials were revoked when the application was deleted.  Grants
+        # are also retired so restoring a code never silently restores access
+        # to a knowledge product or scenario.
+        restored_at = datetime.now(timezone.utc)
+        db.query(ApplicationGrant).filter(
+            ApplicationGrant.application_id == recycled.id,
+            ApplicationGrant.deleted_at.is_(None),
+        ).update({"deleted_at": restored_at})
+        audit(
+            db,
+            admin.tenant_id,
+            admin.id,
+            "application.restore",
+            "application",
+            recycled.id,
+            {"code": recycled.code},
+        )
+        db.commit()
+        db.refresh(recycled)
+        return serialize_row(recycled)
     row = Application(tenant_id=admin.tenant_id, owner_id=owner_id, **values)
     db.add(row)
     audit(db, admin.tenant_id, admin.id, "application.create", "application", row.id, {"code": row.code})
@@ -239,6 +277,10 @@ def delete_application(row_id: str, admin: User = Depends(require_admin), db: Se
         ApplicationCredential.revoked_at.is_(None),
         ApplicationCredential.deleted_at.is_(None),
     ).update({"revoked_at": now})
+    db.query(ApplicationGrant).filter(
+        ApplicationGrant.application_id == row.id,
+        ApplicationGrant.deleted_at.is_(None),
+    ).update({"deleted_at": now})
     audit(db, admin.tenant_id, admin.id, "application.delete", "application", row.id)
     db.commit()
     return {"ok": True}
@@ -548,6 +590,27 @@ def create_application_grant(
 ):
     _must_owned(db, Application, application_id, admin, "应用")
     _validate_grant_resource(db, admin.tenant_id, payload.resource_type, payload.resource_id)
+    recycled = db.scalar(select(ApplicationGrant).where(
+        ApplicationGrant.application_id == application_id,
+        ApplicationGrant.resource_type == payload.resource_type,
+        ApplicationGrant.resource_id == payload.resource_id,
+        ApplicationGrant.permission == payload.permission,
+    ))
+    if recycled is not None:
+        if recycled.deleted_at is None:
+            raise HTTPException(status_code=409, detail="该资源授权已存在")
+        recycled.deleted_at = None
+        recycled.effect = payload.effect
+        audit(
+            db,
+            admin.tenant_id,
+            admin.id,
+            "application.grant.restore",
+            "application_grant",
+            recycled.id,
+        )
+        db.commit()
+        return serialize_row(recycled)
     row = ApplicationGrant(application_id=application_id, tenant_id=admin.tenant_id, **payload.model_dump())
     db.add(row)
     audit(db, admin.tenant_id, admin.id, "application.grant.create", "application_grant", row.id)

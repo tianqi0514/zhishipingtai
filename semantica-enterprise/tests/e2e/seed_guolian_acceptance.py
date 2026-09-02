@@ -187,6 +187,7 @@ def seed_spaces(platform: Platform, organizations: dict[str, dict[str, Any]], ro
         grant(code, "role", roles["gl-group-km-admin"]["id"], "manage")
     for code in ("gl-policy-acceptance", "gl-product-acceptance"):
         grant(code, "role", roles["gl-employee"]["id"], "read")
+    for code in ("gl-policy-acceptance", "gl-product-acceptance", "gl-procurement-acceptance"):
         grant(code, "role", roles["gl-application-builder"]["id"], "read")
     grant("gl-product-acceptance", "org", organizations["gl-digital"]["id"], "write")
     grant("gl-procurement-acceptance", "org", organizations["gl-supply"]["id"], "write")

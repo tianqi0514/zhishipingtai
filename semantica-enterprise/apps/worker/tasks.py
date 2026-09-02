@@ -109,6 +109,28 @@ def _progress(db, job: Job, value: int) -> None:
     db.commit()
 
 
+def _database_processing_modes(source: SourceConnector | None) -> tuple[bool, bool, bool]:
+    """Return database-snapshot, profile-model and generic-extraction modes.
+
+    Generic LLM analysis stays opt-in for database snapshots because their
+    authoritative semantics come from the versioned schema/ontology mapping.
+    Non-database documents preserve the existing model-backed behavior.
+    """
+    is_database_snapshot = bool(
+        source
+        and source.deleted_at is None
+        and source.source_type == "database"
+    )
+    if not is_database_snapshot:
+        return False, True, True
+    config = source.config or {}
+    return (
+        True,
+        bool(config.get("database_profile_model_enabled", False)),
+        bool(config.get("generic_semantic_extraction_enabled", False)),
+    )
+
+
 def _queue_automatic_inference(
     db,
     *,
@@ -880,6 +902,16 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         chunk_policy = _default_policy(db, ChunkPolicy, version.tenant_id)
         extraction_policy = _default_policy(db, ExtractionPolicy, version.tenant_id)
         governance_policy = _default_policy(db, GovernancePolicy, version.tenant_id)
+        source = db.get(SourceConnector, document.source_id) if document.source_id else None
+        (
+            is_database_snapshot,
+            database_profile_model_enabled,
+            generic_semantic_extraction_enabled,
+        ) = _database_processing_modes(source)
+        # Database rows already have deterministic schema and ontology mapping.
+        # Running a general-purpose LLM once per row is both slower and less
+        # reliable than the mapping-backed materializer.  Administrators can
+        # explicitly opt in for free-text database columns when needed.
         embedding_model = db.scalar(
             select(ModelConfig).where(
                 ModelConfig.tenant_id == version.tenant_id,
@@ -1045,10 +1077,33 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 candidate = db.get(ModelConfig, str(configured_profile_model_id))
                 if candidate and candidate.tenant_id == version.tenant_id and candidate.enabled:
                     profile_model = candidate
-            model_status = "disabled" if not profile_config.get("enable_model_analysis", True) else "not_configured"
+            model_analysis_enabled = bool(profile_config.get("enable_model_analysis", True))
+            if is_database_snapshot and not database_profile_model_enabled:
+                model_analysis_enabled = False
+            model_status = "disabled" if not model_analysis_enabled else "not_configured"
             model_error = None
             model_profile: dict[str, Any] = {}
-            if profile_config.get("enable_model_analysis", True) and profile_model:
+            if is_database_snapshot and not model_analysis_enabled:
+                structured_objects = sorted({
+                    str((element.element_metadata or {}).get("object_id") or "")
+                    for element in elements
+                    if (element.element_metadata or {}).get("object_id")
+                })
+                record_count = sum(element.element_type == "record" for element in elements)
+                model_profile = {
+                    "summary": (
+                        f"{source.name} 的结构化数据同步快照，包含 {len(structured_objects)} 个数据对象、"
+                        f"{record_count} 条记录；业务实体和关系由已激活本体映射确定性生成。"
+                    ),
+                    "classification": "结构化业务数据",
+                    "document_type": "数据库快照",
+                    "tags": ["结构化数据", "数据库快照"],
+                    "keywords": [item.rsplit(".", 1)[-1] for item in structured_objects[:12]],
+                    "main_objects": structured_objects[:20],
+                    "time_range": {},
+                    "quality_issues": [],
+                }
+            if model_analysis_enabled and profile_model:
                 profile_secret = decrypt_secret(profile_model.api_key_encrypted)
                 if profile_secret:
                     try:
@@ -1135,10 +1190,14 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             db.add(run)
             db.flush()
             api_key = decrypt_secret(llm_model.api_key_encrypted)
-            if not api_key:
+            if generic_semantic_extraction_enabled and not api_key:
                 raise ValueError("语义抽取模型未配置 API Key")
             entity_count = relation_count = event_count = 0
-            selected_chunks = chunks[: extraction_policy.max_chunks]
+            selected_chunks = (
+                chunks[: extraction_policy.max_chunks]
+                if generic_semantic_extraction_enabled
+                else []
+            )
             reused_chunk_count = 0
             model_chunk_count = 0
             extraction_errors: list[dict[str, Any]] = []
@@ -1258,6 +1317,12 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "relations": relation_count,
                 "events": event_count,
             }
+            if not generic_semantic_extraction_enabled:
+                run.metrics.update({
+                    "skipped": True,
+                    "reason": "database_snapshot_uses_deterministic_mapping",
+                    "available_chunks": len(chunks),
+                })
             if extraction_errors:
                 run.metrics["errors"] = extraction_errors
                 run.error_message = (

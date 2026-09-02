@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 from apps.api.application_foundation import router
 from packages.platform.database import Base, get_db
 from packages.platform.models import (
+    ApplicationGrant,
     ApplicationInvocation,
     GraphRelease,
     IndexRelease,
@@ -192,6 +193,48 @@ def test_application_builder_permission_is_real_and_owner_isolation_is_enforced(
             headers={"Authorization": f"Bearer {other_token}"},
         ).json() == []
 
+        grant = ApplicationGrant(
+            application_id=created.json()["id"],
+            tenant_id=admin.tenant_id,
+            resource_type="scenario",
+            resource_id="synthetic-resource",
+            permission="invoke",
+            effect="allow",
+        )
+        db.add(grant)
+        db.commit()
+        deleted = client.delete(
+            f"/api/v1/applications/{created.json()['id']}",
+            headers={"Authorization": f"Bearer {builder_token}"},
+        )
+        assert deleted.status_code == 200
+        db.refresh(grant)
+        assert grant.deleted_at is not None
+
+        restored = client.post(
+            "/api/v1/applications",
+            headers={"Authorization": f"Bearer {builder_token}"},
+            json={"code": "builder-owned", "name": "恢复后的开发者应用", "status": "active"},
+        )
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["id"] == created.json()["id"]
+        assert restored.json()["owner_id"] == builder.id
+        assert client.get(
+            f"/api/v1/applications/{restored.json()['id']}/grants",
+            headers={"Authorization": f"Bearer {builder_token}"},
+        ).json() == []
+
+        assert client.delete(
+            f"/api/v1/applications/{restored.json()['id']}",
+            headers={"Authorization": f"Bearer {builder_token}"},
+        ).status_code == 200
+        blocked_reuse = client.post(
+            "/api/v1/applications",
+            headers={"Authorization": f"Bearer {other_token}"},
+            json={"code": "builder-owned", "name": "其他开发者不可接管"},
+        )
+        assert blocked_reuse.status_code == 409
+
 
 def test_application_mutation_without_platform_permission_is_rejected() -> None:
     with application_client() as (client, db):
@@ -351,6 +394,17 @@ def test_product_release_scenario_version_and_application_runtime_are_linked() -
             "effect": "allow",
         })
         assert grant.status_code == 200, grant.text
+        assert client.delete(
+            f"/api/v1/applications/{application['id']}/grants/{grant.json()['id']}"
+        ).status_code == 200
+        restored_grant = client.post(f"/api/v1/applications/{application['id']}/grants", json={
+            "resource_type": "scenario",
+            "resource_id": scenario_id,
+            "permission": "invoke",
+            "effect": "allow",
+        })
+        assert restored_grant.status_code == 200, restored_grant.text
+        assert restored_grant.json()["id"] == grant.json()["id"]
         credential = client.post(f"/api/v1/applications/{application['id']}/credentials", json={
             "name": "运行凭据",
             "scopes": ["scenario.invoke"],

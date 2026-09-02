@@ -55,6 +55,8 @@ def main() -> int:
             "knowledge_index_enabled": True,
             "realtime_query_enabled": True,
             "graph_materialization_enabled": True,
+            "generic_semantic_extraction_enabled": False,
+            "database_profile_model_enabled": False,
         }
         sources = call("GET", "/sources")
         source = next((item for item in sources if item["name"] == "集团经营数据库（PostgreSQL）"), None)
@@ -97,6 +99,8 @@ def main() -> int:
             # acceptance dataset.  The MySQL replica remains available for
             # preview/query parity without publishing duplicate graph facts.
             "graph_materialization_enabled": False,
+            "generic_semantic_extraction_enabled": False,
+            "database_profile_model_enabled": False,
         }
         mysql_config.pop("schema", None)
         mysql_source = next((item for item in sources if item["name"] == "集团经营数据库（MySQL 灾备）"), None)
