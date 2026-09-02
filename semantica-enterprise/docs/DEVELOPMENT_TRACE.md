@@ -80,3 +80,20 @@ Ontology2SQL 锁定在 `ece05d1cc988d9bce602a7a9e1b73cd5767a860a`，用于严格
 - 无删卷重启后业务数据、映射、QueryRun、会话和 DSH Session 恢复。
 - 最终页面控制台 0 错误，核心服务日志无未处理异常。
 - 自动化和浏览器结果见 `STRUCTURED_QUERY_TEST_REPORT.md` 与 `BROWSER_TEST_REPORT.md`。
+
+## 2026-09-02 全业务平台回溯
+
+在 `codex/full-business-platform-validation` 分支上按集团真实使用顺序重新串联全部模块，没有推倒 Semantica、结构化语义层或 DSH 适配。
+
+主要增量：
+
+1. 建立集团组织、角色、空间、多模态资料、双方言经营数据库和固定标准答案。
+2. 验证并补齐数据库源生命周期、Schema 漂移、映射失效、图谱物化删除、人工治理回滚和应用反馈复测闭环。
+3. 为 REST、MCP 和 CLI 补齐结构化安全查询入口，三者仍只访问 FastAPI。
+4. 用确定性 Query Policy 区分文档说明、实时数值与混合问题；在 FastAPI 可信边界强制激活 Metric Contract。
+5. 把引用编号固化为检索片段/数据查询的不可变外键，并在回答完成前校验。
+6. 修复冷启动验收对额外测试容器的错误假设，并通过真实 Retry API 处理外部模型瞬时 429。
+7. 把审计日志从技术码、UUID、JSON 改造成中文业务视图，内部标识默认不展示。
+8. 更新静态资源版本指纹，避免部署新镜像后浏览器继续使用旧 JS/CSS。
+
+最终功能提交为 `95666ecb99b99678909b4b8a7e5995358220f533`。平台 229 项 Python 测试全部实际执行通过，DSH 16/16，Ontology2SQL 192 passed/8 xfailed；14 个验收容器全部健康。完整证据见 `FULL_PLATFORM_VALIDATION_20260902.md`。

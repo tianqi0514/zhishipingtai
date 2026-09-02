@@ -163,14 +163,14 @@ def main() -> None:
         {"title": "全栈冷启动持久化验收", "space_ids": [space["id"]], "top_k": 3},
     )
     conversation_id = conversation["id"]
-    first_events, first_attempts = complete_turn_with_retry(
-        token, conversation_id, "NexusOne 的主要定位是什么？"
-    )
-    before = request("GET", f"/conversations/{conversation_id}", token)
-    session_id = before["harness_session_id"]
-    message_count_before = len(before["messages"])
     stack_stopped = False
     try:
+        first_events, first_attempts = complete_turn_with_retry(
+            token, conversation_id, "NexusOne 的主要定位是什么？"
+        )
+        before = request("GET", f"/conversations/{conversation_id}", token)
+        session_id = before["harness_session_id"]
+        message_count_before = len(before["messages"])
         compose("stop", quiet=True)
         stack_stopped = True
         compose("start", quiet=True)

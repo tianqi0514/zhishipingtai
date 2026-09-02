@@ -120,6 +120,7 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [模型配置](docs/MODELS.md)
 - [REST、MCP、CLI](docs/INTEGRATIONS.md)
 - [测试报告](docs/TEST_REPORT.md)
+- [2026-09-02 国联集团知识底座全业务验收](docs/FULL_PLATFORM_VALIDATION_20260902.md)
 - [2026-09-01 清空重建与全链路验收](docs/ACCEPTANCE_REGRESSION_20260901.md)
 - [应用底座增强详细设计](docs/APPLICATION_FOUNDATION_DESIGN.md)
 - [应用底座 A0 实现与验收](docs/APPLICATION_FOUNDATION_IMPLEMENTATION.md)
