@@ -88,6 +88,65 @@ def _canonicalize_generated_plan(raw: Any) -> Any:
     return {**raw, "plan": plan}
 
 
+def _metric_filter_expression(required_filter: dict[str, Any], binding: str) -> dict[str, Any] | None:
+    attribute = {"kind": "attribute", "attribute_id": required_filter.get("attribute_id"), "binding": binding}
+    operator = required_filter.get("operator")
+    if operator in {"eq", "ne", "gt", "gte", "lt", "lte"}:
+        symbols = {"eq": "=", "ne": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+        return {"kind": "binary", "operator": symbols[operator], "left": attribute, "right": {"kind": "literal", "value": required_filter.get("value")}}
+    if operator == "between":
+        return {"kind": "between", "expression": attribute, "lower": {"kind": "literal", "value": required_filter.get("value")}, "upper": {"kind": "literal", "value": required_filter.get("upper")}}
+    if operator == "in" and isinstance(required_filter.get("value"), list):
+        return {"kind": "in", "expression": attribute, "options": [{"kind": "literal", "value": value} for value in required_filter["value"]]}
+    if operator in {"is_null", "is_not_null"}:
+        return {"kind": "is_null", "expression": attribute, "negated": operator == "is_not_null"}
+    return None
+
+
+def _apply_metric_contracts(raw: Any, version: SemanticMappingVersion) -> Any:
+    """Deterministically inject activated metric filters before strict validation.
+
+    The model selects business IDs, while the platform owns mandatory metric
+    population rules. Applying those rules here avoids a second model call for a
+    contract the model is not allowed to override and keeps all SQL generation in
+    the existing strict IR/compiler path.
+    """
+    if not isinstance(raw, dict) or not isinstance(raw.get("plan"), dict) or not isinstance(raw.get("query_ir"), dict):
+        return raw
+    plan, query_ir = dict(raw["plan"]), dict(raw["query_ir"])
+    attributes = {item.get("id"): item for item in (version.manifest or {}).get("attributes") or []}
+    bindings: dict[str, str] = {}
+    from_entity = query_ir.get("from_entity") or {}
+    if from_entity.get("entity_id") and from_entity.get("binding"):
+        bindings[from_entity["entity_id"]] = from_entity["binding"]
+    for join in query_ir.get("joins") or []:
+        if join.get("entity_id") and join.get("binding"):
+            bindings[join["entity_id"]] = join["binding"]
+    filters = list(plan.get("filters") or [])
+    where = query_ir.get("where")
+    evidence = list(plan.get("evidence_constraints") or [])
+    for output in plan.get("outputs") or []:
+        for attribute_id in output.get("attribute_ids") or []:
+            attribute = attributes.get(attribute_id) or {}
+            if attribute.get("default_aggregate") and not output.get("aggregate"):
+                output["aggregate"] = attribute["default_aggregate"]
+            definition = attribute.get("business_definition")
+            if definition and definition not in evidence:
+                evidence.append(definition)
+            for required_filter in attribute.get("required_filters") or []:
+                if any(all(candidate.get(key) == value for key, value in required_filter.items()) for candidate in filters):
+                    continue
+                filters.append(dict(required_filter))
+                binding = bindings.get(attribute.get("entity_id"))
+                predicate = _metric_filter_expression(required_filter, binding) if binding else None
+                if predicate:
+                    where = predicate if where is None else {"kind": "logical", "operator": "and", "operands": [where, predicate]}
+    plan["filters"] = filters
+    plan["evidence_constraints"] = evidence
+    query_ir["where"] = where
+    return {**raw, "plan": plan, "query_ir": query_ir}
+
+
 def semantic_catalog_for_planner(version: SemanticMappingVersion) -> dict[str, Any]:
     """Expose business IDs only; physical tables and columns stay server-side."""
     manifest = version.manifest or {}
@@ -106,8 +165,12 @@ def semantic_catalog_for_planner(version: SemanticMappingVersion) -> dict[str, A
             "id": item.get("id"),
             "entity_id": item.get("entity_id"),
             "label": item.get("label"),
+            "aliases": item.get("aliases") or [],
+            "business_definition": item.get("business_definition") or "",
             "data_type": item.get("data_type"),
             "aggregation": item.get("aggregation"),
+            "default_aggregate": item.get("default_aggregate"),
+            "required_filters": item.get("required_filters") or [],
         } for item in attributes],
         "relationships": [{
             "id": item.get("id"),
@@ -196,6 +259,7 @@ IR expression kind 可用 attribute/literal/aggregate/function/binary/logical/no
 属性表达式必须包含 attribute_id 与 binding；aggregate 使用 function、expression 和 distinct；普通 function 才使用 arguments；比较使用 binary 的 operator/left/right；过滤值使用 literal 的 value。
 同比、环比、比例、排名必须在 plan.calculation_steps 中明确计算步骤；简单汇总可以不填 calculation_steps。
 如果属性提供 allowed_values，Plan 和 IR 的过滤值必须使用其中的真实值；不要翻译或改写数据库枚举值。
+如果指标提供 default_aggregate、business_definition 或 required_filters，必须严格采用该业务口径；required_filters 必须同时写入 Plan filters 和 IR where，不能以用户未明确说明为由省略。
 严格 Schema：{json.dumps(schema_contract, ensure_ascii=False)}
 语义目录：{json.dumps(catalog, ensure_ascii=False)}
 用户问题：{question}"""
@@ -213,7 +277,7 @@ IR expression kind 可用 attribute/literal/aggregate/function/binary/logical/no
             value,
             temperature=_effective_temperature(model, temperature),
         )
-    raw = _canonicalize_generated_plan(generator(prompt))
+    raw = _apply_metric_contracts(_canonicalize_generated_plan(generator(prompt)), version)
     validation_error: Exception | None = None
     for attempt in range(2):
         if not isinstance(raw, dict) or not isinstance(raw.get("plan"), dict) or not isinstance(raw.get("query_ir"), dict):
@@ -238,7 +302,7 @@ IR expression kind 可用 attribute/literal/aggregate/function/binary/logical/no
 语义目录：{json.dumps(catalog, ensure_ascii=False)}
 原始问题：{question}
 必须使用 Schema 中的原字段名，删除所有 extra 字段。"""
-            raw = _canonicalize_generated_plan(generator(repair_prompt))
+            raw = _apply_metric_contracts(_canonicalize_generated_plan(generator(repair_prompt)), version)
     raise StructuredDataError(
         "SEMANTIC_PLANNER_INVALID",
         f"模型查询计划连续两次未通过严格 Schema：{validation_error}",
@@ -305,6 +369,19 @@ def validate_plan(plan: SemanticQueryPlan, version: SemanticMappingVersion) -> d
         errors.append("指标口径引用了计划外实体")
     if plan.metric_contract.base_relationship_ids and set(plan.metric_contract.base_relationship_ids) - set(plan.relationship_ids):
         errors.append("指标口径引用了计划外关系")
+    plan_filters = [item.model_dump() for item in plan.filters]
+    for output in plan.outputs:
+        for attribute_id in output.attribute_ids:
+            attribute = attributes.get(attribute_id) or {}
+            required_filters = attribute.get("required_filters") or []
+            if not attribute.get("is_measure") and not required_filters:
+                continue
+            default_aggregate = attribute.get("default_aggregate")
+            if default_aggregate and output.aggregate != default_aggregate:
+                errors.append(f"指标 {attribute.get('label') or attribute_id} 必须使用 {default_aggregate} 聚合")
+            for required_filter in required_filters:
+                if not any(all(candidate.get(key) == value for key, value in required_filter.items()) for candidate in plan_filters):
+                    errors.append(f"指标 {attribute.get('label') or attribute_id} 缺少固定口径筛选：{required_filter.get('attribute_id')}")
     complex_terms = ("同比", "环比", "增长", "差值", "比例", "百分比", "排名", "top")
     if any(term in f"{plan.original_question} {plan.intent}".casefold() for term in complex_terms) and not plan.calculation_steps:
         errors.append("同比、环比、比例、排名或多阶段计算必须声明计算步骤")
@@ -356,6 +433,32 @@ def _walk_ir_nodes(ir: SemanticQueryIR) -> Iterable[SemanticQueryIR]:
             yield from _walk_ir_nodes(expression.query)
 
 
+def _ir_filter_signatures(expression: QueryExpression | None) -> list[dict[str, Any]]:
+    """Return simple, auditable predicates used to prove Plan filters reached SQL IR."""
+    if expression is None:
+        return []
+    if expression.kind == "logical":
+        return [item for operand in expression.operands for item in _ir_filter_signatures(operand)]
+    if expression.kind == "not":
+        return _ir_filter_signatures(expression.expression)
+    if expression.kind == "binary" and expression.left and expression.right:
+        left, right = expression.left, expression.right
+        if left.kind == "literal" and right.kind == "attribute":
+            left, right = right, left
+        operators = {"=": "eq", "!=": "ne", "<>": "ne", ">": "gt", ">=": "gte", "<": "lt", "<=": "lte"}
+        if left.kind == "attribute" and right.kind == "literal" and expression.operator in operators:
+            return [{"attribute_id": left.attribute_id, "operator": operators[expression.operator], "value": right.value, "upper": None}]
+    if expression.kind == "between" and expression.expression and expression.lower and expression.upper:
+        if expression.expression.kind == "attribute" and expression.lower.kind == "literal" and expression.upper.kind == "literal":
+            return [{"attribute_id": expression.expression.attribute_id, "operator": "between", "value": expression.lower.value, "upper": expression.upper.value}]
+    if expression.kind == "in" and expression.expression and expression.expression.kind == "attribute" and expression.options:
+        if all(option.kind == "literal" for option in expression.options):
+            return [{"attribute_id": expression.expression.attribute_id, "operator": "in", "value": [option.value for option in expression.options], "upper": None}]
+    if expression.kind == "is_null" and expression.expression and expression.expression.kind == "attribute":
+        return [{"attribute_id": expression.expression.attribute_id, "operator": "is_not_null" if expression.negated else "is_null", "value": None, "upper": None}]
+    return []
+
+
 def validate_ir(ir: SemanticQueryIR, plan: SemanticQueryPlan, version: SemanticMappingVersion) -> dict[str, Any]:
     plan_report = validate_plan(plan, version)
     errors = list(plan_report["errors"])
@@ -389,6 +492,11 @@ def validate_ir(ir: SemanticQueryIR, plan: SemanticQueryPlan, version: SemanticM
                 errors.append(f"不同查询作用域重复使用了含义冲突的实体绑定：{binding}")
             binding_entities[binding] = entity_id
     allowed_attributes = _plan_attribute_ids(plan)
+    ir_filters = [item for scope in _walk_ir_nodes(ir) for item in _ir_filter_signatures(scope.where)]
+    for planned_filter in plan.filters:
+        expected = planned_filter.model_dump()
+        if not any(all(candidate.get(key) == value for key, value in expected.items()) for candidate in ir_filters):
+            errors.append(f"IR 缺少查询计划声明的筛选：{planned_filter.attribute_id}")
     for expression in _walk_ir_expressions(ir):
         if expression.kind == "attribute":
             attribute = attributes.get(str(expression.attribute_id))

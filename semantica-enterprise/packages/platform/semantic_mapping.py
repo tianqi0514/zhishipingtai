@@ -172,6 +172,7 @@ def validate_mapping_manifest(
             elif not set(fragment.identity_column_ids).issubset(object_columns):
                 errors.append(f"实体 {entity.label} 的身份字段越出数据表范围")
 
+    attributes = {item.id: item for item in manifest.attributes}
     for attribute in manifest.attributes:
         entity = entities.get(attribute.entity_id)
         term = terms.get(attribute.ontology_term_id)
@@ -188,6 +189,16 @@ def validate_mapping_manifest(
             errors.append(f"属性字段不存在：{attribute.column_id}")
         elif catalog_columns[attribute.column_id][0]["id"] != found[1].object_id:
             errors.append(f"属性字段不属于绑定的数据片段：{attribute.column_id}")
+        if attribute.required_filters and not attribute.is_measure:
+            errors.append(f"非指标属性不能配置固定统计口径：{attribute.label}")
+        if attribute.default_aggregate and not attribute.is_measure:
+            errors.append(f"非指标属性不能配置默认聚合：{attribute.label}")
+        for required_filter in attribute.required_filters:
+            filter_attribute = attributes.get(required_filter.attribute_id)
+            if filter_attribute is None:
+                errors.append(f"指标 {attribute.label} 的固定口径引用了未知属性：{required_filter.attribute_id}")
+            elif filter_attribute.entity_id != attribute.entity_id:
+                errors.append(f"指标 {attribute.label} 的固定口径字段必须属于同一业务实体")
 
     for relationship in manifest.relationships:
         term = terms.get(relationship.ontology_term_id)
@@ -205,7 +216,9 @@ def validate_mapping_manifest(
             if left and right and left[1].get("type_family") != right[1].get("type_family"):
                 warnings.append(f"关系字段类型不同，请确认 Join 语义：{predicate.left.column_id} ↔ {predicate.right.column_id}")
 
-    sealed_hash = fingerprint(manifest.model_dump())
+    # Hash the exact persisted payload. New optional contract fields must not
+    # make a previously sealed version appear tampered with after an upgrade.
+    sealed_hash = fingerprint(version.manifest)
     if sealed_hash != version.mapping_hash:
         errors.append("映射内容哈希校验失败")
     return {

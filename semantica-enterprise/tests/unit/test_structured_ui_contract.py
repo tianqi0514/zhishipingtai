@@ -69,6 +69,20 @@ def test_database_workbench_prevents_page_level_wide_table_overflow() -> None:
     assert ".db-data-grid" in STYLE
     assert "width:max-content" in STYLE
     assert "position:sticky" in STYLE
+    assert ".db-source-tabs button{width:auto" in STYLE
+
+
+def test_unknown_database_row_estimates_are_not_presented_as_empty_tables() -> None:
+    assert "dbRowEstimateLabel" in WORKBENCH
+    assert "行数待统计" in WORKBENCH
+    assert "总行数待统计" in WORKBENCH
+
+
+def test_metric_contract_is_visible_and_editable_in_the_mapping_workbench() -> None:
+    assert "业务统计口径" in WORKBENCH
+    assert "固定口径筛选" in WORKBENCH
+    assert "default_aggregate" in WORKBENCH
+    assert "required_filters" in WORKBENCH
 
 
 def test_running_message_and_inspector_share_the_real_turn_timer() -> None:

@@ -147,3 +147,8 @@ dialog{border-radius:var(--dialog-radius)}
 .technical-details summary{color:#5d6c78;font-size:11px;cursor:pointer}.technical-details pre{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 .technical-details small{display:block;color:var(--muted);overflow-wrap:anywhere}.null-value{color:#98a1aa;font-style:italic}
 .db-column-head{display:inline-flex;align-items:center;gap:5px}.db-column-head .db-column-detail:hover{color:var(--brand);text-decoration:underline}.db-column-head .db-column-sort{width:18px;height:18px;border-radius:5px;color:#89929d;font-size:11px}.db-column-head .db-column-sort:hover{background:#e9eef8;color:var(--brand)}
+
+/* Database tabs are a local nav, not the application sidebar. Reset the
+   global `nav button { width:100% }` rule so all workflow steps stay visible. */
+.db-source-tabs{min-height:0;flex:none;margin:0;padding:0;overflow-x:auto;overflow-y:hidden}
+.db-source-tabs button{width:auto;display:inline-block;flex:none;margin:0;text-align:center;white-space:nowrap}

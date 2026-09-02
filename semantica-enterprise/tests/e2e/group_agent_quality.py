@@ -164,6 +164,15 @@ def run_conversation(
 def main() -> int:
     platform = Platform()
     spaces = {row["code"]: row["id"] for row in platform.call("GET", "/spaces")}
+    acceptance_titles = {
+        "国联验收 A｜NexusOne 产品知识",
+        "国联验收 B｜制度与经营数据",
+        "国联验收 C｜供应商风险",
+        "国联验收 D｜证据不足",
+    }
+    for conversation in platform.call("GET", "/conversations").get("items", []):
+        if conversation.get("title") in acceptance_titles:
+            platform.call("DELETE", f"/conversations/{conversation['id']}")
     results = [
         run_conversation(
             platform,
@@ -184,7 +193,9 @@ def main() -> int:
             turns=[
                 ("2026 年已完成订单销售总额是多少？", numeric_answer("910000", "91万元")),
                 ("其中华东是多少？", numeric_answer("300000", "30万元")),
-                ("与 2025 年相比增长率是多少？", numeric_answer("355%", "355.0%")),
+                # “其中华东” narrows the conversational scope, so this
+                # follow-up must compare East China rather than group totals.
+                ("与 2025 年相比增长率是多少？", numeric_answer("50%", "50.0%")),
                 ("这个统计口径依据哪份制度？", answer_has("集团经营指标口径", "统计口径")),
             ],
             required_tools={"structured_execute_query", "knowledge_search"},

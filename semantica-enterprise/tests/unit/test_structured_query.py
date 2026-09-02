@@ -114,6 +114,76 @@ def test_ir_rejects_unlisted_function_and_sql_extension() -> None:
         })
 
 
+def test_ir_must_implement_every_filter_declared_by_the_plan() -> None:
+    _, _, version, plan, ir = _context()
+    report = validate_ir(ir.model_copy(update={"where": None}), plan, version)
+    assert report["ok"] is False
+    assert any("IR 缺少查询计划声明的筛选" in item for item in report["errors"])
+
+
+def test_measure_contract_enforces_default_aggregate_and_fixed_filters() -> None:
+    _, _, version, plan, ir = _context()
+    manifest = version.manifest.copy()
+    manifest["attributes"] = [dict(item) for item in manifest["attributes"]]
+    manifest["attributes"][0].update({
+        "is_measure": True,
+        "label": "销售额",
+        "default_aggregate": "sum",
+        "required_filters": [{"attribute_id": "sale-year", "operator": "eq", "value": 2026}],
+    })
+    version.manifest = manifest
+
+    missing_filter = plan.model_copy(update={"filters": []})
+    report = validate_ir(ir.model_copy(update={"where": None}), missing_filter, version)
+    assert report["ok"] is False
+    assert any("缺少固定口径筛选" in item for item in report["errors"])
+
+    wrong_aggregate = plan.model_copy(update={
+        "outputs": [plan.outputs[0].model_copy(update={"aggregate": "average"})],
+    })
+    report = validate_ir(ir, wrong_aggregate, version)
+    assert report["ok"] is False
+    assert any("必须使用 sum 聚合" in item for item in report["errors"])
+
+    assert validate_ir(ir, plan, version)["ok"] is True
+
+
+def test_model_planner_deterministically_applies_activated_metric_contract() -> None:
+    _, _, version, plan, ir = _context()
+    manifest = version.manifest.copy()
+    manifest["attributes"] = [dict(item) for item in manifest["attributes"]]
+    manifest["attributes"][0].update({
+        "is_measure": True,
+        "label": "销售额",
+        "default_aggregate": "sum",
+        "business_definition": "仅统计 2026 年有效销售记录",
+        "required_filters": [{"attribute_id": "sale-year", "operator": "eq", "value": 2026}],
+    })
+    version.manifest = manifest
+    raw_plan = plan.model_copy(update={"filters": [], "evidence_constraints": []}).model_dump()
+    raw_ir = ir.model_copy(update={"where": None}).model_dump()
+    calls = 0
+
+    def generator(_prompt: str):
+        nonlocal calls
+        calls += 1
+        return {"plan": raw_plan, "query_ir": raw_ir}
+
+    generated_plan, generated_ir = generate_semantic_plan_ir(
+        plan.original_question,
+        version,
+        api_key="not-used",
+        model="fixture-model",
+        base_url=None,
+        generator=generator,
+    )
+
+    assert calls == 1
+    assert generated_plan.filters[0].attribute_id == "sale-year"
+    assert "仅统计 2026 年有效销售记录" in generated_plan.evidence_constraints
+    assert validate_ir(generated_ir, generated_plan, version)["ok"] is True
+
+
 def test_model_planner_repairs_an_invalid_first_response_without_relaxing_schema() -> None:
     _, _, version, expected_plan, expected_ir = _context()
     responses = iter([

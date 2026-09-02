@@ -267,6 +267,13 @@ def discover_catalog(source: SourceConnector) -> dict[str, Any]:
                 except Exception:
                     indexes = []
                 sample_rows = _sample_rows(engine, schema, name) if bool(config.get("schema_sample_values", True)) else []
+                row_estimate = estimates.get((schema or database, name))
+                # PostgreSQL exposes reltuples=0 until ANALYZE has collected statistics.
+                # A successful sample proves that such a zero is an unknown estimate,
+                # not an empty table.  Keep true empty tables at zero while preventing
+                # the UI and API consumers from reporting populated tables as empty.
+                if row_estimate == 0 and sample_rows:
+                    row_estimate = None
                 column_rows = []
                 for column in columns:
                     sensitivity, rule = sensitive_suggestion(str(column["name"]))
@@ -290,7 +297,7 @@ def discover_catalog(source: SourceConnector) -> dict[str, Any]:
                     "name": name,
                     "kind": kind,
                     "comment": _safe_comment(inspector, schema, name),
-                    "row_estimate": estimates.get((schema or database, name)),
+                    "row_estimate": row_estimate,
                     "columns": column_rows,
                     "primary_key": primary_key,
                     "unique_constraints": [

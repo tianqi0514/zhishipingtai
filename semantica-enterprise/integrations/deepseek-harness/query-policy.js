@@ -22,9 +22,22 @@ const DOCUMENT_EVIDENCE_PATTERNS = [
   /(?:口径|依据|制度|规定|定义|说明|手册|合同|条款|政策|文档)/u,
 ]
 
+const EXPLICIT_METRIC_VALUE_PATTERNS = [
+  /(?:多少|金额|总额|数量|销量|销售额|排名|最高|最低|平均|合计|同比|环比|增长率|完成率|top\s*\d*|前\s*\d+|实时状态)/iu,
+  /(?:sum|count|average|ranking|year[- ]over[- ]year|month[- ]over[- ]month)/iu,
+]
+
 export function requiresStructuredQuery(input) {
   const query = String(input || '').trim()
   if (!query || !requiresKnowledgeSearch(query)) return false
+  // A follow-up such as “这个统计口径依据哪份制度” asks for the
+  // documentary definition of an already computed metric.  The word “统计”
+  // alone must not trigger another database plan; explicit value/calculation
+  // terms still make a mixed question require both evidence channels.
+  if (
+    DOCUMENT_EVIDENCE_PATTERNS.some(pattern => pattern.test(query))
+    && !EXPLICIT_METRIC_VALUE_PATTERNS.some(pattern => pattern.test(query))
+  ) return false
   return STRUCTURED_QUERY_PATTERNS.some(pattern => pattern.test(query))
 }
 

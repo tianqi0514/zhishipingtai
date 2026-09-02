@@ -96,6 +96,13 @@ class SemanticEntityMapping(StrictModel):
         return self
 
 
+class SemanticMetricFilter(StrictModel):
+    attribute_id: str = Field(min_length=1, max_length=100)
+    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "between", "in", "is_null", "is_not_null"]
+    value: Any = None
+    upper: Any = None
+
+
 class SemanticAttributeMapping(StrictModel):
     id: str = Field(min_length=1, max_length=100)
     ontology_term_id: str = Field(min_length=1)
@@ -107,6 +114,10 @@ class SemanticAttributeMapping(StrictModel):
         "string", "integer", "number", "boolean", "date", "datetime", "json", "unknown"
     ] = "unknown"
     is_measure: bool = False
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    business_definition: str = Field(default="", max_length=2000)
+    default_aggregate: Literal["count", "sum", "average", "min", "max"] | None = None
+    required_filters: list[SemanticMetricFilter] = Field(default_factory=list, max_length=10)
     confidence: float = Field(default=1.0, ge=0, le=1)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
 

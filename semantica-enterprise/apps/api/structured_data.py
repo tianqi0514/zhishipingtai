@@ -786,6 +786,13 @@ def natural_language_structured_query(
         )
     except StructuredDataError as exc:
         _raise_structured(exc)
+    except Exception as exc:
+        # Model/network failures are an external dependency outage, not an
+        # unhandled platform error. Keep the response actionable and secret-free.
+        raise HTTPException(504, {
+            "code": "SEMANTIC_PLANNER_UNAVAILABLE",
+            "message": "语义查询规划暂时不可用，请稍后重试",
+        }) from exc
     report = validate_ir(query_ir, plan, version)
     if not report["ok"]:
         raise HTTPException(422, {"code": "SEMANTIC_QUERY_INVALID", "message": "生成的查询未通过确定性校验", "validation": report})

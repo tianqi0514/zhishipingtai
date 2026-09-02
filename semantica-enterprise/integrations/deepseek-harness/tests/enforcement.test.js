@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { apply } from '../index.js'
+import { evidenceRequirements } from '../query-policy.js'
 
 
 function fixture() {
@@ -124,6 +125,18 @@ test('mixed metric definition questions require both evidence channels', () => {
   listeners.get('agent/turn-stopping')({ agent, turn: 5, signal: new AbortController().signal })
   assert.equal(steered.length, 1)
   assert.match(steered[0].content[0].text, /knowledge_search/)
+})
+
+
+test('documentary follow-ups do not repeat an already completed metric query', () => {
+  assert.deepEqual(
+    evidenceRequirements('这个统计口径依据哪份制度？'),
+    ['knowledge_search'],
+  )
+  assert.deepEqual(
+    evidenceRequirements('销售额是多少，统计口径依据哪份制度？'),
+    ['knowledge_search', 'structured_execute_query'],
+  )
 })
 
 

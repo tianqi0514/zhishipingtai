@@ -235,6 +235,12 @@ def main() -> int:
             "label": terms[term_code]["label"],
             "semantic_type": semantic_type,
             "is_measure": is_measure,
+            **({
+                "aliases": ["销售总额", "销售收入"],
+                "business_definition": "销售额仅统计状态为 completed 的有效订单，不包含 cancelled 订单。",
+                "default_aggregate": "sum",
+                "required_filters": [{"attribute_id": "order-status", "operator": "eq", "value": "completed"}],
+            } if attribute_id == "order-sales" else {}),
         } for attribute_id, (term_code, entity_id, table_name, column_name, semantic_type, is_measure) in attribute_specs.items()]
 
         relation_specs = [

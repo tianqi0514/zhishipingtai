@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from pydantic import ValidationError
 from sqlalchemy import create_engine
@@ -89,9 +91,11 @@ class SourceSafetyTest(unittest.TestCase):
         self.assertTrue(filename.endswith(".json"))
 
     def test_only_server_allowlisted_private_source_name_is_accepted(self) -> None:
-        _assert_network_target("source-fixture")
-        with self.assertRaisesRegex(ValueError, "私有或保留地址"):
-            _assert_network_target("127.0.0.1")
+        settings = SimpleNamespace(source_private_host_allowlist="source-fixture")
+        with patch("packages.semantica_adapter.ingest.get_settings", return_value=settings):
+            _assert_network_target("source-fixture")
+            with self.assertRaisesRegex(ValueError, "私有或保留地址"):
+                _assert_network_target("127.0.0.1")
 
     def test_admin_cannot_access_space_from_another_tenant(self) -> None:
         engine = create_engine("sqlite:///:memory:")
