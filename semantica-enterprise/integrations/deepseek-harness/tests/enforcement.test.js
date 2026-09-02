@@ -47,7 +47,7 @@ test('registers typed knowledge tools and turn enforcement', () => {
 
 
 test('structured execute schema is aligned with the strict platform Plan and IR contracts', () => {
-  const { tools } = fixture()
+  const { tools, sections } = fixture()
   const tool = tools.find(item => item.name === 'structured_execute_query')
   const plan = tool.parameters.properties.semantic_query_plan
   const ir = tool.parameters.properties.query_ir
@@ -59,6 +59,12 @@ test('structured execute schema is aligned with the strict platform Plan and IR 
   assert.equal(ir.properties.select.items.properties.expression.properties.arguments.type, 'array')
   assert.equal(ir.properties.where.oneOf, undefined)
   assert.equal(ir.properties.having.oneOf, undefined)
+  assert.match(sections[0].text, /成功后必须直接使用该结果/)
+  assert.match(sections[0].text, /引用编号是不可重排的片段外键/)
+  assert.match(sections[0].text, /重新调用 structured_schema_search/)
+  assert.match(tools.find(item => item.name === 'knowledge_search').description, /citation_label/)
+  assert.match(tools.find(item => item.name === 'structured_get_object').description, /required_filters/)
+  assert.match(tool.description, /固定筛选同时写入 Plan filters 和 IR where/)
 })
 
 
@@ -131,6 +137,10 @@ test('mixed metric definition questions require both evidence channels', () => {
 test('documentary follow-ups do not repeat an already completed metric query', () => {
   assert.deepEqual(
     evidenceRequirements('这个统计口径依据哪份制度？'),
+    ['knowledge_search'],
+  )
+  assert.deepEqual(
+    evidenceRequirements('销售额统计口径依据哪份制度？'),
     ['knowledge_search'],
   )
   assert.deepEqual(

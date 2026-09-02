@@ -4,10 +4,13 @@ import pytest
 from pydantic import ValidationError
 
 from apps.api.structured_schemas import SemanticQueryIR, SemanticQueryPlan
+from apps.api.agent_internal import _agent_citation_contract
 from packages.platform.models import DataSourceSchemaVersion, SemanticMappingVersion, SourceConnector
 from packages.platform.structured_query import (
+    apply_activated_metric_contracts,
     compile_structured_query,
     generate_semantic_plan_ir,
+    semantic_catalog_for_planner,
     validate_ir,
     validate_plan,
 )
@@ -97,6 +100,20 @@ def test_plan_rejects_unknown_semantic_objects() -> None:
     assert any("未知业务实体" in item for item in report["errors"])
 
 
+def test_agent_search_citation_labels_are_immutable_rank_foreign_keys() -> None:
+    result = _agent_citation_contract({
+        "query_id": "query",
+        "items": [
+            {"rank": 1, "title": "治理办法", "chunk_id": "c1"},
+            {"rank": 2, "title": "经营指标口径", "chunk_id": "c2"},
+        ],
+    })
+    assert result["citation_policy"]["immutable"] is True
+    assert result["items"][1]["citation_label"] == "[2]"
+    assert result["items"][1]["citation_title"] == "经营指标口径"
+    assert "不得重新编号" in result["items"][1]["citation_rule"]
+
+
 def test_ir_rejects_unlisted_function_and_sql_extension() -> None:
     _, _, version, plan, ir = _context()
     invalid = SemanticQueryIR.model_validate({**ir.model_dump(),
@@ -182,6 +199,39 @@ def test_model_planner_deterministically_applies_activated_metric_contract() -> 
     assert generated_plan.filters[0].attribute_id == "sale-year"
     assert "仅统计 2026 年有效销售记录" in generated_plan.evidence_constraints
     assert validate_ir(generated_ir, generated_plan, version)["ok"] is True
+
+
+def test_agent_boundary_reapplies_metric_contract_without_physical_identifiers() -> None:
+    _, _, version, plan, ir = _context()
+    manifest = version.manifest.copy()
+    manifest["attributes"] = [dict(item) for item in manifest["attributes"]]
+    manifest["attributes"][0].update({
+        "is_measure": True,
+        "label": "销售额",
+        "default_aggregate": "sum",
+        "business_definition": "仅统计已完成订单",
+        "required_filters": [{"attribute_id": "sale-year", "operator": "eq", "value": 2026}],
+    })
+    version.manifest = manifest
+
+    effective_plan, effective_ir = apply_activated_metric_contracts(
+        plan.model_copy(update={"filters": [], "evidence_constraints": []}),
+        ir.model_copy(update={"where": None}),
+        version,
+    )
+
+    assert effective_plan.filters[0].attribute_id == "sale-year"
+    assert "仅统计已完成订单" in effective_plan.evidence_constraints
+    assert validate_ir(effective_ir, effective_plan, version)["ok"] is True
+
+    safe_catalog = semantic_catalog_for_planner(version)
+    serialized = str(safe_catalog)
+    assert "column_id" not in serialized
+    assert "fragment_id" not in serialized
+    assert "object_id" not in serialized
+    metric = next(item for item in safe_catalog["attributes"] if item["id"] == "sale-amount")
+    assert metric["business_definition"] == "仅统计已完成订单"
+    assert metric["required_filters"][0]["attribute_id"] == "sale-year"
 
 
 def test_model_planner_repairs_an_invalid_first_response_without_relaxing_schema() -> None:

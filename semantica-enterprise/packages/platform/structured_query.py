@@ -147,6 +147,28 @@ def _apply_metric_contracts(raw: Any, version: SemanticMappingVersion) -> Any:
     return {**raw, "plan": plan, "query_ir": query_ir}
 
 
+def apply_activated_metric_contracts(
+    plan: SemanticQueryPlan,
+    query_ir: SemanticQueryIR,
+    version: SemanticMappingVersion,
+) -> tuple[SemanticQueryPlan, SemanticQueryIR]:
+    """Apply the server-owned metric population rules to a typed query.
+
+    Agent clients are still required to submit a strict Plan and IR, but fixed
+    business filters belong to the activated mapping rather than to the model.
+    Re-applying them at the trusted API boundary prevents omission or override
+    without accepting physical identifiers or raw SQL from the caller.
+    """
+    normalized = _apply_metric_contracts(
+        {"plan": plan.model_dump(), "query_ir": query_ir.model_dump()},
+        version,
+    )
+    return (
+        SemanticQueryPlan.model_validate(normalized["plan"]),
+        SemanticQueryIR.model_validate(normalized["query_ir"]),
+    )
+
+
 def semantic_catalog_for_planner(version: SemanticMappingVersion) -> dict[str, Any]:
     """Expose business IDs only; physical tables and columns stay server-side."""
     manifest = version.manifest or {}
@@ -165,9 +187,12 @@ def semantic_catalog_for_planner(version: SemanticMappingVersion) -> dict[str, A
             "id": item.get("id"),
             "entity_id": item.get("entity_id"),
             "label": item.get("label"),
+            "description": item.get("description") or "",
             "aliases": item.get("aliases") or [],
             "business_definition": item.get("business_definition") or "",
             "data_type": item.get("data_type"),
+            "semantic_type": item.get("semantic_type"),
+            "is_measure": bool(item.get("is_measure")),
             "aggregation": item.get("aggregation"),
             "default_aggregate": item.get("default_aggregate"),
             "required_filters": item.get("required_filters") or [],

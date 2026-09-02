@@ -57,6 +57,10 @@ from packages.platform.structured_data import (
     get_or_create_preview_policy,
     inspect_distinct_values,
 )
+from packages.platform.structured_query import (
+    apply_activated_metric_contracts,
+    semantic_catalog_for_planner,
+)
 from packages.platform.security import (
     create_agent_access_token,
     decode_agent_access_token,
@@ -71,6 +75,26 @@ router = APIRouter(prefix="/internal/agent", tags=["agent-internal"])
 
 def _active(model):
     return model.deleted_at.is_(None)
+
+
+def _agent_citation_contract(result: dict[str, Any]) -> dict[str, Any]:
+    """Attach immutable citation labels to ranked knowledge-tool results."""
+    contracted = dict(result)
+    contracted_items = []
+    for raw_item in result.get("items") or []:
+        item = dict(raw_item)
+        rank = int(item.get("rank") or 0)
+        item["citation_number"] = rank
+        item["citation_label"] = f"[{rank}]"
+        item["citation_title"] = item.get("title") or ""
+        item["citation_rule"] = "引用本片段时必须原样使用 citation_label，不得重新编号"
+        contracted_items.append(item)
+    contracted["items"] = contracted_items
+    contracted["citation_policy"] = {
+        "immutable": True,
+        "instruction": "引用编号是片段外键；只能复制 item.citation_label，不得按采用顺序重新编号",
+    }
+    return contracted
 
 
 def _service_authenticated(x_agent_service_secret: str | None = Header(default=None)) -> None:
@@ -278,7 +302,7 @@ def agent_knowledge_search(
         audit_action="agent.knowledge.search",
     )
     db.commit()
-    return result
+    return _agent_citation_contract(result)
 
 
 @router.get("/knowledge/fragments/{chunk_id}")
@@ -671,6 +695,8 @@ def agent_structured_schema_search(
         mapping_set = db.get(SemanticMappingSet, version.mapping_set_id)
         if mapping_set is None or mapping_set.active_version_id != version.id:
             continue
+        source = db.get(SourceConnector, version.source_id)
+        space = db.get(KnowledgeSpace, version.space_id)
         manifest = version.manifest or {}
         attributes_by_entity: dict[str, list[dict[str, Any]]] = {}
         for attribute in manifest.get("attributes") or []:
@@ -682,12 +708,22 @@ def agent_structured_schema_search(
                 item for item in relationships
                 if entity["id"] in {item.get("from_entity_id"), item.get("to_entity_id")}
             ]
-            searchable = " ".join([
+            searchable_terms = [
                 entity.get("id", ""), entity.get("label", ""), entity.get("description", ""),
                 *(item.get("label", "") for item in attributes),
                 *(item.get("label", "") for item in related),
-            ]).casefold()
-            score = 1.0 if query in searchable else sum(token in searchable for token in query.split()) / max(1, len(query.split()))
+                source.name if source else "",
+                space.name if space else "",
+            ]
+            searchable = " ".join(searchable_terms).casefold()
+            query_tokens = [token for token in query.split() if token]
+            token_score = sum(token in searchable for token in query_tokens) / max(1, len(query_tokens))
+            label_matches = sum(
+                bool(term and len(term.strip()) >= 2 and term.casefold() in query)
+                for term in searchable_terms
+            )
+            label_score = min(1.0, label_matches / 2)
+            score = 1.0 if query in searchable else max(token_score, label_score)
             if score <= 0:
                 continue
             items.append({
@@ -698,7 +734,16 @@ def agent_structured_schema_search(
                 "relationship_ids": [item["id"] for item in related],
                 "mapping_version_id": version.id,
                 "source_id": version.source_id,
+                "source_name": source.name if source else None,
                 "space_id": version.space_id,
+                "space_name": space.name if space else None,
+                "metric_attributes": [{
+                    "attribute_id": item.get("id"),
+                    "label": item.get("label"),
+                    "business_definition": item.get("business_definition") or "",
+                    "default_aggregate": item.get("default_aggregate"),
+                    "required_filters": item.get("required_filters") or [],
+                } for item in attributes if item.get("is_measure")],
                 "score": round(float(score), 4),
             })
     items.sort(key=lambda item: (item["score"], item.get("label") or ""), reverse=True)
@@ -721,13 +766,13 @@ def agent_structured_get_object(
 ):
     _require_conversation(claims, payload.conversation_id)
     _, version, source, schema = _agent_mapping_version(db, claims, payload.mapping_version_id)
-    manifest = version.manifest or {}
-    entity = next((item for item in manifest.get("entities") or [] if item.get("id") == payload.semantic_object_id), None)
+    catalog = semantic_catalog_for_planner(version)
+    entity = next((item for item in catalog["entities"] if item.get("id") == payload.semantic_object_id), None)
     if entity is None:
         raise HTTPException(404, "业务对象不存在")
-    attributes = [item for item in manifest.get("attributes") or [] if item.get("entity_id") == entity["id"]]
+    attributes = [item for item in catalog["attributes"] if item.get("entity_id") == entity["id"]]
     relationships = [
-        item for item in manifest.get("relationships") or []
+        item for item in catalog["relationships"]
         if entity["id"] in {item.get("from_entity_id"), item.get("to_entity_id")}
     ]
     return {
@@ -776,6 +821,8 @@ def agent_structured_get_object(
             },
             "rules": [
                 "只能引用本响应中的语义 ID",
+                "指标的 default_aggregate 和 required_filters 属于已激活业务口径，必须采用",
+                "required_filters 必须同时出现在 Plan filters 和 IR where；平台会在执行边界再次强制应用",
                 "比较表达式使用 kind=binary 和 SQL 白名单运算符",
                 "可选字段没有值时省略，不要传 null",
             ],
@@ -891,11 +938,17 @@ def agent_structured_execute(
         raise HTTPException(403, "会话用户不可用")
     from apps.api.structured_data import execute_structured_query_api
 
+    effective_plan, effective_ir = apply_activated_metric_contracts(
+        payload.semantic_query_plan,
+        payload.query_ir,
+        version,
+    )
+
     return execute_structured_query_api(
         payload=StructuredExecuteRequest(
             mapping_version_id=payload.mapping_version_id,
-            plan=payload.semantic_query_plan,
-            query_ir=payload.query_ir,
+            plan=effective_plan,
+            query_ir=effective_ir,
             max_rows=payload.max_rows,
             conversation_id=payload.conversation_id,
         ),

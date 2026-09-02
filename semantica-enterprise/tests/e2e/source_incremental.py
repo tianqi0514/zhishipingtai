@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 API = os.getenv("API_BASE", "http://127.0.0.1:8080/api/v1").rstrip("/")
 USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123456")
+SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
 IMAGE = os.getenv("APP_IMAGE", "semantica-enterprise:0.10.0")
 VOLUME = os.getenv("APPLICATION_DATA_VOLUME", "semantica-enterprise_application-data")
 
@@ -90,9 +91,9 @@ def wait_process_job(token: str, version_id: str, timeout: int = 900) -> dict:
 def main() -> int:
     token = login()
     spaces = request("GET", "/spaces", token)
-    selected = next((item for item in spaces if item.get("code") == "m10-acceptance"), None)
+    selected = next((item for item in spaces if item.get("code") == SPACE_CODE), None)
     if selected is None:
-        raise AssertionError("缺少 m10-acceptance 验收知识空间")
+        raise AssertionError(f"缺少 {SPACE_CODE} 验收知识空间")
     relative = f"incremental-{secrets.token_hex(5)}"
     source_id: str | None = None
     document_id: str | None = None

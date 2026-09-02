@@ -22,6 +22,21 @@ const DOCUMENT_EVIDENCE_PATTERNS = [
   /(?:口径|依据|制度|规定|定义|说明|手册|合同|条款|政策|文档)/u,
 ]
 
+// Questions in this shape ask where a metric is defined, not for a live
+// metric value.  Keep these phrases separate from generic metric nouns such
+// as “销售额”, which may legitimately appear in a document-only question.
+const DOCUMENT_ONLY_QUESTION_PATTERNS = [
+  /(?:哪份|哪个|什么)(?:制度|规定|文件|文档|依据|条款)/u,
+  /(?:口径|定义)(?:是什么|依据|出自|来自)/u,
+  /(?:如何|怎么)(?:定义|规定)/u,
+  /(?:统计口径|指标定义).*(?:制度|依据|规定|文件|文档)/u,
+]
+
+const QUANTITATIVE_REQUEST_PATTERNS = [
+  /(?:多少|为多少|是多少|金额|总额|数量|销量|排名|最高|最低|平均|合计|同比|环比|增长率|完成率|top\s*\d*|前\s*\d+|实时状态|计算|汇总|求和)/iu,
+  /(?:sum|count|average|ranking|year[- ]over[- ]year|month[- ]over[- ]month)/iu,
+]
+
 const EXPLICIT_METRIC_VALUE_PATTERNS = [
   /(?:多少|金额|总额|数量|销量|销售额|排名|最高|最低|平均|合计|同比|环比|增长率|完成率|top\s*\d*|前\s*\d+|实时状态)/iu,
   /(?:sum|count|average|ranking|year[- ]over[- ]year|month[- ]over[- ]month)/iu,
@@ -30,12 +45,15 @@ const EXPLICIT_METRIC_VALUE_PATTERNS = [
 export function requiresStructuredQuery(input) {
   const query = String(input || '').trim()
   if (!query || !requiresKnowledgeSearch(query)) return false
-  // A follow-up such as “这个统计口径依据哪份制度” asks for the
-  // documentary definition of an already computed metric.  The word “统计”
-  // alone must not trigger another database plan; explicit value/calculation
-  // terms still make a mixed question require both evidence channels.
+  // A question such as “销售额统计口径依据哪份制度” asks for documentary
+  // provenance even though it contains a metric noun.  Explicit value or
+  // calculation intent still makes a mixed question require both channels.
+  const asksForDocument = DOCUMENT_EVIDENCE_PATTERNS.some(pattern => pattern.test(query))
+  const isDocumentOnlyShape = DOCUMENT_ONLY_QUESTION_PATTERNS.some(pattern => pattern.test(query))
+  const asksForCalculation = QUANTITATIVE_REQUEST_PATTERNS.some(pattern => pattern.test(query))
+  if (asksForDocument && isDocumentOnlyShape && !asksForCalculation) return false
   if (
-    DOCUMENT_EVIDENCE_PATTERNS.some(pattern => pattern.test(query))
+    asksForDocument
     && !EXPLICIT_METRIC_VALUE_PATTERNS.some(pattern => pattern.test(query))
   ) return false
   return STRUCTURED_QUERY_PATTERNS.some(pattern => pattern.test(query))

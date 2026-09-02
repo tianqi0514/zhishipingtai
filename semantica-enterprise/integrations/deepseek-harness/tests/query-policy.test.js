@@ -26,6 +26,13 @@ test('requires deterministic structured evidence for numeric questions', () => {
     evidenceRequirements('今年销售额是多少，统计口径依据哪份制度？'),
     ['knowledge_search', 'structured_execute_query'],
   )
+  assert.equal(requiresStructuredQuery('销售额统计口径依据哪份制度？'), false)
+  assert.equal(requiresStructuredQuery('销售额的定义是什么？'), false)
+  assert.equal(requiresStructuredQuery('销售额是多少？'), true)
+  assert.deepEqual(
+    evidenceRequirements('销售额统计口径依据哪份制度？'),
+    ['knowledge_search'],
+  )
   assert.deepEqual(evidenceRequirements('你好'), [])
 })
 

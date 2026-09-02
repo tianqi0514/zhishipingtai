@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 API = os.getenv("API_BASE", "http://127.0.0.1:8080/api/v1").rstrip("/")
 USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123456")
+SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
 
 
 def request(method: str, path: str, token: str | None = None, body: dict | None = None, timeout: int = 600):
@@ -131,7 +132,7 @@ def stream_turn(token: str, conversation_id: str, content: str) -> list[str]:
 
 def main() -> None:
     token = request("POST", "/auth/login", body={"username": USERNAME, "password": PASSWORD})["access_token"]
-    space = next(item for item in request("GET", "/spaces", token) if item.get("code") == "m10-acceptance")
+    space = next(item for item in request("GET", "/spaces", token) if item.get("code") == SPACE_CODE)
     document_id: str | None = None
     conversation_id: str | None = None
     worker_stopped = False

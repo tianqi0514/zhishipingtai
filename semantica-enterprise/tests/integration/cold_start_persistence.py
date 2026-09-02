@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 API = os.getenv("API_BASE", "http://127.0.0.1:8080/api/v1").rstrip("/")
 USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 PASSWORD = os.getenv("ADMIN_PASSWORD", "Admin@123456")
+SPACE_CODE = os.getenv("TEST_SPACE_CODE", "m10-acceptance")
 
 
 def request(method: str, path: str, token: str | None = None, body: dict | None = None, timeout: int = 900):
@@ -100,7 +101,7 @@ def migration_count() -> int:
 def main() -> None:
     token = login()
     spaces = request("GET", "/spaces", token)
-    space = next(item for item in spaces if item.get("code") == "m10-acceptance")
+    space = next(item for item in spaces if item.get("code") == SPACE_CODE)
     document_count = len(request("GET", f"/documents?space_id={space['id']}", token))
     migrations_before = migration_count()
     conversation = request(
