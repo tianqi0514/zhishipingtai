@@ -19,15 +19,20 @@ from .config import get_settings
 from .models import (
     CanonicalEntity,
     Chunk,
+    ContentElement,
     Document,
+    DocumentVersion,
     Fact,
     GraphRelease,
     InferenceEvidence,
     InferredFact,
     IndexRelease,
+    MediaFrame,
+    MediaProcessingRun,
     ModelConfig,
     QueryRun,
 )
+from .media import media_type_for
 from .security import decrypt_secret
 
 
@@ -91,6 +96,41 @@ def _canonicalize_chunk_identity(db: Session, item: dict[str, Any]) -> dict[str,
     value.setdefault("version_id", chunk.version_id)
     value.setdefault("document_id", chunk.document_id)
     value.setdefault("space_id", chunk.space_id)
+    value.setdefault("page_number", chunk.page_number)
+    value.setdefault("structural_path", chunk.structural_path)
+    value["source_span"] = chunk.source_span or value.get("source_span") or {}
+    value["start_seconds"] = value["source_span"].get("time_start")
+    value["end_seconds"] = value["source_span"].get("time_end")
+    element = db.get(ContentElement, chunk.element_id) if chunk.element_id else None
+    metadata = dict(element.element_metadata or {}) if element else {}
+    version = db.get(DocumentVersion, chunk.version_id)
+    media_type = media_type_for(version.filename, version.content_type) if version else None
+    if element is not None:
+        value["element_type"] = element.element_type
+    if media_type in {"image", "audio", "video"}:
+        value["media_type"] = media_type
+        value["media_url"] = f"/api/v1/documents/{chunk.document_id}/media-content"
+        value["scene_id"] = metadata.get("scene_id")
+        value["scene_index"] = metadata.get("scene_index")
+        frame_indexes = list((metadata.get("evidence") or {}).get("frame_indexes") or [])
+        if metadata.get("frame_index") is not None:
+            frame_indexes.append(metadata["frame_index"])
+        frame_indexes = list(dict.fromkeys(int(item) for item in frame_indexes))
+        if frame_indexes:
+            latest_run = db.scalar(select(MediaProcessingRun).where(
+                MediaProcessingRun.version_id == chunk.version_id,
+                MediaProcessingRun.status.in_(["succeeded", "partial"]),
+                MediaProcessingRun.deleted_at.is_(None),
+            ).order_by(MediaProcessingRun.created_at.desc()).limit(1))
+            if latest_run:
+                frames = list(db.scalars(select(MediaFrame).where(
+                    MediaFrame.run_id == latest_run.id,
+                    MediaFrame.frame_index.in_(frame_indexes),
+                    MediaFrame.deleted_at.is_(None),
+                ).order_by(MediaFrame.frame_index)))
+                value["frame_ids"] = [row.id for row in frames]
+                if frames:
+                    value["thumbnail_url"] = f"/api/v1/media/frames/{frames[0].id}/thumbnail"
     return value
 
 

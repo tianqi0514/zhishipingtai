@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,10 @@ from packages.platform.models import (
     InferenceRun,
     Job,
     JobStep,
+    MediaAudioSegment,
+    MediaFrame,
+    MediaProcessingRun,
+    MediaScene,
     ModelConfig,
     ParserPolicy,
     RelationAssertion,
@@ -63,6 +68,15 @@ from packages.semantica_adapter.normalize import normalize_and_split
 from packages.semantica_adapter.profile import analyze_profile_with_model, build_deterministic_profile
 from packages.semantica_adapter.transcription import transcribe_media
 from packages.semantica_adapter.vision import describe_visual
+from packages.semantica_adapter.media_pipeline import MediaProcessingCancelled, process_media_file
+from packages.semantica_adapter.ingest import IngestedPayload, extract_media_payloads
+from packages.platform.media import (
+    fingerprint,
+    media_stage_fingerprints,
+    media_type_for,
+    require_cloud_confirmation,
+)
+from packages.platform.media_policy import resolve_media_policy
 
 
 def now() -> datetime:
@@ -109,6 +123,229 @@ def _progress(db, job: Job, value: int) -> None:
     db.commit()
 
 
+_MEDIA_PROGRESS_RANGES = {
+    "media_probe": (15, 20),
+    "asr": (20, 45),
+    "scene_detection": (20, 30),
+    "frame_extraction": (30, 48),
+    "ocr": (48, 62),
+    "vision": (62, 78),
+}
+
+
+def _media_model(db, tenant_id: str, kind: str, configured_id: str | None) -> ModelConfig | None:
+    if configured_id:
+        row = db.get(ModelConfig, configured_id)
+        if row is None or (
+            row.tenant_id != tenant_id
+            or row.model_kind != kind
+            or not row.enabled
+            or row.deleted_at is not None
+        ):
+            # An immutable policy snapshot explicitly names this model.  Falling
+            # back to a default here could silently change local/cloud execution
+            # and send data to a provider the user did not select.
+            return None
+        return row
+    return db.scalar(select(ModelConfig).where(
+            ModelConfig.tenant_id == tenant_id,
+            ModelConfig.model_kind == kind,
+            ModelConfig.is_default.is_(True),
+            ModelConfig.enabled.is_(True),
+            ModelConfig.deleted_at.is_(None),
+        ))
+
+
+def _media_model_secret(db, model: ModelConfig | None) -> str | None:
+    if model is None:
+        return None
+    secret = decrypt_secret(model.api_key_encrypted)
+    credential_id = str((model.config or {}).get("credential_model_config_id") or "").strip()
+    if not secret and credential_id:
+        credential = db.get(ModelConfig, credential_id)
+        if credential and credential.tenant_id == model.tenant_id and credential.deleted_at is None:
+            secret = decrypt_secret(credential.api_key_encrypted)
+    return secret
+
+
+def _media_model_fingerprint(model: ModelConfig | None) -> dict[str, Any] | None:
+    """Describe functional model settings without credentials or audit state.
+
+    Connection tests update ``updated_at``/``last_test_at`` but do not alter
+    inference. Including either would make an otherwise identical media run
+    miss every cache immediately after the mandatory connection test.
+    """
+    if model is None:
+        return None
+    return {
+        "id": model.id,
+        "kind": model.model_kind,
+        "provider": model.provider,
+        "model": model.model_name,
+        "base_url": model.base_url,
+        "config": model.config or {},
+    }
+
+
+def _persist_media_result(db, run: MediaProcessingRun, result: dict[str, Any]) -> None:
+    scene_ids: dict[int, str] = {}
+    scene_rows: dict[int, MediaScene] = {}
+    for item in result.get("scenes") or []:
+        scene_frames = [
+            frame for frame in (result.get("frames") or [])
+            if frame.get("scene_index") == int(item.get("scene_index") or 0)
+        ]
+        component_failed = any(
+            frame.get("ocr_status") == "failed" or frame.get("vision_status") == "failed"
+            for frame in scene_frames
+        )
+        scene_evidence = dict(item.get("evidence") or {})
+        scene_evidence.update({
+            "detection_method": item.get("detection_method"),
+            "duration_seconds": max(
+                0.0,
+                float(item.get("time_end") or 0) - float(item.get("time_start") or 0),
+            ),
+        })
+        item["evidence"] = scene_evidence
+        scene = MediaScene(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            scene_index=int(item.get("scene_index") or 0),
+            time_start=float(item.get("time_start") or 0),
+            time_end=float(item.get("time_end") or 0),
+            detection_score=item.get("detection_score"),
+            summary=str(item.get("summary") or ""),
+            evidence=scene_evidence,
+            status="partial_failed" if component_failed else "ready",
+        )
+        db.add(scene); db.flush(); scene_ids[scene.scene_index] = scene.id; scene_rows[scene.scene_index] = scene
+        item["id"] = scene.id
+    for item in result.get("segments") or []:
+        db.add(MediaAudioSegment(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            segment_index=int(item.get("segment_index") or 0),
+            time_start=float(item.get("start") or 0),
+            time_end=float(item.get("end") or item.get("start") or 0),
+            text=str(item.get("text") or ""),
+            language=item.get("language"),
+            speaker=item.get("speaker"),
+            confidence=item.get("confidence"),
+            segment_metadata={key: value for key, value in item.items() if key not in {"text"}},
+        ))
+    for item in result.get("frames") or []:
+        scene_index = item.get("scene_index")
+        frame = MediaFrame(
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            scene_id=scene_ids.get(int(scene_index)) if scene_index is not None else None,
+            frame_index=int(item.get("frame_index") or 0),
+            timestamp_seconds=float(item.get("timestamp") or 0),
+            object_key=str(item["object_key"]),
+            thumbnail_key=str(item["thumbnail_key"]),
+            width=item.get("width"),
+            height=item.get("height"),
+            sha256=str(item["sha256"]),
+            perceptual_hash=item.get("perceptual_hash"),
+            selection_reason=str(item.get("selection_reason") or "interval"),
+            ocr_status=str(item.get("ocr_status") or "not_configured"),
+            ocr_text=str(item.get("ocr_text") or ""),
+            ocr_confidence=item.get("ocr_confidence"),
+            vision_status=str(item.get("vision_status") or "not_configured"),
+            vision_result=item.get("vision_result") or {},
+            frame_metadata={
+                "vision_model": item.get("vision_model"),
+                "vision_usage": item.get("vision_usage") or {},
+                "vision_elapsed_ms": item.get("vision_elapsed_ms"),
+                "cloud_processing": bool(item.get("cloud_processing")),
+                "vision_called_at": item.get("vision_called_at"),
+                "cloud_processing_reason": item.get("cloud_processing_reason"),
+                "scene_index": scene_index,
+                "format": item.get("format", "jpeg"),
+            },
+        )
+        db.add(frame); db.flush(); item["id"] = frame.id
+    for item in result.get("scenes") or []:
+        scene_index = int(item.get("scene_index") or 0)
+        evidence = dict(item.get("evidence") or {})
+        evidence["frame_ids"] = [
+            frame.get("id") for frame in (result.get("frames") or [])
+            if frame.get("scene_index") == scene_index and frame.get("id")
+        ]
+        evidence["transcript_segment_indexes"] = evidence.pop(
+            "segment_indexes", evidence.get("transcript_segment_indexes", [])
+        )
+        item["evidence"] = evidence
+        if scene_index in scene_rows:
+            scene_rows[scene_index].evidence = evidence
+
+
+def _rehydrate_cached_media_result(db, run: MediaProcessingRun) -> dict[str, Any]:
+    asr_model = db.get(ModelConfig, run.asr_model_config_id) if run.asr_model_config_id else None
+    vision_model = db.get(ModelConfig, run.vision_model_config_id) if run.vision_model_config_id else None
+    scenes = [{
+        "scene_index": row.scene_index, "time_start": row.time_start, "time_end": row.time_end,
+        "detection_score": row.detection_score, "summary": row.summary, "evidence": row.evidence or {},
+        "detection_method": (row.evidence or {}).get("detection_method"),
+    } for row in db.scalars(select(MediaScene).where(
+        MediaScene.run_id == run.id, MediaScene.deleted_at.is_(None)
+    ).order_by(MediaScene.scene_index))]
+    segments = [{
+        "segment_index": row.segment_index, "start": row.time_start, "end": row.time_end,
+        "text": row.text, "language": row.language, "speaker": row.speaker,
+        "confidence": row.confidence, **(row.segment_metadata or {}),
+    } for row in db.scalars(select(MediaAudioSegment).where(
+        MediaAudioSegment.run_id == run.id, MediaAudioSegment.deleted_at.is_(None)
+    ).order_by(MediaAudioSegment.segment_index))]
+    frames = [{
+        "frame_index": row.frame_index, "timestamp": row.timestamp_seconds,
+        "scene_index": (row.frame_metadata or {}).get("scene_index"), "object_key": row.object_key,
+        "thumbnail_key": row.thumbnail_key, "width": row.width, "height": row.height,
+        "sha256": row.sha256, "perceptual_hash": row.perceptual_hash,
+        "selection_reason": row.selection_reason, "ocr_status": row.ocr_status,
+        "ocr_text": row.ocr_text, "ocr_confidence": row.ocr_confidence,
+        "vision_status": row.vision_status, "vision_result": row.vision_result or {},
+        "vision_model": (row.frame_metadata or {}).get("vision_model"),
+        "vision_usage": (row.frame_metadata or {}).get("vision_usage") or {},
+        "vision_elapsed_ms": (row.frame_metadata or {}).get("vision_elapsed_ms"),
+        "cloud_processing": bool((row.frame_metadata or {}).get("cloud_processing")),
+        "vision_called_at": (row.frame_metadata or {}).get("vision_called_at"),
+        "cloud_processing_reason": (row.frame_metadata or {}).get("cloud_processing_reason"),
+        "format": (row.frame_metadata or {}).get("format", "jpeg"),
+    } for row in db.scalars(select(MediaFrame).where(
+        MediaFrame.run_id == run.id, MediaFrame.deleted_at.is_(None)
+    ).order_by(MediaFrame.frame_index))]
+    audio_events = [
+        {"name": name, "start": item.get("start"), "end": item.get("end")}
+        for item in segments for name in (item.get("events") or [])
+    ]
+    vision_descriptions = list(dict.fromkeys(
+        str((item.get("vision_result") or {}).get("scene_summary") or "").strip()
+        for item in frames if str((item.get("vision_result") or {}).get("scene_summary") or "").strip()
+    ))
+    return {
+        "type": run.media_type, "metadata": run.probe or {}, "probe": run.probe or {},
+        "transcript": " ".join(item["text"] for item in segments if item.get("text")).strip(),
+        "segments": segments, "audio_events": audio_events, "scenes": scenes, "frames": frames,
+        "model": asr_model.model_name if asr_model else None,
+        "model_version": ((asr_model.config or {}).get("version") if asr_model else None),
+        "transcription_time_seconds": (run.result or {}).get("transcription_time_seconds"),
+        "vision_description": "\n".join(vision_descriptions),
+        "transcription_status": (run.result or {}).get("transcription_status", "succeeded"),
+        "vision_status": (run.result or {}).get("vision_status", "not_configured"),
+        "vision_model": vision_model.model_name if vision_model else None,
+        "warnings": run.warnings or [], "frame_count": len(frames),
+        "cloud_frame_count": sum(1 for item in frames if item.get("cloud_processing") and item.get("vision_status") == "succeeded"),
+        "generate_summary": bool(
+            ((run.policy_snapshot or {}).get("config") or {}).get("asr", {}).get("generate_summary", True)
+            or ((run.policy_snapshot or {}).get("config") or {}).get("vision", {}).get("generate_video_summary", True)
+        ),
+        "generate_chapters": bool(
+            ((run.policy_snapshot or {}).get("config") or {}).get("asr", {}).get("generate_chapters", True)
+        ),
+        "scene_count": len(scenes), "segment_count": len(segments),
+    }
 def _database_processing_modes(source: SourceConnector | None) -> tuple[bool, bool, bool]:
     """Return database-snapshot, profile-model and generic-extraction modes.
 
@@ -245,6 +482,7 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
         db.commit()
 
         suffix = Path(version.filename).suffix
+        media_run: MediaProcessingRun | None = None
         try:
             _step(db, job.id, "download", 1, "running")
             _progress(db, job, 5)
@@ -256,66 +494,270 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
 
                 _step(db, job.id, "parse", 2, "running")
                 _progress(db, job, 20)
-                asr_model = db.scalar(
-                    select(ModelConfig).where(
-                        ModelConfig.tenant_id == version.tenant_id,
-                        ModelConfig.model_kind == "asr",
-                        ModelConfig.is_default.is_(True),
-                        ModelConfig.enabled.is_(True),
-                        ModelConfig.deleted_at.is_(None),
-                    )
-                )
                 transcriber = None
-                if asr_model:
-                    asr_secret = decrypt_secret(asr_model.api_key_encrypted)
-
-                    def transcriber(media_path: Path, media_type: str) -> dict[str, Any]:
-                        _progress(db, job, 35)
-                        config = asr_model.config or {}
-                        result = transcribe_media(
-                            media_path,
-                            media_type,
-                            api_key=asr_secret or "",
-                            model=asr_model.model_name,
-                            base_url=asr_model.base_url,
-                            timeout=float(config.get("timeout", 300)),
-                            max_retries=int(config.get("max_retries", config.get("retry", 2))),
-                            language=config.get("language"),
-                            prompt=config.get("prompt"),
-                        )
-                        _progress(db, job, 62)
-                        return result
-                vision_model = db.scalar(
-                    select(ModelConfig).where(
-                        ModelConfig.tenant_id == version.tenant_id,
-                        ModelConfig.model_kind == "vision",
-                        ModelConfig.is_default.is_(True),
-                        ModelConfig.enabled.is_(True),
-                        ModelConfig.deleted_at.is_(None),
-                    )
-                )
                 visual_describer = None
-                if vision_model:
-                    vision_secret = decrypt_secret(vision_model.api_key_encrypted)
+                media_result = None
+                media_kind = media_type_for(version.filename, version.content_type)
+                active_media_snapshot = dict(
+                    (job.input or {}).get("media_policy_snapshot")
+                    or version.media_policy_snapshot
+                    or {}
+                )
+                active_policy_version_id = (
+                    (job.input or {}).get("media_policy_version_id")
+                    or version.media_policy_version_id
+                )
+                if media_kind in {"image", "audio", "video"} and active_media_snapshot:
+                    media_config = dict(active_media_snapshot.get("config") or {})
+                    asr_id = str((media_config.get("asr") or {}).get("model_config_id") or "") or None
+                    vision_id = str((media_config.get("vision") or {}).get("model_config_id") or "") or None
+                    asr_model = _media_model(db, version.tenant_id, "asr", asr_id)
+                    vision_model = _media_model(db, version.tenant_id, "vision", vision_id)
+                    if (
+                        (media_config.get("vision") or {}).get("enabled")
+                        and (media_config.get("vision") or {}).get("execution") == "local"
+                        and vision_model is not None
+                        and not bool((vision_model.config or {}).get("local_runtime"))
+                    ):
+                        # A local policy must never become a hidden cloud call
+                        # because its selected model points to a public API.
+                        vision_model = None
+                    stage_fingerprints = media_stage_fingerprints(
+                        version.sha256,
+                        media_config,
+                        asr_model=_media_model_fingerprint(asr_model),
+                        vision_model=_media_model_fingerprint(vision_model),
+                    )
+                    media_fingerprint = fingerprint({
+                        "timeline": stage_fingerprints["timeline"],
+                        "adapter": "media-pipeline-v2",
+                    })
+                    media_run = MediaProcessingRun(
+                        tenant_id=version.tenant_id,
+                        space_id=document.space_id,
+                        document_id=document.id,
+                        version_id=version.id,
+                        job_id=job.id,
+                        policy_version_id=active_policy_version_id,
+                        policy_snapshot=active_media_snapshot,
+                        media_type=media_kind,
+                        status="running",
+                        stage="media_probe",
+                        progress=15,
+                        input_fingerprint=media_fingerprint,
+                        asr_model_config_id=asr_model.id if asr_model else None,
+                        vision_model_config_id=vision_model.id if vision_model else None,
+                        cache={"stage_fingerprints": stage_fingerprints, "stage_hits": []},
+                        started_at=now(),
+                    )
+                    db.add(media_run); db.commit()
 
-                    def visual_describer(visual_path: Path, media_type: str) -> dict[str, Any]:
-                        _progress(db, job, 45)
-                        config = vision_model.config or {}
-                        result = describe_visual(
-                            visual_path,
-                            media_type,
-                            api_key=vision_secret or "",
-                            model=vision_model.model_name,
-                            base_url=vision_model.base_url,
-                            timeout=float(config.get("timeout", 120)),
-                            max_retries=int(config.get("max_retries", config.get("retry", 2))),
-                            prompt=config.get("prompt"),
-                            max_tokens=int(config.get("max_tokens", 700)),
-                            keyframe_count=int(config.get("keyframe_count", 3)),
+                    def media_progress(stage: str, completed: int, total: int) -> None:
+                        start, end = _MEDIA_PROGRESS_RANGES.get(stage, (20, 78))
+                        ratio = min(max(completed / max(total, 1), 0), 1)
+                        value = max(job.progress, round(start + (end - start) * ratio))
+                        media_run.stage = stage
+                        media_run.progress = max(media_run.progress, value)
+                        job.progress = value
+                        db.commit()
+
+                    def media_cancelled() -> bool:
+                        db.refresh(media_run, attribute_names=["cancel_requested_at"])
+                        return media_run.cancel_requested_at is not None
+
+                    def media_artifact_writer(frame_path: Path, thumbnail_path: Path, frame_index: int):
+                        prefix = f"{version.tenant_id}/{document.space_id}/{document.id}/{version.id}/media/{media_run.id}"
+                        object_key = f"{prefix}/frames/{frame_index:05d}.jpg"
+                        thumbnail_key = f"{prefix}/thumbnails/{frame_index:05d}.jpg"
+                        object_storage.put_file(object_key, frame_path, "image/jpeg")
+                        object_storage.put_file(thumbnail_key, thumbnail_path, "image/jpeg")
+                        return object_key, thumbnail_key
+
+                    def media_artifact_reader(object_key: str, target: Path) -> None:
+                        object_storage.get_file(object_key, target)
+
+                    cached_run = None
+                    target_scene_id = str((job.input or {}).get("target_scene_id") or "") or None
+                    target_scene_index = None
+                    preferred_reuse_run = None
+                    if target_scene_id:
+                        target_scene = db.get(MediaScene, target_scene_id)
+                        if (
+                            target_scene is None
+                            or target_scene.tenant_id != version.tenant_id
+                            or target_scene.deleted_at is not None
+                        ):
+                            raise ValueError("指定的媒体场景不存在")
+                        preferred_reuse_run = db.get(MediaProcessingRun, target_scene.run_id)
+                        if preferred_reuse_run is None or preferred_reuse_run.version_id != version.id:
+                            raise ValueError("指定的媒体场景不属于当前文档版本")
+                        target_scene_index = target_scene.scene_index
+                    if (
+                        bool((media_config.get("cache") or {}).get("enabled", True))
+                        and not bool((job.input or {}).get("force_media"))
+                        and not target_scene_id
+                    ):
+                        cached_run = db.scalar(select(MediaProcessingRun).where(
+                            MediaProcessingRun.tenant_id == version.tenant_id,
+                            MediaProcessingRun.id != media_run.id,
+                            MediaProcessingRun.input_fingerprint == media_fingerprint,
+                            MediaProcessingRun.status == "succeeded",
+                            MediaProcessingRun.deleted_at.is_(None),
+                        ).order_by(MediaProcessingRun.finished_at.desc()).limit(1))
+                    media_result = _rehydrate_cached_media_result(db, cached_run) if cached_run else None
+                    if cached_run:
+                        media_run.cache = {
+                            "hit": True,
+                            "source_run_id": cached_run.id,
+                            "stage_fingerprints": stage_fingerprints,
+                            "stage_hits": list(stage_fingerprints),
+                        }
+                        media_run.stage = "cache_hit"; media_run.progress = 78; job.progress = max(job.progress, 78); db.commit()
+
+                    asr_options = None
+                    if asr_model:
+                        asr_settings = asr_model.config or {}
+                        asr_options = {
+                            "api_key": _media_model_secret(db, asr_model) or "local-runtime",
+                            "model": asr_model.model_name,
+                            "base_url": asr_model.base_url,
+                            "timeout": asr_settings.get("timeout", 300),
+                            "max_retries": asr_settings.get("max_retries", asr_settings.get("retry", 2)),
+                            "prompt": asr_settings.get("prompt"),
+                        }
+                    vision_options = None
+                    if vision_model:
+                        vision_settings = vision_model.config or {}
+                        vision_options = {
+                            "api_key": _media_model_secret(db, vision_model) or "",
+                            "model": vision_model.model_name,
+                            "base_url": vision_model.base_url,
+                            "timeout": vision_settings.get("timeout", 120),
+                            "max_retries": vision_settings.get("max_retries", vision_settings.get("retry", 2)),
+                            "prompt": vision_settings.get("prompt"),
+                        }
+                    if media_result is None:
+                        reuse_run = preferred_reuse_run
+                        if (
+                            reuse_run is None
+                            and bool((media_config.get("cache") or {}).get("enabled", True))
+                            and not bool((job.input or {}).get("force_media"))
+                        ):
+                            candidates = list(db.scalars(select(MediaProcessingRun).where(
+                                MediaProcessingRun.tenant_id == version.tenant_id,
+                                MediaProcessingRun.version_id == version.id,
+                                MediaProcessingRun.id != media_run.id,
+                                MediaProcessingRun.status == "succeeded",
+                                MediaProcessingRun.deleted_at.is_(None),
+                            ).order_by(MediaProcessingRun.finished_at.desc()).limit(10)))
+                            reuse_run = next(
+                                (row for row in candidates if (row.cache or {}).get("stage_fingerprints")),
+                                None,
+                            )
+                        reuse_result = _rehydrate_cached_media_result(db, reuse_run) if reuse_run else None
+                        previous_fingerprints = (reuse_run.cache or {}).get("stage_fingerprints", {}) if reuse_run else {}
+                        reusable_stages = {
+                            stage for stage, value in stage_fingerprints.items()
+                            if stage != "timeline" and previous_fingerprints.get(stage) == value
+                        }
+                        if target_scene_id and reuse_run:
+                            # Targeted recovery keeps all immutable upstream
+                            # products, but deliberately re-executes OCR/Vision
+                            # only for frames in the selected scene.
+                            reusable_stages.update({"probe", "asr", "scenes", "frames", "ocr", "vision"})
+                        media_result = process_media_file(
+                            local_path,
+                            policy=media_config,
+                            working_directory=Path(temp_dir) / "media-work",
+                            asr_options=asr_options,
+                            vision_options=vision_options,
+                            progress=media_progress,
+                            cancelled=media_cancelled,
+                            artifact_writer=media_artifact_writer,
+                            artifact_reader=media_artifact_reader,
+                            reuse_result=reuse_result,
+                            reuse_stages=reusable_stages,
+                            target_scene_index=target_scene_index,
                         )
-                        _progress(db, job, 62)
-                        return result
+                        media_run.cache = {
+                            "hit": False,
+                            "source_run_id": reuse_run.id if reuse_run else None,
+                            "stage_fingerprints": stage_fingerprints,
+                            "stage_hits": sorted(
+                                stage for stage in reusable_stages
+                                if not (target_scene_id and stage in {"ocr", "vision"})
+                            ),
+                            "target_scene_index": target_scene_index,
+                        }
+                    media_run.stage = "timeline_fusion"
+                    media_run.progress = 82
+                    media_run.probe = media_result.get("probe") or {}
+                    media_run.warnings = media_result.get("warnings") or []
+                    media_run.result = {
+                        key: media_result.get(key)
+                        for key in (
+                            "frame_count", "scene_count", "segment_count", "cloud_frame_count",
+                            "transcription_status", "vision_status", "model_version",
+                            "transcription_time_seconds",
+                        )
+                    }
+                    _persist_media_result(db, media_run, media_result)
+                    db.commit()
+                    if media_kind in {"audio", "video"}:
+                        transcriber = lambda _path, _kind: media_result
+                    else:
+                        visual_describer = lambda _path, _kind: media_result
+                else:
+                    asr_model = _media_model(db, version.tenant_id, "asr", None)
+                    if asr_model:
+                        asr_secret = _media_model_secret(db, asr_model)
+
+                        def transcriber(media_path: Path, media_type: str) -> dict[str, Any]:
+                            _progress(db, job, 35)
+                            config = asr_model.config or {}
+                            result = transcribe_media(
+                                media_path, media_type, api_key=asr_secret or "",
+                                model=asr_model.model_name, base_url=asr_model.base_url,
+                                timeout=float(config.get("timeout", 300)),
+                                max_retries=int(config.get("max_retries", config.get("retry", 2))),
+                                language=config.get("language"), prompt=config.get("prompt"),
+                            )
+                            _progress(db, job, 62); return result
+                    vision_model = _media_model(db, version.tenant_id, "vision", None)
+                    if vision_model:
+                        vision_secret = _media_model_secret(db, vision_model)
+
+                        def visual_describer(visual_path: Path, media_type: str) -> dict[str, Any]:
+                            _progress(db, job, 45)
+                            config = vision_model.config or {}
+                            result = describe_visual(
+                                visual_path, media_type, api_key=vision_secret or "",
+                                model=vision_model.model_name, base_url=vision_model.base_url,
+                                timeout=float(config.get("timeout", 120)),
+                                max_retries=int(config.get("max_retries", config.get("retry", 2))),
+                                prompt=config.get("prompt"), max_tokens=int(config.get("max_tokens", 700)),
+                                keyframe_count=int(config.get("keyframe_count", 3)),
+                            )
+                            _progress(db, job, 62); return result
                 parse_policy = _policy_dict(policy)
+                if (job.input or {}).get("skip_archive_media"):
+                    parse_policy["skip_archive_media"] = True
+                source_attachment = (job.input or {}).get("source_media_attachment")
+                if media_result and media_run:
+                    parse_policy["media_context"] = {
+                        "source_file": version.filename,
+                        "document_id": document.id,
+                        "version_id": version.id,
+                        "processing_run_id": media_run.id,
+                        "processing_policy_version": active_media_snapshot.get("version_number"),
+                        "processing_policy_hash": active_media_snapshot.get("config_hash"),
+                        "media_checksum": version.sha256,
+                        "asr_model_config_id": asr_model.id if asr_model else None,
+                        "vision_model_config_id": vision_model.id if vision_model else None,
+                        "prompt_version": (media_config.get("vision") or {}).get("prompt_version"),
+                        "source_path": (source_attachment or {}).get("source_path"),
+                        "attachment_parent": (source_attachment or {}).get("parent_snapshot"),
+                    }
                 if document.source_id:
                     source = db.get(SourceConnector, document.source_id)
                     schema_version = db.scalar(select(DataSourceSchemaVersion).where(
@@ -344,36 +786,65 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                     media_transcriber=transcriber,
                     visual_describer=visual_describer,
                 )
+                if media_result:
+                    summary["media"] = {
+                        "run_id": media_run.id if media_run else None,
+                        "policy": active_media_snapshot.get("policy_name"),
+                        "policy_version": active_media_snapshot.get("version_number"),
+                        "frame_count": media_result.get("frame_count", 0),
+                        "scene_count": media_result.get("scene_count", 0),
+                        "segment_count": media_result.get("segment_count", 0),
+                    }
+                    summary.setdefault("warnings", []).extend(media_result.get("warnings") or [])
                 _step(db, job.id, "parse", 2, "succeeded", summary)
                 _progress(db, job, 70)
 
                 _step(db, job.id, "persist", 3, "running")
                 _progress(db, job, 75)
-                db.execute(delete(ContentElement).where(ContentElement.version_id == version.id))
+                existing_elements = {
+                    row.element_id: row
+                    for row in db.scalars(
+                        select(ContentElement).where(ContentElement.version_id == version.id)
+                    )
+                }
+                retained_element_ids: set[str] = set()
                 for item in elements:
-                    db.add(
-                        ContentElement(
+                    retained_element_ids.add(item.element_id)
+                    element_row = existing_elements.get(item.element_id)
+                    if element_row is None:
+                        element_row = ContentElement(
                             tenant_id=version.tenant_id,
                             space_id=document.space_id,
                             document_id=document.id,
                             version_id=version.id,
                             element_id=item.element_id,
-                            element_type=item.element_type,
-                            ordinal=item.ordinal,
-                            text=item.text,
-                            structural_path=item.structural_path,
-                            page_number=item.page_number,
-                            bbox=item.bbox,
-                            element_metadata=item.metadata,
-                            scope_tokens=[],
                         )
-                    )
+                        db.add(element_row)
+                    element_row.element_type = item.element_type
+                    element_row.ordinal = item.ordinal
+                    element_row.text = item.text
+                    element_row.structural_path = item.structural_path
+                    element_row.page_number = item.page_number
+                    element_row.bbox = item.bbox
+                    element_row.element_metadata = item.metadata
+                    element_row.scope_tokens = []
+                    element_row.deleted_at = None
+                # Published chunks may still reference elements while the new
+                # knowledge job is being prepared. Preserve referential
+                # integrity and mark disappeared elements inactive instead of
+                # physically deleting them mid-release.
+                for element_id, element_row in existing_elements.items():
+                    if element_id not in retained_element_ids:
+                        element_row.deleted_at = now()
                 version.parse_summary = summary
                 version.status = "ready"
                 version.error_code = None
                 version.error_message = None
                 document.current_version_id = version.id
                 document.status = "ready"
+                if media_run:
+                    media_run.stage = "persist"
+                    media_run.progress = 90
                 db.commit()
                 _step(db, job.id, "persist", 3, "succeeded", {"elements": len(elements)})
                 _progress(db, job, 85)
@@ -388,10 +859,25 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                 )
                 _step(db, job.id, "provenance", 4, "succeeded", {"tracked": tracked})
                 _progress(db, job, 95)
+                if media_run:
+                    media_run.stage = "completed"
+                    media_run.progress = 100
+                    component_statuses = {
+                        str((media_run.result or {}).get("transcription_status") or ""),
+                        str((media_run.result or {}).get("vision_status") or ""),
+                    }
+                    media_run.status = "partial" if "failed" in component_statuses else "succeeded"
+                    media_run.finished_at = now()
+                    db.commit()
 
             job.status = "succeeded"
             job.progress = 100
-            job.result = {"version_id": version.id, **summary}
+            media_cache_hit = bool(media_run and (media_run.cache or {}).get("hit"))
+            job.result = {
+                "version_id": version.id,
+                **summary,
+                **({"media_cache_hit": media_cache_hit} if media_run else {}),
+            }
             job.finished_at = now()
             db.commit()
             source = db.get(SourceConnector, document.source_id) if document.source_id else None
@@ -399,14 +885,19 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                 source is not None
                 and source.source_type == "database"
                 and (source.config or {}).get("knowledge_index_enabled") is False
-            )
-            if settings.knowledge_auto_process and source_knowledge_enabled:
-                process_job = db.scalar(select(Job).where(Job.idempotency_key == f"knowledge:{version.id}"))
+            ) and not bool(summary.get("delegated_media_manifest"))
+            if settings.knowledge_auto_process and source_knowledge_enabled and not media_cache_hit:
+                knowledge_key = (
+                    f"knowledge-reprocess:{version.id}:{job.id}"
+                    if (job.input or {}).get("reprocess")
+                    else f"knowledge:{version.id}"
+                )
+                process_job = db.scalar(select(Job).where(Job.idempotency_key == knowledge_key))
                 if process_job is None:
                     process_job = Job(
                         tenant_id=version.tenant_id,
                         job_type="process_knowledge",
-                        idempotency_key=f"knowledge:{version.id}",
+                        idempotency_key=knowledge_key,
                         input={"version_id": version.id},
                     )
                     db.add(process_job)
@@ -434,8 +925,28 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
             job = db.get(Job, job_id)
             version = db.get(DocumentVersion, version_id)
             document = db.get(Document, document_id) if document_id else None
+            if media_run is not None:
+                media_run = db.get(MediaProcessingRun, media_run.id)
+                if media_run:
+                    media_run.status = "cancelled" if isinstance(exc, MediaProcessingCancelled) else "failed"
+                    media_run.stage = "cancelled" if isinstance(exc, MediaProcessingCancelled) else "failed"
+                    media_run.error_code = "MEDIA_CANCELLED" if isinstance(exc, MediaProcessingCancelled) else "MEDIA_PROCESSING_FAILED"
+                    media_run.error_message = message[:4000]
+                    media_run.finished_at = now()
             if job is None or version is None:
                 return {"status": "failed", "error": message}
+            if isinstance(exc, MediaProcessingCancelled):
+                version.status = "uploaded"
+                version.error_code = None
+                version.error_message = None
+                if document:
+                    document.status = "draft"
+                job.status = "cancelled"
+                job.error_code = "MEDIA_CANCELLED"
+                job.error_message = "用户已取消媒体处理"
+                job.finished_at = now()
+                db.commit()
+                return {"status": "cancelled"}
             version.status = "failed"
             version.error_code = "PARSE_FAILED"
             version.error_message = message[:4000]
@@ -452,14 +963,116 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
             return {"status": "failed", "error": message}
 
 
-def _source_payload(source: SourceConnector) -> tuple[bytes, str, str, str]:
+def _source_payload(source: SourceConnector) -> tuple[bytes, str, str, str, list[IngestedPayload]]:
     result = ingest_source(
         source_type=source.source_type,
         source_name=source.name,
         config=source.config or {},
         secret=decrypt_secret(source.secret_encrypted),
     )
-    return result.body, result.filename, result.content_type, result.title
+    media_items = extract_media_payloads(
+        result,
+        maximum_items=int((source.config or {}).get("max_media_items_per_sync") or 100),
+    )
+    return result.body, result.filename, result.content_type, result.title, media_items
+
+
+def _prepare_source_media_children(
+    db,
+    *,
+    source: SourceConnector,
+    parent_job: Job,
+    items: list[IngestedPayload],
+    parser_policy: ParserPolicy,
+) -> tuple[list[dict[str, Any]], list[Job]]:
+    """Persist media archive/email members as independently processable docs."""
+    results: list[dict[str, Any]] = []
+    parse_jobs: list[Job] = []
+    for item in items:
+        digest = hashlib.sha256(item.body).hexdigest()
+        document = db.scalar(select(Document).where(
+            Document.tenant_id == source.tenant_id,
+            Document.source_id == source.id,
+            Document.title == item.title,
+            Document.deleted_at.is_(None),
+        ))
+        if document is None:
+            document = Document(
+                tenant_id=source.tenant_id,
+                space_id=source.space_id,
+                source_id=source.id,
+                title=item.title,
+                status="draft",
+            )
+            db.add(document); db.flush()
+        existing = db.scalar(select(DocumentVersion).where(
+            DocumentVersion.document_id == document.id,
+            DocumentVersion.sha256 == digest,
+        ))
+        if existing:
+            results.append({
+                "document_id": document.id, "version_id": existing.id,
+                "filename": item.filename, "unchanged": True,
+            })
+            continue
+        media_type = media_type_for(item.filename, item.content_type)
+        if media_type not in {"image", "audio", "video"}:
+            continue
+        requested_override = (parent_job.input or {}).get("media_policy_override") or {}
+        configured_override = (source.config or {}).get("media_policy_override") or {}
+        media_version, media_snapshot = resolve_media_policy(
+            db,
+            tenant_id=source.tenant_id,
+            media_type=media_type,
+            explicit_policy_id=(parent_job.input or {}).get("media_policy_id") or source.media_policy_id,
+            source_id=source.id,
+            space_id=source.space_id,
+            override=requested_override or configured_override,
+        )
+        require_cloud_confirmation(
+            media_snapshot.get("config") or {},
+            bool((parent_job.input or {}).get("cloud_processing_confirmed"))
+            or bool((source.config or {}).get("media_cloud_processing_confirmed")),
+        )
+        version_number = (
+            db.scalar(select(func.max(DocumentVersion.version_number)).where(
+                DocumentVersion.document_id == document.id
+            )) or 0
+        ) + 1
+        object_key = (
+            f"{source.tenant_id}/{source.space_id}/{document.id}/{digest}/{item.filename}"
+        )
+        version = DocumentVersion(
+            tenant_id=source.tenant_id,
+            document_id=document.id,
+            version_number=version_number,
+            filename=item.filename,
+            content_type=item.content_type,
+            size=len(item.body),
+            sha256=digest,
+            object_key=object_key,
+            parser_policy_id=parser_policy.id,
+            media_policy_version_id=media_version.id if media_version else None,
+            media_policy_snapshot=media_snapshot,
+        )
+        db.add(version); db.flush()
+        with tempfile.TemporaryDirectory(prefix="semantica-source-media-") as temporary_directory:
+            local_path = Path(temporary_directory) / item.filename
+            local_path.write_bytes(item.body)
+            object_storage.put_file(object_key, local_path, item.content_type)
+        parse_job = Job(
+            tenant_id=source.tenant_id,
+            job_type="parse_document",
+            idempotency_key=f"parse:{version.id}",
+            input={"version_id": version.id, "source_media_attachment": item.metadata},
+        )
+        db.add(parse_job); db.flush(); parse_jobs.append(parse_job)
+        results.append({
+            "document_id": document.id, "version_id": version.id,
+            "parse_job_id": parse_job.id, "filename": item.filename,
+            "unchanged": False,
+        })
+    return results, parse_jobs
 
 
 def _update_source_cursor(source: SourceConnector, digest: str, status: str) -> None:
@@ -507,9 +1120,12 @@ def sync_source_task(self, job_id: str) -> dict[str, Any]:
         try:
             _step(db, job.id, "fetch", 1, "running")
             _progress(db, job, 10)
-            payload, filename, content_type, title = _source_payload(source)
+            payload, filename, content_type, title, media_items = _source_payload(source)
             digest = hashlib.sha256(payload).hexdigest()
-            _step(db, job.id, "fetch", 1, "succeeded", {"bytes": len(payload), "sha256": digest})
+            _step(db, job.id, "fetch", 1, "succeeded", {
+                "bytes": len(payload), "sha256": digest,
+                "media_attachment_count": len(media_items),
+            })
             _progress(db, job, 40)
 
             _step(db, job.id, "persist", 2, "running")
@@ -519,6 +1135,7 @@ def sync_source_task(self, job_id: str) -> dict[str, Any]:
                 select(Document).where(
                     Document.tenant_id == source.tenant_id,
                     Document.source_id == source.id,
+                    Document.title == title,
                     Document.deleted_at.is_(None),
                 )
             )
@@ -539,20 +1156,68 @@ def sync_source_task(self, job_id: str) -> dict[str, Any]:
                 )
             )
             if existing:
+                policy = db.scalar(
+                    select(ParserPolicy).where(
+                        ParserPolicy.tenant_id == source.tenant_id,
+                        ParserPolicy.is_default.is_(True),
+                        ParserPolicy.deleted_at.is_(None),
+                    )
+                )
+                if policy is None:
+                    raise ValueError("未配置可用的默认解析策略")
+                media_results, media_parse_jobs = _prepare_source_media_children(
+                    db, source=source, parent_job=job, items=media_items,
+                    parser_policy=policy,
+                )
+                parent_parse_job = None
+                if existing.status in {"failed", "uploaded"}:
+                    parent_parse_job = Job(
+                        tenant_id=source.tenant_id,
+                        job_type="parse_document",
+                        idempotency_key=f"source-parse-retry:{existing.id}:{int(time.time() * 1000)}",
+                        input={"version_id": existing.id, "skip_archive_media": bool(media_items)},
+                    )
+                    db.add(parent_parse_job)
+                    db.flush()
+                db.commit()
+                queued_jobs = ([parent_parse_job] if parent_parse_job is not None else []) + media_parse_jobs
+                for media_parse_job in queued_jobs:
+                    try:
+                        parse_version_task.delay(media_parse_job.id)
+                    except Exception as dispatch_error:
+                        media_parse_job.status = "failed"
+                        media_parse_job.error_code = "QUEUE_DISPATCH_FAILED"
+                        media_parse_job.error_message = f"{type(dispatch_error).__name__}: {dispatch_error}"[:4000]
+                        media_parse_job.finished_at = now()
+                        db.commit()
+                        if (source.config or {}).get("media_sync_failure_mode") == "fail":
+                            raise
                 _step(
                     db,
                     job.id,
                     "persist",
                     2,
                     "succeeded",
-                    {"version_id": existing.id, "unchanged": True},
+                    {
+                        "version_id": existing.id,
+                        "unchanged": not queued_jobs,
+                        "media_items": len(media_results),
+                    },
                 )
                 source.last_sync_at = now()
-                source.last_sync_status = "unchanged"
-                _update_source_cursor(source, digest, "unchanged")
+                source.last_sync_status = "fetched" if queued_jobs else "unchanged"
+                _update_source_cursor(source, digest, source.last_sync_status)
                 job.status = "succeeded"
                 job.progress = 100
-                job.result = {"document_id": document.id, "version_id": existing.id, "unchanged": True}
+                job.result = {
+                    "document_id": document.id,
+                    "version_id": existing.id,
+                    "parse_job_id": parent_parse_job.id if parent_parse_job is not None else None,
+                    "unchanged": not queued_jobs,
+                    "media_documents": media_results,
+                    "media_parse_job_ids": [item.id for item in media_parse_jobs],
+                    "document_count": 1 + len(media_results),
+                }
                 job.finished_at = now()
                 db.commit()
                 return job.result
@@ -574,6 +1239,27 @@ def sync_source_task(self, job_id: str) -> dict[str, Any]:
             )
             if policy is None:
                 raise ValueError("未配置可用的默认解析策略")
+            resolved_media_version_id = None
+            resolved_media_snapshot: dict[str, Any] = {}
+            source_media_type = media_type_for(filename, content_type)
+            if source_media_type in {"image", "audio", "video"}:
+                requested_override = (job.input or {}).get("media_policy_override") or {}
+                configured_override = (source.config or {}).get("media_policy_override") or {}
+                media_version, resolved_media_snapshot = resolve_media_policy(
+                    db,
+                    tenant_id=source.tenant_id,
+                    media_type=source_media_type,
+                    explicit_policy_id=(job.input or {}).get("media_policy_id") or source.media_policy_id,
+                    source_id=source.id,
+                    space_id=source.space_id,
+                    override=requested_override or configured_override,
+                )
+                require_cloud_confirmation(
+                    resolved_media_snapshot.get("config") or {},
+                    bool((job.input or {}).get("cloud_processing_confirmed"))
+                    or bool((source.config or {}).get("media_cloud_processing_confirmed")),
+                )
+                resolved_media_version_id = media_version.id if media_version else None
             version = DocumentVersion(
                 tenant_id=source.tenant_id,
                 document_id=document.id,
@@ -584,6 +1270,8 @@ def sync_source_task(self, job_id: str) -> dict[str, Any]:
                 sha256=digest,
                 object_key=f"{source.tenant_id}/{source.space_id}/{document.id}/{digest}/{filename}",
                 parser_policy_id=policy.id if policy else None,
+                media_policy_version_id=resolved_media_version_id,
+                media_policy_snapshot=resolved_media_snapshot,
             )
             db.add(version)
             db.flush()
@@ -596,11 +1284,22 @@ def sync_source_task(self, job_id: str) -> dict[str, Any]:
                 tenant_id=source.tenant_id,
                 job_type="parse_document",
                 idempotency_key=f"parse:{version.id}",
-                input={"version_id": version.id},
+                input={"version_id": version.id, "skip_archive_media": bool(media_items)},
             )
             db.add(parse_job)
             db.flush()
-            job.result = {"document_id": document.id, "version_id": version.id, "parse_job_id": parse_job.id}
+            media_results, media_parse_jobs = _prepare_source_media_children(
+                db, source=source, parent_job=job, items=media_items,
+                parser_policy=policy,
+            )
+            job.result = {
+                "document_id": document.id,
+                "version_id": version.id,
+                "parse_job_id": parse_job.id,
+                "media_documents": media_results,
+                "media_parse_job_ids": [item.id for item in media_parse_jobs],
+                "document_count": 1 + len(media_results),
+            }
             db.commit()
             object_persisted = True
             _step(
@@ -615,21 +1314,26 @@ def sync_source_task(self, job_id: str) -> dict[str, Any]:
 
             _step(db, job.id, "dispatch", 3, "running")
             _progress(db, job, 90)
-            try:
-                parse_version_task.delay(parse_job.id)
-            except Exception as dispatch_error:
-                dispatch_message = f"{type(dispatch_error).__name__}: {dispatch_error}"
-                parse_job.status = "failed"
-                parse_job.error_code = "QUEUE_DISPATCH_FAILED"
-                parse_job.error_message = dispatch_message[:4000]
-                parse_job.finished_at = now()
-                version.status = "failed"
-                version.error_code = "QUEUE_DISPATCH_FAILED"
-                version.error_message = dispatch_message[:4000]
-                document.status = "failed"
-                db.commit()
-                raise RuntimeError(f"解析任务提交失败：{dispatch_error}") from dispatch_error
-            _step(db, job.id, "dispatch", 3, "succeeded", {"parse_job_id": parse_job.id})
+            dispatched: list[str] = []
+            for queued_parse_job in [parse_job, *media_parse_jobs]:
+                try:
+                    parse_version_task.delay(queued_parse_job.id)
+                    dispatched.append(queued_parse_job.id)
+                except Exception as dispatch_error:
+                    dispatch_message = f"{type(dispatch_error).__name__}: {dispatch_error}"
+                    queued_parse_job.status = "failed"
+                    queued_parse_job.error_code = "QUEUE_DISPATCH_FAILED"
+                    queued_parse_job.error_message = dispatch_message[:4000]
+                    queued_parse_job.finished_at = now()
+                    db.commit()
+                    if queued_parse_job.id == parse_job.id or (source.config or {}).get("media_sync_failure_mode") == "fail":
+                        version.status = "failed"
+                        version.error_code = "QUEUE_DISPATCH_FAILED"
+                        version.error_message = dispatch_message[:4000]
+                        document.status = "failed"
+                        db.commit()
+                        raise RuntimeError(f"解析任务提交失败：{dispatch_error}") from dispatch_error
+            _step(db, job.id, "dispatch", 3, "succeeded", {"parse_job_ids": dispatched})
 
             source.last_sync_at = now()
             source.last_sync_status = "fetched"
@@ -1036,7 +1740,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                             content_hash=item.content_hash,
                             structural_path=element.structural_path,
                             page_number=element.page_number,
-                            source_span={"start": item.start_index, "end": item.end_index, **item.metadata},
+                            source_span={"start": item.start_index, "end": item.end_index, **(element.element_metadata or {}), **item.metadata},
                             scope_tokens=element.scope_tokens or [],
                         )
                         db.add(row)
@@ -1048,7 +1752,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         row.content_hash = item.content_hash
                         row.structural_path = element.structural_path
                         row.page_number = element.page_number
-                        row.source_span = {"start": item.start_index, "end": item.end_index, **item.metadata}
+                        row.source_span = {"start": item.start_index, "end": item.end_index, **(element.element_metadata or {}), **item.metadata}
                         row.scope_tokens = element.scope_tokens or []
                         row.status = "staged"
                         row.deleted_at = None

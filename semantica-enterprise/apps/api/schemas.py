@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from packages.platform.media import normalize_media_policy
+
 
 SOURCE_TYPES = Literal[
     "web", "rest", "rss", "sitemap", "git", "database", "email", "mcp",
@@ -64,6 +66,7 @@ def _validate_source_config(value: dict[str, Any]) -> dict[str, Any]:
         ("max_depth", 0, 32),
         ("limit", 1, 100000),
         ("max_messages", 1, 10000),
+        ("max_media_items_per_sync", 1, 10000),
     ):
         if key not in value or value[key] in (None, ""):
             continue
@@ -81,6 +84,21 @@ def _validate_source_config(value: dict[str, Any]) -> dict[str, Any]:
         if method not in {"GET", "POST"}:
             raise ValueError("REST 数据源仅支持 GET 或 POST")
         value["method"] = method
+    if "response_mode" in value and value["response_mode"] not in {"json", "binary"}:
+        raise ValueError("REST 响应类型仅支持 json 或 binary")
+    if "media_sync_failure_mode" in value and value["media_sync_failure_mode"] not in {"partial", "fail"}:
+        raise ValueError("媒体同步失败处理仅支持 partial 或 fail")
+    for key in ("media_allow_sync_override", "media_cloud_processing_confirmed"):
+        if key in value and not isinstance(value[key], bool):
+            raise ValueError(f"{key} 必须是布尔值")
+    if "media_policy_override" in value:
+        override = value["media_policy_override"]
+        if not isinstance(override, dict):
+            raise ValueError("media_policy_override 必须是对象")
+        # Validate the partial override against the same strict schema used by
+        # upload and processing. Keep the partial shape so inheritance from a
+        # selected policy is not accidentally replaced by default values.
+        normalize_media_policy(override)
     for key in ("secret_header", "secret_prefix"):
         if key not in value:
             continue
@@ -210,6 +228,7 @@ class SpaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     owner_id: str | None = None
+    media_policy_id: str | None = None
     enabled: bool = True
 
 
@@ -218,6 +237,7 @@ class SpaceUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     owner_id: str | None = None
+    media_policy_id: str | None = None
     enabled: bool | None = None
 
 
@@ -281,12 +301,92 @@ class ParserPolicyUpdate(BaseModel):
     is_default: bool | None = None
 
 
+class MediaPolicyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    applicable_media_types: list[Literal["image", "audio", "video"]] = Field(
+        default_factory=lambda: ["image", "audio", "video"]
+    )
+    config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    is_default: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("策略名称不能为空")
+        return value
+
+    @field_validator("applicable_media_types")
+    @classmethod
+    def validate_media_types(cls, value: list[str]) -> list[str]:
+        value = list(dict.fromkeys(value))
+        if not value:
+            raise ValueError("至少选择一种适用媒介")
+        return value
+
+    @field_validator("config")
+    @classmethod
+    def validate_config(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return normalize_media_policy(value)
+
+
+class MediaPolicyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    applicable_media_types: list[Literal["image", "audio", "video"]] | None = None
+    config: dict[str, Any] | None = None
+    enabled: bool | None = None
+    is_default: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("策略名称不能为空")
+        return value
+
+    @field_validator("applicable_media_types")
+    @classmethod
+    def validate_media_types(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        value = list(dict.fromkeys(value))
+        if not value:
+            raise ValueError("至少选择一种适用媒介")
+        return value
+
+    @field_validator("config")
+    @classmethod
+    def validate_config(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return normalize_media_policy(value) if value is not None else None
+
+
+class MediaFrameEstimateRequest(BaseModel):
+    duration_seconds: float = Field(ge=0, le=86_400)
+    media_policy_id: str | None = None
+    override: dict[str, Any] = Field(default_factory=dict)
+
+
+class MediaReprocessRequest(BaseModel):
+    media_policy_id: str | None = None
+    override: dict[str, Any] = Field(default_factory=dict)
+    bypass_cache: bool = False
+    cloud_processing_confirmed: bool = False
+
+
 class SourceCreate(BaseModel):
     space_id: str
     name: str = Field(min_length=1, max_length=200)
     source_type: SOURCE_TYPES
     config: dict[str, Any] = Field(default_factory=dict)
     secret: str | None = None
+    media_policy_id: str | None = None
     enabled: bool = True
 
     @field_validator("name")
@@ -315,6 +415,7 @@ class SourceUpdate(BaseModel):
     config: dict[str, Any] | None = None
     secret: str | None = None
     clear_secret: bool = False
+    media_policy_id: str | None = None
     enabled: bool | None = None
 
     @field_validator("name")
@@ -352,6 +453,12 @@ class SourceConnectionTest(BaseModel):
             raise ValueError("测试新数据源时必须选择知识空间")
         _validate_source_type_config(self.source_type, self.config)
         return self
+
+
+class SourceSyncRequest(BaseModel):
+    media_policy_id: str | None = None
+    media_policy_override: dict[str, Any] = Field(default_factory=dict)
+    cloud_processing_confirmed: bool = False
 
 
 class DocumentUpdate(BaseModel):

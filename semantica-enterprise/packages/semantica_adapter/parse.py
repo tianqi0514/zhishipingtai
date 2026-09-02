@@ -481,6 +481,7 @@ def _elements_from_result(
         page: int | None = None,
         metadata: dict[str, Any] | None = None,
         bbox: list[float] | None = None,
+        stable_key: str | None = None,
     ) -> None:
         clean = (
             _clean_control_characters(text)
@@ -499,6 +500,7 @@ def _elements_from_result(
                 page_number=page,
                 metadata={"parser": parser_name, **(metadata or {})},
                 bbox=bbox,
+                stable_key=stable_key,
             )
         )
 
@@ -576,6 +578,25 @@ def _elements_from_result(
             add("table", table, f"tables/{index}")
     elif parser_name == "image":
         metadata = result.get("metadata") or {}
+        media_context = dict(context or {})
+        common_media_metadata = {
+            "source_file": media_context.get("source_file"),
+            "document_id": media_context.get("document_id"),
+            "version_id": media_context.get("version_id"),
+            "processing_run_id": media_context.get("processing_run_id"),
+            "processing_policy_version": media_context.get("processing_policy_version"),
+            "processing_policy_hash": media_context.get("processing_policy_hash"),
+            "media_checksum": media_context.get("media_checksum"),
+            "vision_model_config_id": media_context.get("vision_model_config_id"),
+            "prompt_version": media_context.get("prompt_version"),
+            "source_path": media_context.get("source_path"),
+            "attachment_parent": media_context.get("attachment_parent"),
+        }
+        def image_key(kind: str, text: str) -> str:
+            return ":".join([
+                "media", str(common_media_metadata.get("processing_policy_hash") or "legacy"),
+                kind, hashlib.sha256(str(text).encode("utf-8")).hexdigest(),
+            ])
         text = "\n\n".join(
             item for item in [result.get("text") or "", result.get("vision_description") or ""] if item
         )
@@ -584,12 +605,41 @@ def _elements_from_result(
             text,
             "image/0",
             metadata={
+                **common_media_metadata,
                 "image": metadata,
                 "ocr": result.get("ocr"),
                 "vision_status": result.get("vision_status", "not_configured"),
                 "vision_model": result.get("vision_model"),
             },
+            stable_key=image_key("image", text),
         )
+        for frame in result.get("frames") or []:
+            frame_metadata = {
+                **common_media_metadata,
+                "media_type": "image",
+                "time_start": float(frame.get("timestamp") or 0),
+                "time_end": float(frame.get("timestamp") or 0),
+                "frame_index": frame.get("frame_index"),
+                "frame_ids": [frame.get("id")] if frame.get("id") else [],
+                "object_key": frame.get("object_key"),
+                "thumbnail_key": frame.get("thumbnail_key"),
+                "format": frame.get("format", "jpeg"),
+                "ocr_confidence": frame.get("ocr_confidence"),
+                "vision_model": frame.get("vision_model"),
+            }
+            if frame.get("ocr_text"):
+                add(
+                    "keyframe_ocr", frame["ocr_text"], "image/frames/0/ocr",
+                    metadata=frame_metadata, stable_key=image_key("frame-ocr", frame["ocr_text"]),
+                )
+            vision = frame.get("vision_result") or {}
+            visual_summary = vision.get("scene_summary") or vision.get("summary")
+            if visual_summary:
+                add(
+                    "visual_scene", visual_summary, "image/frames/0/vision",
+                    metadata={**frame_metadata, "vision": vision},
+                    stable_key=image_key("visual-scene", visual_summary),
+                )
     elif parser_name == "code":
         add(
             "code",
@@ -637,29 +687,185 @@ def _elements_from_result(
     elif parser_name == "media":
         media_type = result.get("type") or "audio"
         metadata = result.get("metadata") or {}
+        media_context = dict(context or {})
+        common_media_metadata = {
+            "source_file": media_context.get("source_file"),
+            "document_id": media_context.get("document_id"),
+            "version_id": media_context.get("version_id"),
+            "processing_run_id": media_context.get("processing_run_id"),
+            "processing_policy_version": media_context.get("processing_policy_version"),
+            "processing_policy_hash": media_context.get("processing_policy_hash"),
+            "media_checksum": media_context.get("media_checksum"),
+            "asr_model_config_id": media_context.get("asr_model_config_id"),
+            "vision_model_config_id": media_context.get("vision_model_config_id"),
+            "prompt_version": media_context.get("prompt_version"),
+            "source_path": media_context.get("source_path"),
+            "attachment_parent": media_context.get("attachment_parent"),
+        }
+        def media_key(kind: str, index: int, start: float, end: float, text: str) -> str:
+            content_hash = hashlib.sha256(str(text).encode("utf-8")).hexdigest()
+            return ":".join([
+                "media", str(common_media_metadata.get("processing_policy_hash") or "legacy"),
+                kind, str(index), f"{start:.3f}", f"{end:.3f}", content_hash,
+            ])
         transcript = result.get("transcript") or ""
-        add(media_type, json.dumps(metadata, ensure_ascii=False), f"{media_type}/metadata", metadata=metadata)
+        add(media_type, json.dumps(metadata, ensure_ascii=False), f"{media_type}/metadata", metadata={**common_media_metadata, **metadata})
+        segments = result.get("segments") or []
+        for index, segment in enumerate(segments):
+            start = float(segment.get("start") or 0)
+            end = float(segment.get("end") or start)
+            add(
+                "speaker_turn" if segment.get("speaker") else "transcript_segment",
+                segment.get("text") or "",
+                f"{media_type}/transcript/{index}",
+                metadata={
+                    **common_media_metadata,
+                    "media_type": media_type,
+                    "time_start": start,
+                    "time_end": end,
+                    "segment_index": segment.get("segment_index", index),
+                    "speaker": segment.get("speaker"),
+                    "language": segment.get("language"),
+                    "confidence": segment.get("confidence"),
+                    "words": segment.get("words") or [],
+                    "events": segment.get("events") or [],
+                    "model": result.get("model"),
+                    "model_version": result.get("model_version"),
+                    "transcription_time_seconds": result.get("transcription_time_seconds"),
+                },
+                stable_key=media_key("transcript", index, start, end, segment.get("text") or ""),
+            )
+        for index, event in enumerate(result.get("audio_events") or []):
+            start = float(event.get("start") or 0)
+            end = float(event.get("end") or start)
+            add(
+                "audio_event",
+                str(event.get("name") or "音频事件"),
+                f"{media_type}/audio-events/{index}",
+                metadata={
+                    **common_media_metadata,
+                    "media_type": media_type,
+                    "time_start": start,
+                    "time_end": max(start, end),
+                    "event": event.get("name"),
+                    "model": result.get("model"),
+                    "model_version": result.get("model_version"),
+                },
+                stable_key=media_key("audio-event", index, start, max(start, end), str(event.get("name") or "音频事件")),
+            )
         if transcript:
             add(
                 "transcript",
                 transcript,
                 f"{media_type}/transcript",
                 metadata={
+                    **common_media_metadata,
                     "segments": result.get("segments") or [],
                     "model": result.get("model"),
+                    "model_version": result.get("model_version"),
+                    "transcription_time_seconds": result.get("transcription_time_seconds"),
                     "transcription_status": result.get("transcription_status", "succeeded"),
                 },
             )
-        if media_type == "video" and result.get("vision_description"):
+        scenes = result.get("scenes") or []
+        scene_parent_ids = {
+            int(scene.get("scene_index", index)): scene.get("id")
+            for index, scene in enumerate(scenes)
+            if scene.get("id")
+        }
+        for frame in result.get("frames") or []:
+            timestamp = float(frame.get("timestamp") or 0)
+            scene_index = frame.get("scene_index")
+            frame_metadata = {
+                **common_media_metadata,
+                "media_type": media_type,
+                "time_start": timestamp,
+                "time_end": timestamp,
+                "frame_index": frame.get("frame_index"),
+                "frame_ids": [frame.get("id")] if frame.get("id") else [],
+                "scene_index": scene_index,
+                "parent_element_id": scene_parent_ids.get(int(scene_index)) if scene_index is not None else None,
+                "object_key": frame.get("object_key"),
+                "thumbnail_key": frame.get("thumbnail_key"),
+                "ocr_confidence": frame.get("ocr_confidence"),
+                "vision_model": frame.get("vision_model"),
+                "vision_called_at": frame.get("vision_called_at"),
+                "cloud_processing_reason": frame.get("cloud_processing_reason"),
+            }
+            if frame.get("ocr_text"):
+                add(
+                    "keyframe_ocr", frame["ocr_text"],
+                    f"{media_type}/frames/{frame.get('frame_index', len(elements))}/ocr",
+                    metadata=frame_metadata,
+                    stable_key=media_key("frame-ocr", int(frame.get("frame_index") or 0), timestamp, timestamp, frame["ocr_text"]),
+                )
+        for index, scene in enumerate(scenes):
+            if not scene.get("summary"):
+                continue
+            add(
+                "visual_scene", scene["summary"], f"video/scenes/{index}",
+                metadata={
+                    **common_media_metadata,
+                    "media_type": media_type,
+                    "time_start": float(scene.get("time_start") or 0),
+                    "time_end": float(scene.get("time_end") or 0),
+                    "scene_index": scene.get("scene_index", index),
+                    "scene_id": scene.get("id"),
+                    "parent_element_id": None,
+                    "frame_ids": (scene.get("evidence") or {}).get("frame_ids") or [],
+                    "evidence": scene.get("evidence") or {},
+                    "vision_model": result.get("vision_model"),
+                },
+                stable_key=media_key("scene", index, float(scene.get("time_start") or 0), float(scene.get("time_end") or 0), scene["summary"]),
+            )
+            if result.get("generate_chapters"):
+                add(
+                    "media_chapter", scene["summary"], f"video/chapters/{index}",
+                    metadata={
+                        **common_media_metadata,
+                        "media_type": media_type,
+                        "time_start": float(scene.get("time_start") or 0),
+                        "time_end": float(scene.get("time_end") or 0),
+                        "scene_index": scene.get("scene_index", index),
+                        "scene_id": scene.get("id"),
+                        "parent_element_id": scene.get("id"),
+                        "frame_ids": (scene.get("evidence") or {}).get("frame_ids") or [],
+                        "evidence": scene.get("evidence") or {},
+                    },
+                    stable_key=media_key("chapter", index, float(scene.get("time_start") or 0), float(scene.get("time_end") or 0), scene["summary"]),
+                )
+        if media_type == "video" and result.get("vision_description") and not scenes:
             add(
                 "visual_description",
                 result["vision_description"],
                 "video/keyframes",
                 metadata={
+                    **common_media_metadata,
                     "keyframes": result.get("keyframes") or [],
                     "model": result.get("vision_model"),
                     "vision_status": result.get("vision_status", "succeeded"),
                 },
+            )
+        summary_parts = [
+            value for value in [
+                transcript,
+                result.get("vision_description") or "",
+            ] if value
+        ]
+        if summary_parts and result.get("generate_summary", True):
+            add(
+                "media_summary", "\n\n".join(summary_parts), f"{media_type}/summary",
+                metadata={
+                    **common_media_metadata,
+                    "media_type": media_type,
+                    "time_start": 0.0,
+                    "time_end": (result.get("probe") or metadata).get("duration_seconds") or (result.get("probe") or metadata).get("duration"),
+                    "segment_count": len(segments),
+                    "scene_count": len(scenes),
+                    "frame_count": len(result.get("frames") or []),
+                    "parent_element_id": None,
+                },
+                stable_key=media_key("summary", 0, 0.0, float((result.get("probe") or metadata).get("duration_seconds") or 0), "\n\n".join(summary_parts)),
             )
     elif parser_name == "columnar":
         for index, row in enumerate(result.get("data") or []):
@@ -789,7 +995,10 @@ def parse_document(
         version_id,
         parser_name,
         raw_result,
-        context=dict(policy.get("database_context") or {}),
+        context={
+            **dict(policy.get("database_context") or {}),
+            **dict(policy.get("media_context") or {}),
+        },
     )
     attachment_summaries = []
     for attachment_index, (filename, child_elements, child_summary) in enumerate(attachment_results):
@@ -873,6 +1082,13 @@ def _parse_archive(
         extracted = safe_extract_zip(path, root, limits=limits, depth=depth)
         for member in allowed_archive_members(extracted):
             relative = member.relative_to(root).as_posix()
+            if policy.get("skip_archive_media") and member.suffix.lower() in (_AUDIO_SUFFIXES | _VIDEO_SUFFIXES | {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif"}):
+                members.append({
+                    "path": relative,
+                    "status": "delegated",
+                    "detail": "媒体成员已作为独立文档进入媒体处理流水线",
+                })
+                continue
             try:
                 child_elements, child_summary = parse_document(
                     member,
@@ -900,10 +1116,34 @@ def _parse_archive(
                 members.append(
                     {"path": relative, "status": "failed", "error": f"{type(exc).__name__}: {exc}"[:1000]}
                 )
+    delegated_members = [item for item in members if item.get("status") == "delegated"]
+    if not elements and delegated_members:
+        # A connector archive can legitimately contain only audio/video/image
+        # members.  Those members are processed as independent documents, but
+        # the source snapshot must still remain a valid, traceable manifest
+        # instead of appearing as a failed document in the asset list.
+        delegated_paths = [str(item.get("path") or "") for item in delegated_members]
+        elements.append(
+            _element(
+                version_id,
+                "attachment",
+                0,
+                "媒体成员已拆分为独立文档处理：" + "、".join(delegated_paths),
+                "archive/media-manifest",
+                metadata={
+                    "delegated_media": True,
+                    "delegated_member_count": len(delegated_paths),
+                    "delegated_members": delegated_paths,
+                },
+            )
+        )
     if not elements:
         raise ValueError("ZIP 中没有可成功解析的受支持文件")
     return elements, {
         "parser": "safe-zip",
+        "delegated_media_manifest": bool(
+            len(elements) == 1 and elements[0].metadata.get("delegated_media")
+        ),
         "element_count": len(elements),
         "text_chars": sum(len(item.text) for item in elements),
         "types": {

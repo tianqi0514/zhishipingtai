@@ -8,6 +8,7 @@ from .models import (
     ChunkPolicy,
     ExtractionPolicy,
     GovernancePolicy,
+    MediaParsingPolicy,
     ModelConfig,
     Ontology,
     OntologyTerm,
@@ -18,6 +19,8 @@ from .models import (
     User,
 )
 from .security import encrypt_secret, hash_password
+from .media import DEFAULT_MEDIA_POLICY
+from .media_policy import ensure_policy_version
 
 
 DEFAULT_PERMISSIONS = {
@@ -91,6 +94,25 @@ def bootstrap(db: Session) -> None:
             )
         )
 
+    media_policy = db.scalar(
+        select(MediaParsingPolicy).where(
+            MediaParsingPolicy.tenant_id == tenant.id,
+            MediaParsingPolicy.is_default.is_(True),
+            MediaParsingPolicy.deleted_at.is_(None),
+        )
+    )
+    if media_policy is None:
+        media_policy = MediaParsingPolicy(
+            tenant_id=tenant.id,
+            name="默认多模态解析策略",
+            description="本地媒体预处理、音频转写与可控云端视觉理解",
+            applicable_media_types=["image", "audio", "video"],
+            config=DEFAULT_MEDIA_POLICY,
+            enabled=True,
+            is_default=True,
+        )
+        db.add(media_policy)
+        db.flush()
     kimi_model = db.scalar(
         select(ModelConfig).where(
             ModelConfig.tenant_id == tenant.id,
@@ -117,6 +139,74 @@ def bootstrap(db: Session) -> None:
             )
         db.add(kimi_model)
         db.flush()
+
+    vision_model = db.scalar(
+        select(ModelConfig).where(
+            ModelConfig.tenant_id == tenant.id,
+            ModelConfig.model_kind == "vision",
+            ModelConfig.is_default.is_(True),
+            ModelConfig.deleted_at.is_(None),
+        )
+    )
+    if vision_model is None:
+        vision_model = ModelConfig(
+            tenant_id=tenant.id,
+            name="Kimi K3 视觉理解",
+            model_kind="vision",
+            provider="kimi",
+            model_name="kimi-k3",
+            base_url=kimi_model.base_url,
+            config={
+                "credential_model_config_id": kimi_model.id,
+                "timeout": 120,
+                "max_tokens": 2048,
+            },
+            enabled=True,
+            is_default=True,
+            last_test_status="untested",
+        )
+        db.add(vision_model); db.flush()
+
+    asr_model = db.scalar(
+        select(ModelConfig).where(
+            ModelConfig.tenant_id == tenant.id,
+            ModelConfig.model_kind == "asr",
+            ModelConfig.is_default.is_(True),
+            ModelConfig.deleted_at.is_(None),
+        )
+    )
+    if asr_model is None:
+        asr_model = ModelConfig(
+            tenant_id=tenant.id,
+            name="本地 SenseVoiceSmall",
+            model_kind="asr",
+            provider="openai_compatible",
+            model_name="sensevoice",
+            base_url="http://asr-runtime:8001/v1",
+            config={"local_runtime": True, "timeout": 600, "language": "zh"},
+            enabled=True,
+            is_default=True,
+            last_test_status="untested",
+        )
+        db.add(asr_model); db.flush()
+
+    media_config = {**(media_policy.config or {})}
+    media_config["asr"] = {**(media_config.get("asr") or {}), "model_config_id": asr_model.id}
+    media_config["vision"] = {**(media_config.get("vision") or {}), "model_config_id": vision_model.id}
+    current_version = ensure_policy_version(db, media_policy, actor_id=admin.id if admin.id else None)
+    from .media import media_policy_snapshot
+    desired_snapshot = media_policy_snapshot(
+        policy_id=media_policy.id,
+        policy_version_id=None,
+        policy_name=media_policy.name,
+        version_number=media_policy.current_version + 1,
+        applicable_media_types=media_policy.applicable_media_types or [],
+        config=media_config,
+    )
+    if current_version.config_hash != desired_snapshot["config_hash"]:
+        media_policy.config = media_config
+        media_policy.current_version += 1
+        ensure_policy_version(db, media_policy, actor_id=admin.id if admin.id else None)
 
     if db.scalar(select(ModelConfig).where(ModelConfig.tenant_id == tenant.id, ModelConfig.model_kind == "embedding")) is None:
         db.add(

@@ -250,12 +250,16 @@
       this.projected.clear();
       for (const node of this.nodes) this.projected.set(node.id, this._project(node));
       const sortedEdges = [...this.edges].sort((a, b) => {
-        const az = (this.projected.get(a.source).z + this.projected.get(a.target).z) / 2;
-        const bz = (this.projected.get(b.source).z + this.projected.get(b.target).z) / 2;
+        const aSource = this.projected.get(a.source), aTarget = this.projected.get(a.target);
+        const bSource = this.projected.get(b.source), bTarget = this.projected.get(b.target);
+        const az = aSource && aTarget ? (aSource.z + aTarget.z) / 2 : -Infinity;
+        const bz = bSource && bTarget ? (bSource.z + bTarget.z) / 2 : -Infinity;
         return az - bz;
       });
       for (const edge of sortedEdges) this._drawEdge(edge);
-      const sortedNodes = [...this.nodes].sort((a, b) => this.projected.get(a.id).z - this.projected.get(b.id).z);
+      const sortedNodes = [...this.nodes]
+        .filter(node => this.projected.has(node.id))
+        .sort((a, b) => this.projected.get(a.id).z - this.projected.get(b.id).z);
       for (const node of sortedNodes) this._drawNode(node);
       if (!this.nodes.length) {
         ctx.fillStyle = '#6f808a'; ctx.font = '14px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif';
@@ -278,7 +282,9 @@
 
     _hit(event) {
       const point = this._eventPoint(event);
-      const nodes = [...this.nodes].sort((a, b) => this.projected.get(b.id).z - this.projected.get(a.id).z);
+      const nodes = [...this.nodes]
+        .filter(node => this.projected.has(node.id))
+        .sort((a, b) => this.projected.get(b.id).z - this.projected.get(a.id).z);
       for (const node of nodes) {
         const projected = this.projected.get(node.id);
         if (projected && Math.hypot(point.x - projected.x, point.y - projected.y) <= (projected.radius || 9) + 5) return {kind: 'node', id: node.id};

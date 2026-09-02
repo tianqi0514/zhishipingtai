@@ -6,4 +6,5 @@ __pycache__/
 data/*
 !data/.gitkeep
 tests/fixtures/guolian-generated/
+tests/fixtures/media-generated/
 tests/fixtures/.font-cache/

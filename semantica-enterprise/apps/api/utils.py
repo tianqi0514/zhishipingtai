@@ -18,8 +18,10 @@ def serialize_row(row: Any) -> dict[str, Any]:
         data[column.key] = value
 
     if isinstance(row, ModelConfig):
-        if row.provider in {"huggingface", "bge", "fastembed"}:
+        if row.provider in {"huggingface", "bge", "fastembed"} or (row.config or {}).get("local_runtime"):
             data["api_key_status"] = "本地运行 · 无需 API Key"
+        elif (row.config or {}).get("credential_model_config_id"):
+            data["api_key_status"] = "复用受管凭据"
         else:
             data["api_key_status"] = masked_secret(row.api_key_encrypted)
         data.pop("api_key_encrypted", None)

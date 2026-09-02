@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import io
 from pathlib import Path
+from collections.abc import Iterator
 
 from minio import Minio
 from minio.error import S3Error
@@ -60,6 +61,55 @@ class ObjectStorage:
         response = self.client.get_object(self.settings.object_store_bucket, object_key)
         try:
             return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+
+    def stat_size(self, object_key: str) -> int:
+        """Return object size without downloading the object body."""
+        if self.settings.use_local_object_store:
+            return (self.settings.local_storage_path / object_key).stat().st_size
+        return int(self.client.stat_object(self.settings.object_store_bucket, object_key).size)
+
+    def iter_bytes(
+        self,
+        object_key: str,
+        *,
+        offset: int = 0,
+        length: int | None = None,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]:
+        """Stream a bounded object range without buffering a large media file."""
+        if offset < 0 or (length is not None and length < 0):
+            raise ValueError("offset 和 length 不能为负数")
+        remaining = length
+        if self.settings.use_local_object_store:
+            with (self.settings.local_storage_path / object_key).open("rb") as stream:
+                stream.seek(offset)
+                while remaining is None or remaining > 0:
+                    size = chunk_size if remaining is None else min(chunk_size, remaining)
+                    block = stream.read(size)
+                    if not block:
+                        break
+                    if remaining is not None:
+                        remaining -= len(block)
+                    yield block
+            return
+        response = self.client.get_object(
+            self.settings.object_store_bucket,
+            object_key,
+            offset=offset,
+            length=length,
+        )
+        try:
+            while remaining is None or remaining > 0:
+                size = chunk_size if remaining is None else min(chunk_size, remaining)
+                block = response.read(size)
+                if not block:
+                    break
+                if remaining is not None:
+                    remaining -= len(block)
+                yield block
         finally:
             response.close()
             response.release_conn()

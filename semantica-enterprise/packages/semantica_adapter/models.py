@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import tempfile
 import time
 import wave
@@ -48,6 +49,8 @@ def test_model_connection(
             raise RuntimeError("本地 HuggingFace 模型不可用")
         return {"status": "ok", "local": True}
 
+    if not api_key and (config or {}).get("local_runtime"):
+        api_key = "local-runtime"
     if not api_key:
         raise ValueError("API Key 未配置")
     settings = config or {}
@@ -109,23 +112,24 @@ def test_model_connection(
             raise RuntimeError("语音模型未返回响应")
         return {"status": "ok", "model": model_name, "provider": provider, "request": "transcription"}
     if model_kind == "vision":
-        # A real 1x1 PNG keeps connection testing inexpensive while exercising
-        # the configured model's image-capable chat endpoint.
-        pixel = base64.b64encode(
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-            b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDAT\x08\xd7c\xf8\xcf\xc0\x00\x00"
-            b"\x03\x01\x01\x00\x18\xdd\x8d\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
-        ).decode("ascii")
+        # Exercise visual recognition, not merely endpoint availability.
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (32, 32), (255, 0, 0)).save(buffer, format="PNG")
+        pixel = base64.b64encode(buffer.getvalue()).decode("ascii")
         response = client.chat.completions.create(
             model=model_name,
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "只回答图像的主色。"},
+                    {"type": "text", "text": "识别这张纯色图片，只回答主色名称。"},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{pixel}"}},
                 ],
             }],
-            max_tokens=8,
+            # Reasoning-capable multimodal models can spend a small token
+            # budget before emitting the visible answer.
+            max_tokens=256,
             temperature=temperature,
         )
     elif model_kind == "llm":
@@ -139,4 +143,8 @@ def test_model_connection(
         raise ValueError(f"不支持的模型类型：{model_kind}")
     if not response.choices:
         raise RuntimeError("模型未返回回答")
+    if model_kind == "vision":
+        answer = str(response.choices[0].message.content or "").strip().casefold()
+        if "红" not in answer and "red" not in answer:
+            raise RuntimeError("视觉模型返回了响应，但未正确识别测试图片")
     return {"status": "ok", "model": model_name, "provider": provider, "request": model_kind}

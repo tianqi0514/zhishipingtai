@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from packages.semantica_adapter.models import test_model_connection
 from packages.semantica_adapter.transcription import transcribe_media
-from packages.semantica_adapter.vision import describe_visual
+from packages.semantica_adapter.vision import describe_image_structured, describe_visual
 
 
 ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "generated"
@@ -26,6 +26,7 @@ OBSERVED: dict[str, int] = {
     "rerank": 0,
     "retry_attempts": 0,
     "timeout_attempts": 0,
+    "structured_attempts": 0,
 }
 
 
@@ -73,6 +74,24 @@ class ModelHandler(BaseHTTPRequestHandler):
                 assert payload.get("temperature") == 1.0
             serialized = json.dumps(payload)
             OBSERVED["images"] += serialized.count("data:image/")
+            if payload.get("model") == "structured-retry-fixture":
+                OBSERVED["structured_attempts"] += 1
+                content = (
+                    "not-json"
+                    if OBSERVED["structured_attempts"] == 1
+                    else json.dumps({
+                        "scene_summary": "画面展示 NexusOne 企业知识平台。",
+                        "visible_objects": [{"name": "NexusOne", "attributes": {"type": "产品"}}],
+                        "people_and_roles": [], "actions": [], "environment": "演示幻灯片",
+                        "visible_text_summary": ["NexusOne"], "chart_or_table_summary": "",
+                        "product_or_business_objects": ["NexusOne"], "possible_relationships": [],
+                        "uncertainty": [], "warnings": [], "evidence_frame_ids": [],
+                    }, ensure_ascii=False)
+                )
+            elif payload.get("model") == "vision-fixture":
+                content = "红色"
+            else:
+                content = "画面展示 NexusOne 企业知识平台。"
             self.respond({
                 "id": "chatcmpl-fixture",
                 "object": "chat.completion",
@@ -80,7 +99,7 @@ class ModelHandler(BaseHTTPRequestHandler):
                 "model": payload.get("model"),
                 "choices": [{
                     "index": 0,
-                    "message": {"role": "assistant", "content": "画面展示 NexusOne 企业知识平台。"},
+                    "message": {"role": "assistant", "content": content},
                     "finish_reason": "stop",
                 }],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
@@ -120,6 +139,10 @@ def main() -> None:
         video = describe_visual(
             ROOT / "fact.mp4", "video", api_key="fixture", model="vision-fixture", base_url=base_url,
             keyframe_count=2,
+        )
+        structured = describe_image_structured(
+            ROOT / "fact.png", api_key="fixture", model="structured-retry-fixture",
+            base_url=base_url, max_retries=2,
         )
         audio = transcribe_media(
             ROOT / "fact.wav", "audio", api_key="fixture", model="asr-fixture", base_url=base_url
@@ -165,6 +188,8 @@ def main() -> None:
         server.server_close()
 
     assert image["vision_status"] == "succeeded"
+    assert structured["result"]["scene_summary"].startswith("画面展示 NexusOne")
+    assert OBSERVED["structured_attempts"] == 2
     assert video["vision_status"] == "succeeded" and len(video["keyframes"]) == 2
     assert audio["segments"][0]["end"] == 1.5
     assert video_audio["transcription_status"] == "succeeded"

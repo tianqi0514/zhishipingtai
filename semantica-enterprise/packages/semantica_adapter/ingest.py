@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 import io
+import hashlib
 import mimetypes
 import os
 import re
 import socket
+import shutil
+import subprocess
 import tempfile
 import threading
 import zipfile
+from email import policy as email_policy
+from email.parser import BytesParser
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from ftplib import FTP, FTP_TLS
@@ -83,6 +88,66 @@ def _archive_payload(
         title=source_name,
         metadata={"file_count": len(files), "content_bytes": total, **(metadata or {})},
     )
+
+
+def extract_media_payloads(
+    payload: IngestedPayload,
+    *,
+    maximum_items: int = 100,
+    maximum_total_bytes: int = MAX_SOURCE_BYTES,
+    maximum_compression_ratio: float = 200.0,
+) -> list[IngestedPayload]:
+    """Safely expose media members so each receives the full media pipeline.
+
+    Multi-file connectors intentionally keep their deterministic ZIP snapshot
+    for source-level incremental history. Media members are additionally
+    materialized as child documents; this avoids treating a video merely as an
+    opaque archive attachment and preserves the existing archive contract.
+    """
+    from packages.platform.media import media_type_for
+
+    discovered: list[tuple[str, bytes, str]] = []
+    if payload.content_type == "application/zip" or Path(payload.filename).suffix.casefold() == ".zip":
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload.body)) as archive:
+                members = [item for item in archive.infolist() if not item.is_dir()]
+                if len(members) > MAX_SOURCE_FILES:
+                    raise ValueError("数据源归档文件数量超过安全上限")
+                total = 0
+                for member in members:
+                    safe_name = _safe_relative_name(member.filename)
+                    if member.flag_bits & 0x1:
+                        raise ValueError("数据源归档包含加密文件，无法安全解析")
+                    if member.compress_size and member.file_size / member.compress_size > maximum_compression_ratio:
+                        raise ValueError("数据源归档压缩比超过安全上限")
+                    total += int(member.file_size)
+                    if total > maximum_total_bytes:
+                        raise ValueError("数据源归档解压大小超过安全上限")
+                    content_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+                    if media_type_for(safe_name, content_type):
+                        discovered.append((safe_name, archive.read(member), content_type))
+        except zipfile.BadZipFile as exc:
+            raise ValueError("数据源归档已损坏") from exc
+    elif payload.content_type == "message/rfc822" or Path(payload.filename).suffix.casefold() == ".eml":
+        message = BytesParser(policy=email_policy.default).parsebytes(payload.body)
+        for part in message.iter_attachments():
+            name = _safe_relative_name(part.get_filename() or "attachment.bin")
+            content_type = str(part.get_content_type() or mimetypes.guess_type(name)[0] or "application/octet-stream")
+            if media_type_for(name, content_type):
+                discovered.append((name, part.get_payload(decode=True) or b"", content_type))
+    if len(discovered) > maximum_items:
+        raise ValueError(f"本次同步包含 {len(discovered)} 个媒体文件，超过配置上限 {maximum_items}")
+    return [
+        IngestedPayload(
+            body=body,
+            filename=f"{hashlib.sha256(name.encode('utf-8')).hexdigest()[:10]}-{Path(name).name}",
+            content_type=content_type,
+            title=f"{payload.title} · {name}",
+            metadata={"parent_snapshot": payload.filename, "source_path": name, "media_attachment": True},
+        )
+        for name, body, content_type in discovered
+        if body
+    ]
 
 
 def _source_roots() -> list[Path]:
@@ -311,6 +376,28 @@ def ingest_source(
         )
 
     if source_type == "rest":
+        if str(config.get("response_mode") or "json") == "binary":
+            host = httpx.URL(url).host or ""
+            _assert_network_target(host)
+            headers = dict(config.get("headers") or {})
+            if secret:
+                header_name = str(config.get("secret_header") or "Authorization")
+                headers[header_name] = str(config.get("secret_prefix") or "Bearer ") + secret
+            with _http_client(url, timeout=int(config.get("timeout", 30))) as client:
+                response = client.request(
+                    str(config.get("method") or "GET"), url, headers=headers,
+                    params=config.get("params"), json=config.get("body"),
+                )
+                response.raise_for_status()
+            content_type = str(response.headers.get("content-type") or "application/octet-stream").split(";", 1)[0]
+            suffix = mimetypes.guess_extension(content_type) or Path(httpx.URL(url).path).suffix or ".bin"
+            return IngestedPayload(
+                body=response.content,
+                filename=_safe_source_filename(source_name, suffix),
+                content_type=content_type,
+                title=source_name,
+                metadata={"status_code": response.status_code, "response_mode": "binary"},
+            )
         from semantica.ingest.api_ingestor import RESTIngestor
 
         host = httpx.URL(url).host or ""
@@ -413,15 +500,39 @@ def ingest_source(
                     RepoIngestor._validate_repo_host = staticmethod(original_validator)
         else:
             result = ingestor.ingest_repository(url, **options)
-        result.pop("temp_path", None)
-        return _json_payload(
-            source_name,
-            result,
-            {
-                "file_count": len(result.get("code_files") or []),
-                "commit_count": len(result.get("commits") or []),
-            },
-        )
+        repo_path = Path(str(result.pop("temp_path", "")))
+        media_files: list[tuple[str, bytes]] = []
+        if repo_path.is_dir():
+            attributes = repo_path / ".gitattributes"
+            uses_lfs = attributes.is_file() and "filter=lfs" in attributes.read_text(
+                encoding="utf-8", errors="ignore"
+            )
+            if uses_lfs:
+                if not shutil.which("git-lfs"):
+                    raise ValueError("仓库使用 Git LFS，但运行环境未安装 git-lfs")
+                pulled = subprocess.run(
+                    ["git", "lfs", "pull"], cwd=repo_path, capture_output=True,
+                    text=True, timeout=int(config.get("lfs_timeout") or 600), check=False,
+                )
+                if pulled.returncode:
+                    raise ValueError(f"Git LFS 文件拉取失败：{(pulled.stderr or '未知错误')[-500:]}")
+            for candidate in sorted(repo_path.rglob("*")):
+                if not candidate.is_file() or ".git" in candidate.relative_to(repo_path).parts:
+                    continue
+                relative = candidate.relative_to(repo_path).as_posix()
+                content_type = mimetypes.guess_type(relative)[0] or "application/octet-stream"
+                from packages.platform.media import media_type_for
+                if media_type_for(relative, content_type):
+                    media_files.append((relative, candidate.read_bytes()))
+        metadata = {
+            "file_count": len(result.get("code_files") or []),
+            "commit_count": len(result.get("commits") or []),
+            "media_file_count": len(media_files),
+        }
+        if media_files:
+            manifest = json.dumps(result, ensure_ascii=False, indent=2, default=_json_default).encode("utf-8")
+            return _archive_payload(source_name, [("repository.json", manifest), *media_files], metadata)
+        return _json_payload(source_name, result, metadata)
 
     if source_type == "database":
         from semantica.ingest.db_ingestor import DBIngestor
@@ -507,14 +618,44 @@ def ingest_source(
                 str(config.get("username")),
                 secret,
             )
-        emails = ingestor.ingest_mailbox(
-            mailbox_name=str(config.get("mailbox") or "INBOX"),
-            protocol=protocol,
-            since=config.get("since") or None,
-            max_emails=int(config.get("max_emails", 100)),
-            unread_only=bool(config.get("unread_only", False)),
-        )
-        return _json_payload(source_name, emails, {"email_count": len(emails)})
+        try:
+            emails = ingestor.ingest_mailbox(
+                mailbox_name=str(config.get("mailbox") or "INBOX"),
+                protocol=protocol,
+                since=config.get("since") or None,
+                max_emails=int(config.get("max_emails", 100)),
+                unread_only=bool(config.get("unread_only", False)),
+            )
+            files: list[tuple[str, bytes]] = []
+            serialized: list[dict[str, Any]] = []
+            for email_index, message in enumerate(emails):
+                value = dict(vars(message)) if hasattr(message, "__dict__") else dict(message)
+                clean_attachments = []
+                for attachment_index, attachment in enumerate(value.get("attachments") or []):
+                    info = dict(attachment)
+                    saved_path = info.pop("saved_path", None)
+                    clean_attachments.append(info)
+                    if saved_path and Path(str(saved_path)).is_file():
+                        attachment_name = _safe_relative_name(
+                            f"attachments/{email_index:04d}/{attachment_index:04d}-{info.get('filename') or 'attachment.bin'}"
+                        )
+                        files.append((attachment_name, Path(str(saved_path)).read_bytes()))
+                value["attachments"] = clean_attachments
+                serialized.append(value)
+            files.append((
+                "emails.json",
+                json.dumps(serialized, ensure_ascii=False, indent=2, default=_json_default).encode("utf-8"),
+            ))
+            return _archive_payload(
+                source_name,
+                files,
+                {"email_count": len(emails), "attachment_count": max(0, len(files) - 1)},
+            )
+        finally:
+            try:
+                ingestor.disconnect()
+            finally:
+                ingestor.attachment_processor.cleanup_attachments()
 
     if source_type == "mcp":
         from semantica.ingest.mcp_ingestor import MCPIngestor

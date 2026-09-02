@@ -99,6 +99,9 @@ class KnowledgeSpace(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="")
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     security_label: Mapped[str] = mapped_column(String(32), default="internal")
+    media_policy_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_parsing_policies.id"), nullable=True, index=True
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -147,6 +150,39 @@ class ParserPolicy(Base, TimestampMixin):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class MediaParsingPolicy(Base, TimestampMixin):
+    __tablename__ = "media_parsing_policies"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_media_policy_tenant_name"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    applicable_media_types: Mapped[list] = mapped_column(
+        JSON, default=lambda: ["image", "audio", "video"]
+    )
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    current_version: Mapped[int] = mapped_column(Integer, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class MediaParsingPolicyVersion(Base, TimestampMixin):
+    __tablename__ = "media_parsing_policy_versions"
+    __table_args__ = (
+        UniqueConstraint("policy_id", "version_number", name="uq_media_policy_version"),
+        UniqueConstraint("policy_id", "config_hash", name="uq_media_policy_config_hash"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    policy_id: Mapped[str] = mapped_column(ForeignKey("media_parsing_policies.id"), index=True)
+    version_number: Mapped[int] = mapped_column(Integer)
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    config_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+
 class SourceConnector(Base, TimestampMixin):
     __tablename__ = "source_connectors"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -160,6 +196,9 @@ class SourceConnector(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_sync_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    media_policy_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_parsing_policies.id"), nullable=True, index=True
+    )
 
 
 class DataSourceSchemaVersion(Base, TimestampMixin):
@@ -332,6 +371,101 @@ class DocumentVersion(Base, TimestampMixin):
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     parse_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    media_policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_parsing_policy_versions.id"), nullable=True, index=True
+    )
+    media_policy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class MediaProcessingRun(Base, TimestampMixin):
+    __tablename__ = "media_processing_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
+    version_id: Mapped[str] = mapped_column(ForeignKey("document_versions.id"), index=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id"), nullable=True, index=True)
+    policy_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_parsing_policy_versions.id"), nullable=True, index=True
+    )
+    policy_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    media_type: Mapped[str] = mapped_column(String(16), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(64), default="queued")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    cache: Mapped[dict] = mapped_column(JSON, default=dict)
+    probe: Mapped[dict] = mapped_column(JSON, default=dict)
+    asr_model_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_configs.id"), nullable=True
+    )
+    vision_model_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_configs.id"), nullable=True
+    )
+    warnings: Mapped[list] = mapped_column(JSON, default=list)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MediaAudioSegment(Base, TimestampMixin):
+    __tablename__ = "media_audio_segments"
+    __table_args__ = (
+        UniqueConstraint("run_id", "segment_index", name="uq_media_audio_segment"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("media_processing_runs.id"), index=True)
+    segment_index: Mapped[int] = mapped_column(Integer)
+    time_start: Mapped[float] = mapped_column(Float)
+    time_end: Mapped[float] = mapped_column(Float)
+    text: Mapped[str] = mapped_column(Text, default="")
+    language: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    speaker: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    segment_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class MediaScene(Base, TimestampMixin):
+    __tablename__ = "media_scenes"
+    __table_args__ = (UniqueConstraint("run_id", "scene_index", name="uq_media_scene"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("media_processing_runs.id"), index=True)
+    scene_index: Mapped[int] = mapped_column(Integer)
+    time_start: Mapped[float] = mapped_column(Float)
+    time_end: Mapped[float] = mapped_column(Float)
+    detection_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="ready")
+
+
+class MediaFrame(Base, TimestampMixin):
+    __tablename__ = "media_frames"
+    __table_args__ = (UniqueConstraint("run_id", "frame_index", name="uq_media_frame"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("media_processing_runs.id"), index=True)
+    scene_id: Mapped[str | None] = mapped_column(ForeignKey("media_scenes.id"), nullable=True, index=True)
+    frame_index: Mapped[int] = mapped_column(Integer)
+    timestamp_seconds: Mapped[float] = mapped_column(Float, index=True)
+    object_key: Mapped[str] = mapped_column(String(1000))
+    thumbnail_key: Mapped[str] = mapped_column(String(1000))
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    perceptual_hash: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    selection_reason: Mapped[str] = mapped_column(String(64), default="interval")
+    ocr_status: Mapped[str] = mapped_column(String(32), default="not_configured")
+    ocr_text: Mapped[str] = mapped_column(Text, default="")
+    ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vision_status: Mapped[str] = mapped_column(String(32), default="not_configured")
+    vision_result: Mapped[dict] = mapped_column(JSON, default=dict)
+    frame_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ContentElement(Base, TimestampMixin):

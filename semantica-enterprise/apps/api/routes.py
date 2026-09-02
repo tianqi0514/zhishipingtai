@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import io
+import json
 import re
 import tempfile
 import time
@@ -70,6 +71,7 @@ from apps.api.schemas import (
     SearchRequest,
     SourceCreate,
     SourceConnectionTest,
+    SourceSyncRequest,
     SourceUpdate,
     SpaceCreate,
     SpaceUpdate,
@@ -121,6 +123,7 @@ from packages.platform.models import (
     KnowledgeSpace,
     KnowledgeRelease,
     ModelConfig,
+    MediaParsingPolicy,
     Ontology,
     OntologyTerm,
     OrgUnit,
@@ -161,6 +164,8 @@ from packages.platform.security import (
     verify_password,
 )
 from packages.platform.storage import object_storage
+from packages.platform.media import estimate_frame_count, media_type_for, probe_media, require_cloud_confirmation
+from packages.platform.media_policy import resolve_media_policy
 from packages.semantica_adapter.capability import build_capability_report
 from packages.semantica_adapter.file_safety import UnsafeFileError, validate_file_identity
 from packages.semantica_adapter.formats import FORMAT_CAPABILITIES
@@ -639,16 +644,27 @@ def update_model(row_id: str, payload: ModelConfigUpdate, admin: User = Depends(
 @router.post("/model-configs/{row_id}/test")
 def test_model(row_id: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     row = _must_tenant(db, ModelConfig, row_id, admin.tenant_id, "模型配置")
+    started = time.perf_counter()
     try:
+        model_secret = decrypt_secret(row.api_key_encrypted)
+        credential_id = str((row.config or {}).get("credential_model_config_id") or "").strip()
+        if not model_secret and credential_id:
+            credential = _must_tenant(db, ModelConfig, credential_id, admin.tenant_id, "凭据模型配置")
+            model_secret = decrypt_secret(credential.api_key_encrypted)
         result = test_model_connection(
             provider=row.provider, model_kind=row.model_kind, model_name=row.model_name,
-            base_url=row.base_url, api_key=decrypt_secret(row.api_key_encrypted), config=row.config or {},
+            base_url=row.base_url, api_key=model_secret, config=row.config or {},
         )
         row.last_test_status = "success"; row.last_test_message = result.get("message", "连接成功")
     except Exception as exc:
         row.last_test_status = "failed"; row.last_test_message = f"{type(exc).__name__}: {exc}"[:1000]
     row.last_test_at = datetime.now(timezone.utc); db.commit()
-    return {"status": row.last_test_status, "message": row.last_test_message, "tested_at": row.last_test_at.isoformat()}
+    return {
+        "status": row.last_test_status,
+        "message": row.last_test_message,
+        "tested_at": row.last_test_at.isoformat(),
+        "elapsed_ms": round((time.perf_counter() - started) * 1000),
+    }
 
 
 @router.delete("/model-configs/{row_id}")
@@ -697,6 +713,8 @@ def list_spaces(user: User = Depends(get_current_user), db: Session = Depends(ge
 def create_space(payload: SpaceCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not user.is_admin: raise HTTPException(403, "需要管理员权限")
     values = payload.model_dump(); values["owner_id"] = values.get("owner_id") or user.id
+    if values.get("media_policy_id"):
+        _must_tenant(db, MediaParsingPolicy, values["media_policy_id"], user.tenant_id, "媒体解析策略")
     _must_tenant(db, User, values["owner_id"], user.tenant_id, "空间负责人")
     row = KnowledgeSpace(tenant_id=user.tenant_id, **values); db.add(row); db.flush()
     db.add(SpaceGrant(tenant_id=user.tenant_id, space_id=row.id, subject_type="user", subject_id=row.owner_id, permission="manage", effect="allow"))
@@ -709,7 +727,9 @@ def update_space(row_id: str, payload: SpaceUpdate, user: User = Depends(get_cur
     values = payload.model_dump(exclude_unset=True)
     if values.get("owner_id"):
         _must_tenant(db, User, values["owner_id"], user.tenant_id, "空间负责人")
-    apply_patch(row, values, {"code", "name", "description", "owner_id", "enabled"})
+    if values.get("media_policy_id"):
+        _must_tenant(db, MediaParsingPolicy, values["media_policy_id"], user.tenant_id, "媒体解析策略")
+    apply_patch(row, values, {"code", "name", "description", "owner_id", "media_policy_id", "enabled"})
     audit(db, user.tenant_id, user.id, "space.update", "space", row.id); _commit(db); return serialize_row(row)
 
 
@@ -777,6 +797,10 @@ def list_documents(space_id: str | None = None, user: User = Depends(get_current
 async def upload_document(
     space_id: str = Form(...),
     parser_policy_id: str | None = Form(None),
+    media_policy_id: str | None = Form(None),
+    media_policy_override: str | None = Form(None),
+    cloud_processing_confirmed: bool = Form(False),
+    frame_budget_confirmed: bool = Form(False),
     document_id: str | None = Form(None),
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
@@ -836,11 +860,52 @@ async def upload_document(
             if file.content_type and file.content_type != "application/octet-stream"
             else identity.detected_mime
         )
+        resolved_media_version_id = None
+        resolved_media_snapshot: dict[str, Any] = {}
+        media_type = media_type_for(filename, stored_content_type)
+        if media_type in {"image", "audio", "video"}:
+            try:
+                override = json.loads(media_policy_override) if media_policy_override else {}
+            except json.JSONDecodeError as exc:
+                raise HTTPException(400, "单次媒体策略覆盖不是有效 JSON") from exc
+            try:
+                media_version, resolved_media_snapshot = resolve_media_policy(
+                    db,
+                    tenant_id=user.tenant_id,
+                    media_type=media_type,
+                    explicit_policy_id=media_policy_id,
+                    space_id=space_id,
+                    override=override,
+                    actor_id=user.id,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            resolved_media_version_id = media_version.id if media_version else None
+            try:
+                require_cloud_confirmation(
+                    resolved_media_snapshot.get("config") or {},
+                    cloud_processing_confirmed,
+                )
+            except ValueError as exc:
+                raise HTTPException(409, str(exc)) from exc
+            if media_type == "video":
+                media_probe = probe_media(temp_path)
+                estimate = estimate_frame_count(
+                    media_probe.get("duration_seconds") or 0,
+                    resolved_media_snapshot.get("config") or {},
+                )
+                if (estimate["limited"] or estimate["estimated_frames"] > 100) and not frame_budget_confirmed:
+                    raise HTTPException(
+                        409,
+                        f"预计抽取 {estimate['estimated_frames']} 个关键帧，请调整参数或确认按当前设置继续",
+                    )
         object_storage.put_file(object_key, temp_path, stored_content_type)
         version = DocumentVersion(
             tenant_id=user.tenant_id, document_id=document.id, version_number=version_number,
             filename=filename, content_type=stored_content_type, size=total,
             sha256=sha256, object_key=object_key, parser_policy_id=parser_policy_id,
+            media_policy_version_id=resolved_media_version_id,
+            media_policy_snapshot=resolved_media_snapshot,
         )
         db.add(version); db.flush()
         job = Job(tenant_id=user.tenant_id, job_type="parse_document", idempotency_key=f"parse:{version.id}", input={"version_id": version.id})
@@ -1115,6 +1180,8 @@ def list_sources(space_id: str | None = None, user: User = Depends(get_current_u
 @router.post("/sources")
 def create_source(payload: SourceCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_space_permission(db, user, payload.space_id, "write")
+    if payload.media_policy_id:
+        _must_tenant(db, MediaParsingPolicy, payload.media_policy_id, user.tenant_id, "媒体解析策略")
     values = payload.model_dump(exclude={"secret"}); values["secret_encrypted"] = encrypt_secret(payload.secret)
     row = SourceConnector(tenant_id=user.tenant_id, **values); db.add(row)
     audit(db, user.tenant_id, user.id, "source.create", "source", row.id); _commit(db); return serialize_row(row)
@@ -1124,6 +1191,8 @@ def create_source(payload: SourceCreate, user: User = Depends(get_current_user),
 def update_source(row_id: str, payload: SourceUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     row = _source_for_user(db, row_id, user); require_space_permission(db, user, row.space_id, "write")
     values = payload.model_dump(exclude_unset=True, exclude_none=True); secret = values.pop("secret", None); clear = values.pop("clear_secret", False)
+    if "media_policy_id" in payload.model_fields_set:
+        values["media_policy_id"] = payload.media_policy_id
     target_space_id = values.get("space_id")
     if target_space_id and target_space_id != row.space_id:
         require_space_permission(db, user, target_space_id, "write")
@@ -1132,13 +1201,16 @@ def update_source(row_id: str, payload: SourceUpdate, user: User = Depends(get_c
         name=values.get("name", row.name),
         source_type=values.get("source_type", row.source_type),
         config=values.get("config", row.config or {}),
+        media_policy_id=values.get("media_policy_id", row.media_policy_id),
         enabled=values.get("enabled", row.enabled),
     )
     values["source_type"] = candidate.source_type
     values["config"] = candidate.config
     if secret is not None: row.secret_encrypted = encrypt_secret(secret)
     elif clear: row.secret_encrypted = None
-    apply_patch(row, values, {"space_id", "name", "source_type", "config", "enabled"})
+    if candidate.media_policy_id:
+        _must_tenant(db, MediaParsingPolicy, candidate.media_policy_id, user.tenant_id, "媒体解析策略")
+    apply_patch(row, values, {"space_id", "name", "source_type", "config", "media_policy_id", "enabled"})
     audit(db, user.tenant_id, user.id, "source.update", "source", row.id); db.commit(); return serialize_row(row)
 
 
@@ -1247,14 +1319,29 @@ def list_source_jobs(
 
 
 @router.post("/sources/{row_id}/sync")
-def sync_source(row_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def sync_source(
+    row_id: str,
+    payload: SourceSyncRequest | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     row = _source_for_user(db, row_id, user); require_space_permission(db, user, row.space_id, "write")
     if not row.enabled: raise HTTPException(409, "连接器已停用")
     if db.bind is not None and db.bind.dialect.name == "postgresql":
         db.execute(select(func.pg_advisory_xact_lock(func.hashtext(row.id))))
     if _active_source_jobs(db, user.tenant_id, row.id):
         raise HTTPException(409, "该数据源已有同步任务正在运行")
-    job = Job(tenant_id=user.tenant_id, job_type="sync_source", idempotency_key=f"sync:{row.id}:{datetime.now(timezone.utc).isoformat()}", input={"source_id": row.id})
+    request_data = payload.model_dump() if payload else {}
+    if (request_data.get("media_policy_id") or request_data.get("media_policy_override")) and not bool((row.config or {}).get("media_allow_sync_override")):
+        raise HTTPException(409, "该数据源未允许单次同步覆盖媒体解析策略")
+    if request_data.get("media_policy_id"):
+        _must_tenant(db, MediaParsingPolicy, request_data["media_policy_id"], user.tenant_id, "媒体解析策略")
+    job = Job(
+        tenant_id=user.tenant_id,
+        job_type="sync_source",
+        idempotency_key=f"sync:{row.id}:{datetime.now(timezone.utc).isoformat()}",
+        input={"source_id": row.id, **request_data},
+    )
     db.add(job); db.commit()
     warning = _dispatch_job(db, job, sync_source_task)
     response = serialize_row(job)
@@ -3459,6 +3546,10 @@ def get_fragment(chunk_id: str, user: User = Depends(get_current_user), db: Sess
         "document_tags": document.tags,
         "document_version": version.version_number,
         "source_filename": version.filename,
+        "start_seconds": (row.source_span or {}).get("time_start"),
+        "end_seconds": (row.source_span or {}).get("time_end"),
+        "media_type": media_type_for(version.filename, version.content_type),
+        "media_url": f"/api/v1/documents/{document.id}/media-content" if media_type_for(version.filename, version.content_type) in {"audio", "video"} else None,
         "document_deleted": document.deleted_at is not None,
         "version_deleted": version.deleted_at is not None,
         "has_access": True,

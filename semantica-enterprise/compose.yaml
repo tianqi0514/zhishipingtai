@@ -146,6 +146,28 @@ services:
       retries: 30
     restart: unless-stopped
 
+  asr-runtime:
+    build:
+      context: .
+      dockerfile: Dockerfile.asr
+    image: chuanshen-funasr:1.4.13-sensevoice-cpu
+    environment:
+      FUNASR_PORT: "8001"
+      FUNASR_DEVICE: cpu
+      FUNASR_MODEL: sensevoice
+      MODELSCOPE_CACHE: /var/lib/funasr/modelscope
+      HF_HOME: /var/lib/funasr/huggingface
+    volumes:
+      - asr-model-cache:/var/lib/funasr
+    shm_size: "2gb"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 600s
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -288,3 +310,4 @@ volumes:
   qdrant-data:
   falkordb-data:
   harness-data:
+  asr-model-cache:

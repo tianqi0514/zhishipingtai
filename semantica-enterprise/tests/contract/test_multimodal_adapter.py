@@ -69,7 +69,8 @@ class MultimodalAdapterContractTest(unittest.TestCase):
                 policy={},
                 media_transcriber=lambda _path, _type: {
                     "transcript": "NexusOne 支持知识治理",
-                    "segments": [{"start": 0.0, "end": 0.1, "text": "NexusOne 支持知识治理"}],
+                    "segments": [{"start": 0.0, "end": 0.1, "text": "NexusOne 支持知识治理", "speaker": "speaker-1", "events": ["Speech"]}],
+                    "audio_events": [{"start": 0.0, "end": 0.1, "name": "Speech"}],
                     "model": "test-asr-contract",
                     "transcription_status": "succeeded",
                 },
@@ -79,6 +80,8 @@ class MultimodalAdapterContractTest(unittest.TestCase):
         self.assertTrue(any(item.element_type == "audio" for item in metadata_only))
         self.assertEqual(enriched["transcription_status"], "succeeded")
         self.assertTrue(any(item.element_type == "transcript" and "知识治理" in item.text for item in transcript))
+        self.assertTrue(any(item.element_type == "speaker_turn" and item.metadata.get("speaker") == "speaker-1" for item in transcript))
+        self.assertTrue(any(item.element_type == "audio_event" and item.text == "Speech" for item in transcript))
 
     def test_image_and_video_degrade_without_vision_and_accept_visual_descriptions(self) -> None:
         from PIL import Image

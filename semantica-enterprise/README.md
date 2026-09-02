@@ -32,6 +32,7 @@ docker compose ps
 ## 主要能力
 
 - 文档：上传、版本、解析百分比、元素、Chunk、治理画像、增量加工与历史溯源。
+- 多模态：可版本化媒体策略；固定间隔/FPS/场景/智能抽帧；本地 SenseVoice ASR、Tesseract OCR、Kimi K3 或本地兼容 Vision；场景/关键帧/转写时间线、权限化播放器、缓存重处理和可跳转时间引用。
 - 人工治理：在 Semantica 自动画像、解析元素、Chunk、实体与事实之上叠加可回滚约束；治理工作台按“待处理—人工调整—发布记录”组织业务闭环，支持主动查找、批次归并、真实进度、失败重试和影响预览；原始自动结果不被覆盖。
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
 - 结构化数据：MySQL/PostgreSQL Schema 发现与版本差异、实时数据/同步快照预览、服务端分页筛选和脱敏、本体映射版本、严格 Semantic Query Plan/Query IR、确定性参数化 SQL、只读实时查询与结构化数据引用。
@@ -43,7 +44,7 @@ docker compose ps
 - 应用构建：以业务应用为中心显示上线准备度和下一步；底层提供最小权限凭据、不可变知识供给、能力场景版本、真实上线测试、反馈转人工治理和调用审计。
 - 开放能力：REST/OpenAPI、MCP Server 和 `chuanshen` CLI；三种方式都可以访问权限化知识，MCP/CLI 的结构化查询只接受激活映射和自然语言问题，仍由 FastAPI 完成 Plan/IR 校验与参数化只读执行。
 
-Docker Compose 共启动 12 个服务：API、Worker、Scheduler、Agent Runtime、MCP Server、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB。前端只访问 FastAPI；Harness、MCP 不直接访问业务数据库或检索中间件。
+Docker Compose 共启动 13 个核心服务：API、Worker、Scheduler、Agent Runtime、MCP Server、本地 ASR Runtime、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB。前端只访问 FastAPI；Harness、MCP 不直接访问业务数据库或检索中间件，ASR 只开放 Docker 内网端口。
 
 ## 常用命令
 
@@ -74,6 +75,17 @@ bash tests/e2e/m10_platform_smoke.sh
 docker run --rm -v "$PWD:/workspace" -w /workspace \
   semantica-enterprise:0.10.0 python tests/integration/multimodal_live.py
 bash tests/integration/run_source_matrix.sh
+
+# 完整媒体专项：先生成真实 fixture，再验证本地 ASR、Kimi Vision、
+# 时间线、Range、检索引用、缓存和 MinIO 视频数据源
+python tests/fixtures/generate_media_acceptance.py
+docker compose run --rm --no-deps -T \
+  -e API_BASE=http://api:8080/api/v1 -v "$PWD:/app" api \
+  python tests/e2e/media_multimodal_acceptance.py
+
+# 1/5/30 分钟视频、1 分钟真实 ASR、60 分钟音频边界与双任务并行
+docker compose run --rm --no-deps -T -v "$PWD:/app" api \
+  python tests/integration/media_resource_benchmark.py
 
 # Harness 多轮、取消/重试、恢复和负载
 python3 tests/e2e/conversation_agent_quality.py
@@ -116,6 +128,16 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [人工治理 P0–P3 设计与实现](docs/HUMAN_CURATION_P0_P3.md)
 - [治理工作台业务与操作说明](docs/GOVERNANCE_WORKBENCH_GUIDE.md)
 - [文件格式能力矩阵](docs/FORMAT_MATRIX.md)
+- [多模态音视频架构](docs/MULTIMODAL_MEDIA_ARCHITECTURE.md)
+- [媒体解析策略](docs/MEDIA_PARSING_POLICY.md)
+- [视频抽帧与场景处理](docs/VIDEO_FRAME_EXTRACTION.md)
+- [本地 SenseVoice/FunASR 部署](docs/LOCAL_ASR_DEPLOYMENT.md)
+- [Kimi 视觉集成](docs/KIMI_VISION_INTEGRATION.md)
+- [媒体时间线、检索与引用](docs/MEDIA_TIMELINE_AND_CITATION.md)
+- [多模态安全边界](docs/MULTIMODAL_SECURITY.md)
+- [本地模型与运行时许可证](docs/MODEL_LICENSES.md)
+- [多模态音视频测试报告](docs/MULTIMODAL_MEDIA_TEST_REPORT.md)
+- [多模态浏览器点击测试报告](docs/MULTIMODAL_BROWSER_TEST_REPORT.md)
 - [数据源支持矩阵](docs/SOURCE_MATRIX.md)
 - [模型配置](docs/MODELS.md)
 - [REST、MCP、CLI](docs/INTEGRATIONS.md)

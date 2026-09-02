@@ -34,6 +34,7 @@ def test_schema_migrations_are_repeatable_on_fresh_database() -> None:
         "0016_application_foundation",
         "0017_structured_semantic_query",
         "0018_schema_fingerprint_history",
+        "0019_multimodal_media",
     ]
     assert profile_table == "document_profiles"
 

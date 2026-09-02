@@ -12,7 +12,17 @@ from packages.semantica_adapter.indexing import SearchIndexer, search_point_id
 
 from .config import get_settings
 from .curation import effective_chunk_payloads
-from .models import Chunk, Document, GraphRelease, IndexRelease, KnowledgeRelease, ModelConfig
+from .media import media_type_for
+from .models import (
+    Chunk,
+    ContentElement,
+    Document,
+    DocumentVersion,
+    GraphRelease,
+    IndexRelease,
+    KnowledgeRelease,
+    ModelConfig,
+)
 
 
 def publish_index_snapshot(
@@ -60,6 +70,10 @@ def publish_index_snapshot(
     for item in effective:
         row = item["row"]
         document = db.get(Document, row.document_id)
+        version = db.get(DocumentVersion, row.version_id)
+        element = db.get(ContentElement, row.element_id) if row.element_id else None
+        element_metadata = dict(element.element_metadata or {}) if element else {}
+        media_type = media_type_for(version.filename, version.content_type) if version else None
         point_key = row.chunk_id if item["effective_hash"] == row.content_hash else f"{row.chunk_id}:{item['effective_hash']}"
         chunks.append({
             "id": search_point_id(point_key),
@@ -76,6 +90,17 @@ def publish_index_snapshot(
             "curation_decision_id": item["curation_decision_id"],
             "page_number": row.page_number,
             "structural_path": row.structural_path,
+            "source_span": row.source_span or {},
+            "start_seconds": (row.source_span or {}).get("time_start"),
+            "end_seconds": (row.source_span or {}).get("time_end"),
+            "element_type": element.element_type if element else None,
+            "media_type": media_type,
+            "scene_id": element_metadata.get("scene_id"),
+            "scene_index": element_metadata.get("scene_index"),
+            "frame_indexes": list(dict.fromkeys(
+                ([element_metadata["frame_index"]] if element_metadata.get("frame_index") is not None else [])
+                + list((element_metadata.get("evidence") or {}).get("frame_indexes") or [])
+            )),
             "scope_tokens": row.scope_tokens,
         })
 
