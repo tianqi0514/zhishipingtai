@@ -101,15 +101,16 @@ function area(name,label,value='',json=false){return `<label class="field"><span
 function selectField(name,label,options,value='',attrs=''){return `<label class="field"><span>${label}</span><select name="${name}" ${attrs}>${options.map(([v,l])=>`<option value="${esc(v)}" ${String(v)===String(value)?'selected':''}>${esc(l)}</option>`).join('')}</select></label>`}
 function check(name,label,value){return `<label class="check"><input type="checkbox" name="${name}" ${value?'checked':''}>${label}</label>`}
 async function modal(title,body,onSave,submit='保存',onOpen=null){
-  const dlg=$('#modal'), form=$('#modal-form'),submitButton=$('#modal-submit');$('#modal-title').textContent=title;$('#modal-body').innerHTML=`<div class="form-grid">${body}</div>`;submitButton.textContent=submit;submitButton.disabled=false;
+  const dlg=$('#modal'),previousForm=$('#modal-form'),form=previousForm.cloneNode(true);previousForm.replaceWith(form);const submitButton=form.querySelector('#modal-submit');form.querySelector('#modal-title').textContent=title;form.querySelector('#modal-body').innerHTML=`<div class="form-grid">${body}</div>`;submitButton.textContent=submit;submitButton.disabled=false;
   return new Promise(resolve=>{
     let settled=false;
-    const cleanup=()=>{form.removeEventListener('submit',save);dlg.removeEventListener('cancel',cancel);dlg.removeEventListener('close',closed);$('#modal-close').removeEventListener('click',cancel);$('#modal-cancel').removeEventListener('click',cancel)};
+    const closeButton=form.querySelector('#modal-close'),cancelButton=form.querySelector('#modal-cancel');
+    const cleanup=()=>{form.removeEventListener('submit',save);dlg.removeEventListener('cancel',cancel);dlg.removeEventListener('close',closed);closeButton.removeEventListener('click',cancel);cancelButton.removeEventListener('click',cancel)};
     const finish=value=>{if(settled)return;settled=true;cleanup();if(dlg.open){dlg.addEventListener('close',()=>resolve(value),{once:true});dlg.close()}else resolve(value)};
     const save=async e=>{e.preventDefault();const originalLabel=submitButton.textContent;submitButton.disabled=true;submitButton.textContent='保存中…';try{await onSave(formData(form),form);finish(true)}catch(err){toast(err.message,true)}finally{submitButton.disabled=false;submitButton.textContent=originalLabel}};
     const cancel=e=>{e?.preventDefault();finish(false)};
     const closed=()=>finish(false);
-    form.addEventListener('submit',save);dlg.addEventListener('cancel',cancel);dlg.addEventListener('close',closed);$('#modal-close').addEventListener('click',cancel);$('#modal-cancel').addEventListener('click',cancel);dlg.showModal();if(onOpen)onOpen(form);
+    form.addEventListener('submit',save);dlg.addEventListener('cancel',cancel);dlg.addEventListener('close',closed);closeButton.addEventListener('click',cancel);cancelButton.addEventListener('click',cancel);dlg.showModal();if(onOpen)onOpen(form);
   });
 }
 async function refreshLookups(){
