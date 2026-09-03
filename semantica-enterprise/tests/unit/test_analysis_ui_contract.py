@@ -23,7 +23,7 @@ def test_knowledge_analysis_ui_has_real_crud_and_execution_routes() -> None:
     assert "rollback-preview" in javascript
 
 
-def test_four_analysis_features_are_business_explained_and_semantica_backed() -> None:
+def test_four_analysis_features_are_business_explained_and_semantic_modeling_backed() -> None:
     javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
 
     for feature, label in (
@@ -34,7 +34,8 @@ def test_four_analysis_features_are_business_explained_and_semantica_backed() ->
     ):
         assert f"{feature}:{{title:'{label}'" in javascript
     assert "showAnalysisFeature" in javascript
-    assert "Semantica 如何参与" in javascript
+    assert "语义建模如何参与" in javascript
+    assert "Semantica 如何参与" not in javascript
     assert "analysisRuleNatural" in javascript
     assert "'/analysis/rules/validate'" in javascript
     assert "ANALYSIS_QUERY_EXAMPLES" in javascript

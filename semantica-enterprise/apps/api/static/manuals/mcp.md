@@ -34,7 +34,7 @@ MCP Server 只调用传神智库 FastAPI，不直连 PostgreSQL、OpenSearch、Q
 - knowledge_get_fragment：读取完整引用片段
 - knowledge_graph_query：查询实体、关系和证据
 - knowledge_get_document_profile：读取摘要、分类和质量画像
-- knowledge_reason：执行 Semantica 规则推理
+- knowledge_reason：执行 语义建模规则推理
 - knowledge_sparql：执行只读 SPARQL 查询
 - structured_query：基于已激活本体映射执行安全、只读的经营数据查询
 

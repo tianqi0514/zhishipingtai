@@ -400,8 +400,15 @@ def capabilities(_: User = Depends(get_current_user)):
 
 
 @router.get("/dashboard")
-def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def dashboard(
+    space_id: str | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     spaces = [s for s in db.scalars(select(KnowledgeSpace).where(KnowledgeSpace.tenant_id == user.tenant_id, _active(KnowledgeSpace))) if has_space_permission(db, user, s.id, "read")]
+    if space_id:
+        require_space_permission(db, user, space_id, "read")
+        spaces = [space for space in spaces if space.id == space_id]
     space_ids = [s.id for s in spaces]
     def count(model, *criteria):
         return db.scalar(select(func.count()).select_from(model).where(*criteria)) or 0
@@ -414,14 +421,16 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
             .limit(6)
         )
     ) if space_ids else []
-    recent_jobs = list(
-        db.scalars(
+    visible_jobs = [
+        row for row in db.scalars(
             select(Job)
             .where(Job.tenant_id == user.tenant_id, _active(Job))
             .order_by(Job.created_at.desc())
-            .limit(6)
+            .limit(500)
         )
-    )
+        if not space_id or space_id in _job_space_ids(db, row)
+    ]
+    recent_jobs = visible_jobs[:6]
     profiles = list(
         db.scalars(
             select(DocumentProfile).where(
@@ -448,9 +457,14 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
                 _active(Conversation),
             )
             .order_by(Conversation.updated_at.desc())
-            .limit(5)
+            .limit(100 if space_id else 5)
         )
     )
+    if space_id:
+        conversations = [
+            row for row in conversations
+            if space_id in ((row.settings or {}).get("space_ids") or [])
+        ][:5]
     successful_source_statuses = {"success", "succeeded", "fetched", "unchanged"}
     successful_sources = sum(row.last_sync_status in successful_source_statuses for row in sources)
     failed_sources = sum(row.last_sync_status == "failed" for row in sources)
@@ -460,8 +474,14 @@ def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_
         "documents_today": count(Document, Document.space_id.in_(space_ids), Document.created_at >= today, _active(Document)) if space_ids else 0,
         "sources": len(sources),
         "elements": count(ContentElement, ContentElement.space_id.in_(space_ids), _active(ContentElement)) if space_ids else 0,
-        "running_jobs": count(Job, Job.tenant_id == user.tenant_id, Job.status.in_(["queued", "running"]), _active(Job)),
-        "failed_jobs": count(Job, Job.tenant_id == user.tenant_id, Job.status == "failed", _active(Job)),
+        "running_jobs": (
+            sum(row.status in {"queued", "running"} for row in visible_jobs)
+            if space_id else count(Job, Job.tenant_id == user.tenant_id, Job.status.in_(["queued", "running"]), _active(Job))
+        ),
+        "failed_jobs": (
+            sum(row.status == "failed" for row in visible_jobs)
+            if space_id else count(Job, Job.tenant_id == user.tenant_id, Job.status == "failed", _active(Job))
+        ),
         "quality_score": round(sum(row.quality_score for row in profiles) / len(profiles), 1) if profiles else None,
         "quality_issues": sum(len(row.quality_issues or []) for row in profiles),
         "source_status": {
@@ -1355,10 +1375,40 @@ def sync_source(
 
 
 @router.get("/jobs")
-def list_jobs(status: str | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    query = select(Job).where(Job.tenant_id == user.tenant_id).order_by(Job.created_at.desc()).limit(200)
+def list_jobs(
+    status: str | None = None,
+    space_id: str | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if space_id:
+        require_space_permission(db, user, space_id, "read")
+    query = select(Job).where(Job.tenant_id == user.tenant_id).order_by(Job.created_at.desc()).limit(500)
     if status: query = query.where(Job.status == status)
-    return [_serialize_job(db, x) for x in db.scalars(query)]
+    rows = [row for row in db.scalars(query) if not space_id or space_id in _job_space_ids(db, row)]
+    return [_serialize_job(db, row) for row in rows[:200]]
+
+
+def _job_space_ids(db: Session, row: Job) -> set[str]:
+    """Resolve the business spaces affected by a job without exposing job internals."""
+    payload = row.input or {}
+    resolved = {str(value) for value in (payload.get("space_ids") or []) if value}
+    if payload.get("space_id"):
+        resolved.add(str(payload["space_id"]))
+    if payload.get("version_id"):
+        version = db.get(DocumentVersion, payload["version_id"])
+        document = db.get(Document, version.document_id) if version else None
+        if document:
+            resolved.add(document.space_id)
+    if payload.get("source_id"):
+        source = db.get(SourceConnector, payload["source_id"])
+        if source:
+            resolved.add(source.space_id)
+    if payload.get("inference_run_id"):
+        run = db.get(InferenceRun, payload["inference_run_id"])
+        if run:
+            resolved.update(str(value) for value in (run.space_ids or []) if value)
+    return resolved
 
 
 def _serialize_job(db: Session, row: Job) -> dict[str, Any]:

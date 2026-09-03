@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>传神智库</title>
-  <link rel="stylesheet" href="/assets/style.css?v=20260903-multimodal-2">
+  <link rel="stylesheet" href="/assets/style.css?v=20260903-space-context-1">
 </head>
 <body>
   <section id="login" class="login-wrap">
@@ -109,7 +109,14 @@
       <div class="account"><span class="account-avatar" id="account-avatar">管</span><span class="account-meta"><b id="account-name"></b><small id="account-role">当前用户</small></span><button id="logout" title="退出登录">退出</button></div>
     </aside>
     <main>
-      <header><div class="topbar-title"><div id="breadcrumb" class="breadcrumb">工作台</div><h2 id="view-title">工作台</h2></div><div id="view-actions"></div></header>
+      <header>
+        <div class="topbar-title"><div id="breadcrumb" class="breadcrumb">工作台</div><h2 id="view-title">工作台</h2></div>
+        <div id="space-context" class="space-context" aria-label="当前知识空间">
+          <span class="space-context-icon" aria-hidden="true">空</span>
+          <label for="global-space-select"><small>当前知识空间</small><select id="global-space-select" aria-label="选择当前知识空间"></select></label>
+        </div>
+        <div id="view-actions"></div>
+      </header>
       <div id="content"></div>
     </main>
   </div>
@@ -123,7 +130,7 @@
   </dialog>
   <div id="toast" class="toast"></div>
   <script src="/assets/graph3d.js?v=20260903-multimodal-2"></script>
-  <script src="/assets/app.js?v=20260903-modal-isolation-1"></script>
-  <script src="/assets/structured-workbench.js?v=20260902-metric-contract-3"></script>
+  <script src="/assets/app.js?v=20260903-space-context-1"></script>
+  <script src="/assets/structured-workbench.js?v=20260903-space-context-1"></script>
 </body>
 </html>

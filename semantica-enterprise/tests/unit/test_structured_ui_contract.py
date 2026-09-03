@@ -54,13 +54,13 @@ def test_chat_renders_real_structured_events_and_data_citations() -> None:
     assert ".inspector-evidence-card.structured" in STYLE
 
 
-def test_chat_space_scope_uses_visible_persistent_toggle_buttons() -> None:
-    assert 'data-chat-space="${x.id}"' in APP
+def test_chat_space_scope_uses_the_global_persistent_context() -> None:
+    assert 'id="global-space-select"' in INDEX
+    assert 'data-chat-space="${x.id}"' not in APP
     assert "selectedChatSpaceIds" in APP
     assert "persistChatSettings" in APP
-    assert "toggleChatSpace" in APP
-    assert "至少选择一个知识空间" in APP
-    assert ".chat-space-chip.selected" in STYLE
+    assert "currentSpaceId()" in APP
+    assert "知识范围跟随顶部当前空间" in APP
     assert ".chat-setting-body{display:grid" in STYLE
 
 
