@@ -70,6 +70,7 @@ function canView(view){const meta=VIEW_META[view];return Boolean(meta)&&(!meta.a
 function applySidebarState(collapsed){
   state.sidebarCollapsed=Boolean(collapsed);$('#shell').classList.toggle('sidebar-collapsed',state.sidebarCollapsed);
   const button=$('#sidebar-toggle');button.setAttribute('aria-label',state.sidebarCollapsed?'展开导航':'折叠导航');button.title=state.sidebarCollapsed?'展开导航':'折叠导航';
+  setSpaceMenuOpen(false);
 }
 function showShell(){
   $('#login').classList.add('hidden');$('#shell').classList.remove('hidden');$('#account-name').textContent=state.user.display_name;$('#account-role').textContent=state.user.is_admin?'系统管理员':'业务用户';$('#account-avatar').textContent=(state.user.display_name||state.user.username||'用').trim().slice(0,1);
@@ -135,14 +136,26 @@ function currentSpaceField(name='space_id'){
   const space=currentSpace();return space?`<input type="hidden" name="${esc(name)}" value="${esc(space.id)}"><div class="current-space-field"><span>知识空间</span><b>${esc(space.name)}</b></div>`:'<div class="current-space-field missing"><span>知识空间</span><b>请先创建知识空间</b></div>';
 }
 function renderSpaceContext(){
-  const root=$('#space-context'),select=$('#global-space-select');if(!root||!select)return;const active=ensureActiveSpace(),available=state.spaces.filter(x=>x.enabled!==false);root.classList.toggle('empty',!active);root.classList.toggle('scoped',SPACE_SCOPED_VIEWS.has(state.view));
+  const root=$('#space-context'),select=$('#global-space-select'),trigger=$('#space-context-trigger'),label=$('#space-context-label'),name=$('#space-context-name'),icon=$('#space-context-icon'),options=$('#space-context-options');if(!root||!select||!trigger||!label||!name||!icon||!options)return;
+  const active=ensureActiveSpace(),space=state.spaces.find(x=>x.id===active),available=state.spaces.filter(x=>x.enabled!==false),scoped=SPACE_SCOPED_VIEWS.has(state.view);root.classList.toggle('empty',!active);root.classList.toggle('scoped',scoped);root.classList.toggle('platform',!scoped);root.classList.toggle('switching',state.spaceSwitching);
+  label.textContent=scoped?'当前知识空间':'当前工作范围';name.textContent=scoped?(space?.name||'请先创建知识空间'):'平台级管理';icon.textContent=scoped?(space?.name||'空').trim().slice(0,1):'管';trigger.disabled=!scoped||!available.length||state.spaceSwitching;trigger.title=scoped?(space?.name||'请先创建知识空间'):'当前模块使用平台级配置，不按知识空间过滤';trigger.setAttribute('aria-label',scoped?`切换知识空间，当前为${space?.name||'未选择'}`:'平台级管理');
   select.innerHTML=available.length?available.map(x=>`<option value="${esc(x.id)}" ${x.id===active?'selected':''}>${esc(x.name)}</option>`).join(''):'<option value="">请先创建知识空间</option>';select.disabled=!available.length||state.spaceSwitching;
+  options.innerHTML=available.map(x=>`<button type="button" role="option" data-space-choice="${esc(x.id)}" data-space-search="${esc(`${x.name} ${x.code||''}`.toLowerCase())}" aria-selected="${x.id===active}" class="${x.id===active?'active':''}"><span class="space-option-icon">${esc((x.name||'空').trim().slice(0,1))}</span><span><b>${esc(x.name)}</b><small>${esc(x.code||'知识空间')}</small></span><i>${x.id===active?'✓':''}</i></button>`).join('')||'<div class="space-context-empty">暂无可用知识空间</div>';
+  if(!scoped)setSpaceMenuOpen(false);
+}
+function setSpaceMenuOpen(open){
+  const root=$('#space-context'),trigger=$('#space-context-trigger'),menu=$('#space-context-menu'),search=$('#space-context-search');if(!root||!trigger||!menu)return;const next=Boolean(open&&root.classList.contains('scoped')&&!trigger.disabled);menu.classList.toggle('hidden',!next);root.classList.toggle('open',next);trigger.setAttribute('aria-expanded',String(next));if(next&&search){search.value='';$$('#space-context-options [data-space-choice]').forEach(x=>x.classList.remove('hidden'));requestAnimationFrame(()=>search.focus())}
 }
 async function switchActiveSpace(spaceId,nextView=state.view){
   if(state.spaceSwitching||spaceId===state.activeSpaceId||!state.spaces.some(x=>x.id===spaceId&&x.enabled!==false))return;state.spaceSwitching=true;state.activeSpaceId=spaceId;localStorage.setItem(spaceStorageKey(),spaceId);state.curationSpaceId=spaceId;state.curationSelectedCaseId=null;state.graphFocusId=null;state.analysisRuleSetId=null;state.analysisSelectedRunId=null;state.analysisSelectedFactId=null;state.analysisQueryResult=null;state.conversation=null;state.conversations=[];renderSpaceContext();
   try{await go(nextView,nextView!==state.view);toast(`已切换到 ${currentSpace()?.name||'知识空间'}`)}finally{state.spaceSwitching=false;renderSpaceContext()}
 }
 $('#global-space-select').addEventListener('change',event=>switchActiveSpace(event.target.value));
+$('#space-context-trigger').addEventListener('click',()=>setSpaceMenuOpen($('#space-context-menu').classList.contains('hidden')));
+$('#space-context-search').addEventListener('input',event=>{const term=event.target.value.trim().toLowerCase();$$('#space-context-options [data-space-choice]').forEach(button=>button.classList.toggle('hidden',Boolean(term&&!button.dataset.spaceSearch.includes(term))))});
+$('#space-context-options').addEventListener('click',event=>{const button=event.target.closest('[data-space-choice]');if(!button)return;setSpaceMenuOpen(false);switchActiveSpace(button.dataset.spaceChoice)});
+document.addEventListener('click',event=>{const root=$('#space-context');if(root&&!root.contains(event.target))setSpaceMenuOpen(false)});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('#space-context-menu')?.classList.contains('hidden'))setSpaceMenuOpen(false)});
 const opt=(rows,empty='—')=>[["",empty],...rows.map(x=>[x.id,x.name||x.display_name||x.username])];
 const UPLOAD_FORMAT_FAMILIES=[['document','办公文档'],['text','文本'],['code','代码'],['web','网页'],['structured','结构化数据'],['image','图片'],['email','邮件'],['ebook','电子书'],['audio','音频'],['video','视频'],['archive','压缩包']];
 function uploadFormatField(formats){

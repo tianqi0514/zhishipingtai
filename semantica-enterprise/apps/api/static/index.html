@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>传神智库</title>
-  <link rel="stylesheet" href="/assets/style.css?v=20260903-space-context-1">
+  <link rel="stylesheet" href="/assets/style.css?v=20260903-sidebar-space-1">
 </head>
 <body>
   <section id="login" class="login-wrap">
@@ -50,6 +50,18 @@
         <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="折叠导航" title="折叠导航">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
         </button>
+      </div>
+      <div id="space-context" class="sidebar-space-context" aria-label="当前知识空间">
+        <button id="space-context-trigger" class="space-context-trigger" type="button" aria-label="切换知识空间" aria-haspopup="listbox" aria-expanded="false">
+          <span id="space-context-icon" class="space-context-icon" aria-hidden="true">空</span>
+          <span class="space-context-copy"><small id="space-context-label">当前知识空间</small><b id="space-context-name">加载中</b></span>
+          <svg class="space-context-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5"/></svg>
+        </button>
+        <div id="space-context-menu" class="space-context-menu hidden">
+          <label class="space-context-search"><span aria-hidden="true">⌕</span><input id="space-context-search" type="search" placeholder="搜索知识空间" autocomplete="off"></label>
+          <div id="space-context-options" class="space-context-options" role="listbox" aria-label="知识空间列表"></div>
+        </div>
+        <select id="global-space-select" class="visually-hidden" aria-label="选择当前知识空间" tabindex="-1"></select>
       </div>
       <nav id="nav" aria-label="主导航">
         <div class="nav-group" data-nav-group="dashboard">
@@ -109,14 +121,7 @@
       <div class="account"><span class="account-avatar" id="account-avatar">管</span><span class="account-meta"><b id="account-name"></b><small id="account-role">当前用户</small></span><button id="logout" title="退出登录">退出</button></div>
     </aside>
     <main>
-      <header>
-        <div class="topbar-title"><div id="breadcrumb" class="breadcrumb">工作台</div><h2 id="view-title">工作台</h2></div>
-        <div id="space-context" class="space-context" aria-label="当前知识空间">
-          <span class="space-context-icon" aria-hidden="true">空</span>
-          <label for="global-space-select"><small>当前知识空间</small><select id="global-space-select" aria-label="选择当前知识空间"></select></label>
-        </div>
-        <div id="view-actions"></div>
-      </header>
+      <header><div class="topbar-title"><div id="breadcrumb" class="breadcrumb">工作台</div><h2 id="view-title">工作台</h2></div><div id="view-actions"></div></header>
       <div id="content"></div>
     </main>
   </div>
@@ -130,7 +135,7 @@
   </dialog>
   <div id="toast" class="toast"></div>
   <script src="/assets/graph3d.js?v=20260903-multimodal-2"></script>
-  <script src="/assets/app.js?v=20260903-space-context-1"></script>
-  <script src="/assets/structured-workbench.js?v=20260903-space-context-1"></script>
+  <script src="/assets/app.js?v=20260903-sidebar-space-1"></script>
+  <script src="/assets/structured-workbench.js?v=20260903-sidebar-space-1"></script>
 </body>
 </html>

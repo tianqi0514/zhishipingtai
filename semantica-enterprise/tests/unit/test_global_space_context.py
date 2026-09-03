@@ -10,13 +10,21 @@ MCP_GUIDE = (ROOT / "apps/api/static/manuals/mcp.md").read_text(encoding="utf-8"
 ROUTES = (ROOT / "apps/api/routes.py").read_text(encoding="utf-8")
 
 
-def test_header_has_one_prominent_persistent_knowledge_space_context() -> None:
+def test_sidebar_has_one_prominent_persistent_knowledge_space_context() -> None:
     assert 'id="space-context"' in INDEX
+    assert 'id="space-context-trigger"' in INDEX
+    assert 'id="space-context-search"' in INDEX
+    assert 'id="space-context-options"' in INDEX
     assert 'id="global-space-select"' in INDEX
+    assert INDEX.index('id="space-context"') < INDEX.index('id="nav"')
+    header = INDEX.split("<header>", 1)[1].split("</header>", 1)[0]
+    assert 'id="space-context"' not in header
     assert "chuanshen.activeSpace.${state.user?.id||'guest'}" in APP
     assert "function switchActiveSpace" in APP
-    assert ".space-context.scoped" in STYLE
-    assert ".space-context:not(.scoped){display:none}" in STYLE
+    assert "function setSpaceMenuOpen" in APP
+    assert "root.classList.toggle('platform',!scoped)" in APP
+    assert ".sidebar-space-context.platform" in STYLE
+    assert ".sidebar-collapsed .sidebar-space-context" in STYLE
 
 
 def test_business_modules_follow_the_current_space() -> None:
