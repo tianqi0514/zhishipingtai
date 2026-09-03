@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
+import unicodedata
 
 from sqlalchemy import inspect
 
@@ -37,3 +40,14 @@ def apply_patch(row: Any, values: dict[str, Any], allowed: set[str]) -> None:
     for key, value in values.items():
         if key in allowed:
             setattr(row, key, value)
+
+
+def attachment_content_disposition(filename: str) -> str:
+    """Build a safe RFC 5987 attachment header for Unicode filenames."""
+    name = Path(str(filename or "download").replace("\r", "_").replace("\n", "_")).name
+    suffix = "".join(Path(name).suffixes)[-32:]
+    stem = name[: -len(suffix)] if suffix else name
+    ascii_stem = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode()
+    ascii_stem = "".join(character for character in ascii_stem if character.isalnum() or character in "._-")
+    fallback = f"{ascii_stem or 'download'}{suffix}".replace('"', "_").replace("\\", "_")
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"

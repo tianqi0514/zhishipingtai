@@ -138,6 +138,7 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [本地模型与运行时许可证](docs/MODEL_LICENSES.md)
 - [多模态音视频测试报告](docs/MULTIMODAL_MEDIA_TEST_REPORT.md)
 - [多模态浏览器点击测试报告](docs/MULTIMODAL_BROWSER_TEST_REPORT.md)
+- [知识加工性能与模型调用策略](docs/KNOWLEDGE_PROCESSING_PERFORMANCE.md)
 - [数据源支持矩阵](docs/SOURCE_MATRIX.md)
 - [模型配置](docs/MODELS.md)
 - [REST、MCP、CLI](docs/INTEGRATIONS.md)

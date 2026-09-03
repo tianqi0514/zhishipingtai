@@ -15,6 +15,92 @@ class ExtractionOutput:
     events: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class ExtractionBatch:
+    """A bounded model request assembled from adjacent retrieval chunks.
+
+    Retrieval chunks remain unchanged.  The batch only reduces model round
+    trips; extracted items are mapped back to one of the original chunks so
+    provenance and clickable citations keep their original precision.
+    """
+
+    ordinal: int
+    chunks: tuple[Any, ...]
+    text: str
+    chunk_key: str
+
+
+def build_extraction_batches(
+    chunks: list[Any],
+    *,
+    target_chars: int = 2400,
+    max_chunks: int = 12,
+) -> list[ExtractionBatch]:
+    """Merge adjacent small chunks into deterministic, bounded LLM requests."""
+    target_chars = max(400, min(int(target_chars), 12000))
+    max_chunks = max(1, min(int(max_chunks), 50))
+    batches: list[ExtractionBatch] = []
+    pending: list[Any] = []
+    pending_chars = 0
+
+    def flush() -> None:
+        nonlocal pending, pending_chars
+        if not pending:
+            return
+        text = "\n\n".join(str(chunk.text).strip() for chunk in pending if str(chunk.text).strip())
+        source = "|".join(str(chunk.chunk_id) for chunk in pending)
+        batches.append(
+            ExtractionBatch(
+                ordinal=len(batches),
+                chunks=tuple(pending),
+                text=text,
+                chunk_key=hashlib.sha256(f"extraction-batch-v1:{source}".encode()).hexdigest(),
+            )
+        )
+        pending = []
+        pending_chars = 0
+
+    for chunk in chunks:
+        text = str(chunk.text or "").strip()
+        if not text:
+            continue
+        separator_chars = 2 if pending else 0
+        if pending and (
+            len(pending) >= max_chunks
+            or pending_chars + separator_chars + len(text) > target_chars
+        ):
+            flush()
+            separator_chars = 0
+        pending.append(chunk)
+        pending_chars += separator_chars + len(text)
+        if len(text) >= target_chars:
+            flush()
+    flush()
+    return batches
+
+
+def source_chunk_for_extraction(batch: ExtractionBatch, *evidence: Any) -> Any | None:
+    """Resolve a model item to the original chunk containing its evidence.
+
+    Unsupported items are deliberately rejected instead of being attached to
+    an arbitrary chunk.  This keeps model batching from weakening provenance.
+    """
+    candidates = []
+    for value in evidence:
+        normalized = " ".join(str(value or "").casefold().split())
+        if len(normalized) >= 2 and normalized not in candidates:
+            candidates.append(normalized)
+    best = None
+    best_score = 0
+    for chunk in batch.chunks:
+        chunk_text = " ".join(str(chunk.text or "").casefold().split())
+        score = sum(min(len(value), 500) for value in candidates if value in chunk_text)
+        if score > best_score:
+            best = chunk
+            best_score = score
+    return best
+
+
 def _confidence(value: Any, default: float = 0.7) -> float:
     try:
         return max(0.0, min(1.0, float(value)))

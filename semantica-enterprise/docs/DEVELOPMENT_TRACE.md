@@ -118,3 +118,16 @@ Ontology2SQL 锁定在 `ece05d1cc988d9bce602a7a9e1b73cd5767a860a`，用于严格
 最终验收数据和测试证据见 `MULTIMODAL_MEDIA_TEST_REPORT.md` 与 `MULTIMODAL_BROWSER_TEST_REPORT.md`。本地 1B–2B 视觉模型因当前 16GB 开发机资源边界未标记为真实运行；协议适配和明确降级已完成。
 
 第三轮无删卷冷启动于 2026-09-03 完成：13 个必需服务全部健康，媒体处理结果、DSH Session Event、引用和检索索引均恢复；冷启动后 10 项媒体专项回归及浏览器时间引用播放再次通过。启动峰值期间发现 Docker Desktop 对两个旧容器的 `exec` 命名空间失效，已通过仅重建容器（保留 Volume）处理并记录，未发现业务数据损失。
+
+## 2026-09-03 短文档知识加工性能修复
+
+对 `传神AI配音案例分析.docx` 的真实任务数据进行逐步骤定位：解析约 1 秒，旧语义抽取按 26 个 Chunk 串行调用 Kimi K3，知识加工总耗时 20 分 53 秒。增量修复如下：
+
+1. 仅在模型请求边界组合相邻短 Chunk，检索 Chunk、ContentElement 和引用粒度保持不变。
+2. 按模型配置启用有界并发，平台上限为 8。
+3. 模型输出必须依据原文映射回原始 Chunk，无法锚定的输出拒绝持久化。
+4. 任务详情新增模型请求批次、成功批次、并发、失败 Chunk 和未锚定项目指标。
+5. `partial`、`partial_failed` 和 `cancelled` 步骤正确记录结束时间。
+6. 修复中文文件名下载触发 Starlette `latin-1` 编码异常的问题，使用 ASCII fallback 与 RFC 5987 `filename*`。
+
+同文档、同模型真实回归：26 个原始 Chunk 保持不变，模型请求从 26 次降到 3 次，知识加工从 20 分 53 秒降到 5 分 15 秒，24 个 Chunk 抽取成功，全部持久化的实体、关系和事件均能回溯到该版本原始 Chunk。完整说明见 `KNOWLEDGE_PROCESSING_PERFORMANCE.md`。

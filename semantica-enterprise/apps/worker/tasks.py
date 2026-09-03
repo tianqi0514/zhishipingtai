@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import tempfile
 import time
@@ -61,7 +62,11 @@ from packages.platform.storage import object_storage
 from packages.platform.structured_materialization import materialize_database_mapping
 from packages.semantica_adapter import ingest_source, parse_document, track_elements
 from packages.semantica_adapter.embedding import SemanticEmbedder
-from packages.semantica_adapter.extract import extract_semantics
+from packages.semantica_adapter.extract import (
+    build_extraction_batches,
+    extract_semantics,
+    source_chunk_for_extraction,
+)
 from packages.semantica_adapter.governance import govern_entities
 from packages.semantica_adapter.indexing import SearchIndexer, search_point_id
 from packages.semantica_adapter.normalize import normalize_and_split
@@ -92,7 +97,7 @@ def _step(db, job_id: str, name: str, sequence: int, status: str, detail: dict |
     row.detail = detail or {}
     if status == "running":
         row.started_at = now()
-    if status in {"succeeded", "failed"}:
+    if status in {"succeeded", "failed", "partial", "partial_failed", "cancelled"}:
         row.finished_at = now()
     db.commit()
     return row
@@ -1904,7 +1909,11 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             )
             reused_chunk_count = 0
             model_chunk_count = 0
+            model_request_count = 0
+            successful_model_requests = 0
+            unanchored_item_count = 0
             extraction_errors: list[dict[str, Any]] = []
+            changed_chunks: list[Chunk] = []
             for index, chunk in enumerate(selected_chunks):
                 snapshot = reused_extractions.get(chunk.chunk_id)
                 if snapshot:
@@ -1953,70 +1962,159 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     reused_chunk_count += 1
                     _progress(db, job, 20 + round(30 * (index + 1) / max(1, len(selected_chunks))))
                     continue
-                try:
-                    output = extract_semantics(
-                        chunk.text,
-                        chunk_key=chunk.chunk_id,
-                        api_key=api_key,
-                        model=llm_model.model_name,
-                        base_url=llm_model.base_url,
-                        entity_types=extraction_policy.entity_types,
-                        relation_types=extraction_policy.relation_types,
-                        temperature=float((extraction_policy.config or {}).get("temperature", 0.1)),
-                        timeout=float((llm_model.config or {}).get("timeout", 60)),
-                        max_retries=int(
-                            (llm_model.config or {}).get(
-                                "max_retries", (llm_model.config or {}).get("retry", 2)
-                            )
-                        ),
-                    )
-                except Exception as exc:
-                    safe_message = str(exc).replace(api_key, "***")
-                    extraction_errors.append({
-                        "chunk_id": chunk.chunk_id,
-                        "chunk_ordinal": chunk.ordinal,
-                        "error_type": type(exc).__name__,
-                        "message": safe_message[:500],
-                    })
-                    _progress(db, job, 20 + round(30 * (index + 1) / max(1, len(selected_chunks))))
-                    continue
-                for item in output.entities:
+                changed_chunks.append(chunk)
+
+            extraction_config = extraction_policy.config or {}
+            model_config = llm_model.config or {}
+            batch_target_chars = int(
+                extraction_config.get("batch_chars")
+                or max(1600, min(4000, int(chunk_policy.chunk_size) * 3))
+            )
+            batch_max_chunks = int(extraction_config.get("batch_max_chunks") or 12)
+            extraction_batches = build_extraction_batches(
+                changed_chunks,
+                target_chars=batch_target_chars,
+                max_chunks=batch_max_chunks,
+            )
+            extraction_concurrency = max(
+                1,
+                min(int(model_config.get("concurrency", 1)), 8, max(1, len(extraction_batches))),
+            )
+            extraction_timeout = float(model_config.get("timeout", 60))
+            extraction_retries = int(model_config.get("max_retries", model_config.get("retry", 2)))
+            extraction_temperature = float(extraction_config.get("temperature", 0.1))
+            completed_source_chunks = reused_chunk_count
+
+            def persist_extraction_output(batch, output) -> None:
+                nonlocal entity_count, relation_count, event_count, unanchored_item_count
+                for entity_index, item in enumerate(output.entities):
                     if item["confidence"] < extraction_policy.min_confidence:
                         continue
+                    source_chunk = source_chunk_for_extraction(batch, item["text"])
+                    if source_chunk is None:
+                        unanchored_item_count += 1
+                        continue
+                    mention_id = hashlib.sha256(
+                        f"{source_chunk.chunk_id}:entity:{entity_index}:{item['text']}".encode()
+                    ).hexdigest()
                     db.add(
                         EntityMention(
                             tenant_id=version.tenant_id,
                             space_id=document.space_id,
                             run_id=run.id,
-                            chunk_id=chunk.id,
-                            mention_id=item["mention_id"],
+                            chunk_id=source_chunk.id,
+                            mention_id=mention_id,
                             text=item["text"],
                             normalized_name=item["text"].casefold(),
                             entity_type=item["entity_type"],
                             confidence=item["confidence"],
                             attributes=item["attributes"],
-                            scope_tokens=chunk.scope_tokens,
+                            scope_tokens=source_chunk.scope_tokens,
                         )
                     )
                     entity_count += 1
                 for item in output.relations:
                     if item["confidence"] < extraction_policy.min_confidence:
                         continue
-                    db.add(RelationAssertion(tenant_id=version.tenant_id, space_id=document.space_id, run_id=run.id, chunk_id=chunk.id, scope_tokens=chunk.scope_tokens, **item))
+                    source_chunk = source_chunk_for_extraction(
+                        batch,
+                        item.get("evidence"),
+                        item.get("subject_name"),
+                        item.get("object_name"),
+                    )
+                    if source_chunk is None:
+                        unanchored_item_count += 1
+                        continue
+                    db.add(RelationAssertion(
+                        tenant_id=version.tenant_id,
+                        space_id=document.space_id,
+                        run_id=run.id,
+                        chunk_id=source_chunk.id,
+                        scope_tokens=source_chunk.scope_tokens,
+                        **item,
+                    ))
                     relation_count += 1
                 for item in output.events:
                     if item["confidence"] < extraction_policy.min_confidence:
                         continue
-                    db.add(EventAssertion(tenant_id=version.tenant_id, space_id=document.space_id, run_id=run.id, chunk_id=chunk.id, **item))
+                    source_chunk = source_chunk_for_extraction(
+                        batch,
+                        item.get("evidence"),
+                        item.get("trigger"),
+                        *(item.get("participants") or []),
+                    )
+                    if source_chunk is None:
+                        unanchored_item_count += 1
+                        continue
+                    db.add(EventAssertion(
+                        tenant_id=version.tenant_id,
+                        space_id=document.space_id,
+                        run_id=run.id,
+                        chunk_id=source_chunk.id,
+                        **item,
+                    ))
                     event_count += 1
-                model_chunk_count += 1
-                _progress(db, job, 20 + round(30 * (index + 1) / max(1, len(selected_chunks))))
+
+            if extraction_batches:
+                futures = {}
+                with ThreadPoolExecutor(
+                    max_workers=extraction_concurrency,
+                    thread_name_prefix="semantic-extract",
+                ) as executor:
+                    for batch in extraction_batches:
+                        future = executor.submit(
+                            extract_semantics,
+                            batch.text,
+                            chunk_key=batch.chunk_key,
+                            api_key=api_key,
+                            model=llm_model.model_name,
+                            base_url=llm_model.base_url,
+                            entity_types=extraction_policy.entity_types,
+                            relation_types=extraction_policy.relation_types,
+                            temperature=extraction_temperature,
+                            timeout=extraction_timeout,
+                            max_retries=extraction_retries,
+                        )
+                        futures[future] = batch
+                    model_request_count = len(futures)
+                    for future in as_completed(futures):
+                        batch = futures[future]
+                        try:
+                            output = future.result()
+                        except Exception as exc:
+                            safe_message = str(exc).replace(api_key, "***")
+                            for source_chunk in batch.chunks:
+                                extraction_errors.append({
+                                    "chunk_id": source_chunk.chunk_id,
+                                    "chunk_ordinal": source_chunk.ordinal,
+                                    "batch_ordinal": batch.ordinal,
+                                    "error_type": type(exc).__name__,
+                                    "message": safe_message[:500],
+                                })
+                        else:
+                            persist_extraction_output(batch, output)
+                            successful_model_requests += 1
+                            model_chunk_count += len(batch.chunks)
+                        completed_source_chunks += len(batch.chunks)
+                        _progress(
+                            db,
+                            job,
+                            20 + round(
+                                30 * completed_source_chunks / max(1, len(selected_chunks))
+                            ),
+                        )
             run.status = "partial" if extraction_errors else "succeeded"
             run.metrics = {
                 "chunks": len(selected_chunks),
                 "model_chunks": model_chunk_count,
                 "reused_chunks": reused_chunk_count,
                 "failed_chunks": len(extraction_errors),
+                "model_requests": model_request_count,
+                "successful_model_requests": successful_model_requests,
+                "batch_target_chars": batch_target_chars,
+                "batch_max_chunks": batch_max_chunks,
+                "concurrency": extraction_concurrency,
+                "unanchored_items": unanchored_item_count,
                 "entities": entity_count,
                 "relations": relation_count,
                 "events": event_count,

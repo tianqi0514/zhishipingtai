@@ -78,7 +78,7 @@ from apps.api.schemas import (
     UserCreate,
     UserUpdate,
 )
-from apps.api.utils import apply_patch, serialize_row
+from apps.api.utils import apply_patch, attachment_content_disposition, serialize_row
 from apps.worker.tasks import (
     parse_version_task,
     process_version_task,
@@ -1147,7 +1147,11 @@ def download_version(version_id: str, user: User = Depends(get_current_user), db
     version = _must(db, DocumentVersion, version_id, "版本"); document = _must(db, Document, version.document_id, "文档")
     require_space_permission(db, user, document.space_id, "read")
     payload = object_storage.get_bytes(version.object_key)
-    return StreamingResponse(io.BytesIO(payload), media_type=version.content_type, headers={"Content-Disposition": f'attachment; filename="{Path(version.filename).name}"'})
+    return StreamingResponse(
+        io.BytesIO(payload),
+        media_type=version.content_type,
+        headers={"Content-Disposition": attachment_content_disposition(version.filename)},
+    )
 
 
 # ---- Sources and durable jobs ---------------------------------------------------------
