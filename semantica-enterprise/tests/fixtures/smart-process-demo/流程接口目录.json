@@ -1,0 +1,10 @@
+{
+  "system": "智慧流程中枢",
+  "version": "1.0",
+  "interfaces": [
+    {"name": "上会立项状态回传", "provider": "三会决策系统", "method": "POST", "path": "/api/meetings/status"},
+    {"name": "采购申请同步", "provider": "采购管理系统", "method": "POST", "path": "/api/procurements/applications"},
+    {"name": "合同归档通知", "provider": "合同管理系统", "method": "POST", "path": "/api/contracts/archive"},
+    {"name": "流程风险订阅", "provider": "风险管理系统", "method": "GET", "path": "/api/process-risks"}
+  ]
+}

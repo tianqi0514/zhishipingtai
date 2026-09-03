@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from packages.semantica_adapter.embedding import SemanticEmbedder
@@ -34,6 +34,15 @@ def publish_index_snapshot(
     embedding_model: ModelConfig | None = None,
 ) -> tuple[IndexRelease, dict]:
     """Build one immutable search snapshot from the effective curated chunks."""
+    # Index and KnowledgeRelease numbers share one serialized publication
+    # boundary. Without this lock, parallel document jobs may delete/recreate
+    # the same OpenSearch index and Qdrant collection while another worker is
+    # still publishing it.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {"lock_key": f"knowledge-release:{tenant_id}:{space_id}"},
+        )
     settings = get_settings()
     previous = db.scalar(
         select(IndexRelease)

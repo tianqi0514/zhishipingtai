@@ -294,6 +294,22 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # Optional, deterministic intranet-style sources used by the customer demo.
+  # Start with: docker compose --profile demo up -d source-fixture
+  source-fixture:
+    image: semantica-enterprise:0.10.0
+    command: ["python", "/fixtures/smart_process_source_server.py"]
+    profiles: ["demo"]
+    volumes:
+      - ./tests/fixtures:/fixtures:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
 secrets:
   kimi_api_key:
     file: ./deploy/secrets/kimi_api_key

@@ -3413,6 +3413,22 @@ def _knowledge_fact_entities(db: Session, tenant_id: str, space_id: str, subject
 def create_knowledge_fact(payload: KnowledgeFactCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_space_permission(db, user, payload.space_id, "write")
     _knowledge_fact_entities(db, user.tenant_id, payload.space_id, payload.subject_entity_id, payload.object_entity_id)
+    if payload.source_chunk_id:
+        source_chunk = _must(db, Chunk, payload.source_chunk_id, "证据片段")
+        if (
+            source_chunk.tenant_id != user.tenant_id
+            or source_chunk.space_id != payload.space_id
+            or source_chunk.status != "published"
+            or source_chunk.deleted_at is not None
+        ):
+            raise HTTPException(400, "证据片段必须是当前知识空间内已发布的片段")
+        source_document = db.get(Document, source_chunk.document_id)
+        if (
+            source_document is None
+            or source_document.deleted_at is not None
+            or source_document.current_version_id != source_chunk.version_id
+        ):
+            raise HTTPException(400, "证据片段不是文档当前版本")
     duplicate = db.scalar(select(Fact).where(
         Fact.space_id == payload.space_id,
         Fact.subject_entity_id == payload.subject_entity_id,
@@ -3429,7 +3445,7 @@ def create_knowledge_fact(payload: KnowledgeFactCreate, user: User = Depends(get
         predicate=payload.predicate.strip(),
         object_entity_id=payload.object_entity_id,
         object_value=payload.object_value,
-        source_chunk_id=None,
+        source_chunk_id=payload.source_chunk_id,
         confidence=payload.confidence,
         scope_tokens=[],
         status=payload.status,

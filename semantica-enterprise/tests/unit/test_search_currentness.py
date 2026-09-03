@@ -9,6 +9,7 @@ from packages.platform import models  # noqa: F401
 from packages.platform.database import Base
 from packages.platform.knowledge_search import (
     _canonicalize_chunk_identity,
+    _deduplicate_retrieval_rows,
     _is_current_chunk_item,
 )
 from packages.platform.models import Chunk, Document
@@ -114,3 +115,23 @@ def test_external_search_hit_cannot_cross_tenant_or_space_scope() -> None:
             tenant_id="tenant-a",
             space_ids=["space-b"],
         )
+
+
+def test_retrieval_deduplicates_identical_chunks_within_one_document() -> None:
+    channels, removed = _deduplicate_retrieval_rows(
+        {
+            "keyword": [
+                {"id": "chunk-a", "document_id": "doc", "version_id": "v1", "text": "same fact", "score": 2.0},
+                {"id": "chunk-b", "document_id": "doc", "version_id": "v1", "text": "same   fact", "score": 1.0},
+            ],
+            "vector": [
+                {"id": "chunk-b", "document_id": "doc", "version_id": "v1", "text": "same fact", "score": 0.8},
+                {"id": "chunk-c", "document_id": "other", "version_id": "v2", "text": "same fact", "score": 0.7},
+            ],
+            "graph": [],
+        }
+    )
+
+    assert removed == 1
+    assert [row["id"] for row in channels["keyword"]] == ["chunk-a"]
+    assert [row["id"] for row in channels["vector"]] == ["chunk-a", "chunk-c"]

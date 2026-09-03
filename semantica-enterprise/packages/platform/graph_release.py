@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from packages.semantica_adapter.graph import publish_graph, validate_graph
@@ -13,6 +13,15 @@ from .models import CanonicalEntity, Chunk, Document, Fact, GraphRelease, Inferr
 
 
 def publish_graph_snapshot(db: Session, tenant_id: str, space_id: str) -> GraphRelease:
+    # Multiple documents in one space may finish governance concurrently. The
+    # immutable graph name and release number must be allocated serially or two
+    # workers can publish the same ``rN`` graph. Transaction advisory locks are
+    # released by the caller's commit/rollback and are a no-op in SQLite tests.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {"lock_key": f"graph-release:{tenant_id}:{space_id}"},
+        )
     settings = get_settings()
     entity_rows = list(
         db.scalars(

@@ -14,6 +14,60 @@ def search_point_id(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"semantica-chunk:{chunk_id}"))
 
 
+def opensearch_index_mapping() -> dict[str, Any]:
+    """Return the stable mapping shared by every immutable search release.
+
+    ``source_span`` is parser-owned provenance. Its nested shape intentionally
+    varies between PDFs, spreadsheets, emails, archives and media. We retain
+    the complete value in ``_source`` for citations, but do not let OpenSearch
+    dynamically index its nested fields: a field such as ``headers`` may be a
+    string in one parser and an object in another.
+    """
+    return {
+        "settings": {"index": {"number_of_shards": 1, "number_of_replicas": 0}},
+        "mappings": {
+            "properties": {
+                "text": {"type": "text"},
+                "title": {"type": "text"},
+                "tenant_id": {"type": "keyword"},
+                "space_id": {"type": "keyword"},
+                "document_id": {"type": "keyword"},
+                "version_id": {"type": "keyword"},
+                "chunk_id": {"type": "keyword"},
+                "chunk_db_id": {"type": "keyword"},
+                "page_number": {"type": "integer"},
+                "structural_path": {"type": "keyword"},
+                "source_span": {"type": "object", "enabled": False},
+                "start_seconds": {"type": "float"},
+                "end_seconds": {"type": "float"},
+                "element_type": {"type": "keyword"},
+                "media_type": {"type": "keyword"},
+                "scene_id": {"type": "keyword"},
+                "scene_index": {"type": "integer"},
+                "frame_indexes": {"type": "integer"},
+                "scope_tokens": {"type": "keyword"},
+                "effective_hash": {"type": "keyword"},
+                "curation_boost": {"type": "float"},
+                "curation_decision_id": {"type": "keyword"},
+            }
+        },
+    }
+
+
+def summarize_bulk_errors(payload: dict[str, Any], *, limit: int = 3) -> str:
+    failures: list[str] = []
+    for entry in payload.get("items") or []:
+        operation = next(iter(entry.values()), {})
+        error = operation.get("error")
+        if not error:
+            continue
+        reason = error.get("reason") if isinstance(error, dict) else str(error)
+        failures.append(f"{operation.get('_id', 'unknown')}: {reason}")
+        if len(failures) >= limit:
+            break
+    return "；".join(failures) or "OpenSearch 未返回失败详情"
+
+
 class SearchIndexer:
     def __init__(self, *, opensearch_url: str, qdrant_url: str):
         self.opensearch_url = opensearch_url.rstrip("/")
@@ -35,34 +89,7 @@ class SearchIndexer:
         index_name = f"knowledge_{suffix}"
         alias_name = f"knowledge_{space_id.replace('-', '')[:12]}_active"
         collection_name = f"knowledge_{suffix}"
-        mapping = {
-            "settings": {"index": {"number_of_shards": 1, "number_of_replicas": 0}},
-            "mappings": {
-                "properties": {
-                    "text": {"type": "text"},
-                    "title": {"type": "text"},
-                    "tenant_id": {"type": "keyword"},
-                    "space_id": {"type": "keyword"},
-                    "document_id": {"type": "keyword"},
-                    "version_id": {"type": "keyword"},
-                    "chunk_id": {"type": "keyword"},
-                    "chunk_db_id": {"type": "keyword"},
-                    "page_number": {"type": "integer"},
-                    "structural_path": {"type": "keyword"},
-                    "start_seconds": {"type": "float"},
-                    "end_seconds": {"type": "float"},
-                    "element_type": {"type": "keyword"},
-                    "media_type": {"type": "keyword"},
-                    "scene_id": {"type": "keyword"},
-                    "scene_index": {"type": "integer"},
-                    "frame_indexes": {"type": "integer"},
-                    "scope_tokens": {"type": "keyword"},
-                    "effective_hash": {"type": "keyword"},
-                    "curation_boost": {"type": "float"},
-                    "curation_decision_id": {"type": "keyword"},
-                }
-            },
-        }
+        mapping = opensearch_index_mapping()
         with httpx.Client(timeout=60) as client:
             existing = client.head(f"{self.opensearch_url}/{index_name}")
             if existing.status_code == 200:
@@ -81,8 +108,9 @@ class SearchIndexer:
                     headers={"Content-Type": "application/x-ndjson"},
                 )
                 bulk.raise_for_status()
-                if bulk.json().get("errors"):
-                    raise RuntimeError("OpenSearch 批量写入存在失败项")
+                bulk_payload = bulk.json()
+                if bulk_payload.get("errors"):
+                    raise RuntimeError(f"OpenSearch 批量写入存在失败项：{summarize_bulk_errors(bulk_payload)}")
 
         store = QdrantStore(url=self.qdrant_url)
         store.connect()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import time
 from collections import defaultdict
@@ -58,6 +59,52 @@ def _filter_item(item: dict[str, Any], filters: dict[str, Any]) -> bool:
     if tags and not set(tags).intersection(item.get("document_tags") or []):
         return False
     return True
+
+
+def _deduplicate_retrieval_rows(
+    channel_results: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, list[dict[str, Any]]], int]:
+    """Collapse byte-identical chunks from one document before RRF.
+
+    Some office files repeat the same visible table through multiple parser
+    elements.  Those elements have distinct chunk identifiers, so identifier
+    deduplication alone produces several indistinguishable evidence cards and
+    lets duplicated text dominate RRF.  Cross-document duplicates remain
+    separate because independent sources are useful corroborating evidence.
+    """
+    representatives: dict[tuple[str, str, str], dict[str, Any]] = {}
+    output: dict[str, list[dict[str, Any]]] = {}
+    removed = 0
+    for channel, rows in channel_results.items():
+        accepted: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        for row in rows:
+            normalized = " ".join(str(row.get("text") or row.get("snippet") or "").split())
+            fingerprint = str(row.get("effective_hash") or "")
+            if not fingerprint:
+                fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+            key = (
+                str(row.get("document_id") or ""),
+                str(row.get("version_id") or ""),
+                fingerprint,
+            )
+            representative = representatives.setdefault(key, row)
+            mapped = dict(row)
+            if representative is not row:
+                for identity in ("id", "chunk_db_id", "chunk_id"):
+                    if representative.get(identity):
+                        mapped[identity] = representative[identity]
+            item_id = str(mapped.get("id") or "")
+            if item_id in positions:
+                removed += 1
+                current = accepted[positions[item_id]]
+                if float(mapped.get("score") or 0) > float(current.get("score") or 0):
+                    current["score"] = mapped.get("score")
+                continue
+            positions[item_id] = len(accepted)
+            accepted.append(mapped)
+        output[channel] = accepted
+    return output, removed
 
 
 def _canonicalize_chunk_identity(db: Session, item: dict[str, Any]) -> dict[str, Any]:
@@ -449,6 +496,9 @@ def execute_hybrid_search(
                 accepted.append(canonical)
         channel_results[channel] = accepted
 
+    total_before_dedup = sum(len(rows) for rows in channel_results.values())
+    channel_results, content_duplicates_filtered = _deduplicate_retrieval_rows(channel_results)
+
     score_maps: dict[str, dict[str, float]] = {}
     rank_maps: dict[str, dict[str, int]] = {}
     for channel, rows in channel_results.items():
@@ -509,7 +559,6 @@ def execute_hybrid_search(
     items = prepared[:top_k]
     for rank, item in enumerate(items, start=1):
         item["rank"] = rank
-    total_before_dedup = sum(len(rows) for rows in channel_results.values())
     timings["total_ms"] = round((time.perf_counter() - started) * 1000)
     channel_counts = {channel: len(rows) for channel, rows in channel_results.items()}
     trace_summary = {
@@ -519,6 +568,7 @@ def execute_hybrid_search(
         "before_dedup": total_before_dedup,
         "after_dedup": len(fused),
         "stale_filtered": stale_filtered,
+        "content_duplicates_filtered": content_duplicates_filtered,
         "rrf_applied": True,
         "reranker_applied": reranked,
         "selected_chunk_ids": [item["chunk_id"] for item in items],
