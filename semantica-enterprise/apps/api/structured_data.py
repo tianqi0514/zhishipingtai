@@ -25,6 +25,7 @@ from apps.api.structured_schemas import (
 from apps.api.utils import serialize_row
 from packages.platform.audit import audit
 from packages.platform.database import get_db
+from packages.platform.model_routing import resolve_model_for_scene
 from packages.platform.models import (
     DataPreviewPolicy,
     DataSourceSchemaVersion,
@@ -757,18 +758,12 @@ def natural_language_structured_query(
     db: Session = Depends(get_db),
 ):
     _, version, source, schema = _query_context(db, payload.mapping_version_id, user)
-    model = db.scalar(select(ModelConfig).where(
-        ModelConfig.tenant_id == user.tenant_id,
-        ModelConfig.model_kind == "llm",
-        ModelConfig.enabled.is_(True),
-        ModelConfig.is_default.is_(True),
-        ModelConfig.deleted_at.is_(None),
-    ))
+    model = resolve_model_for_scene(db, user.tenant_id, "structured_query").model
     if model is None:
-        raise HTTPException(409, {"code": "LLM_NOT_CONFIGURED", "message": "请先配置默认大模型"})
+        raise HTTPException(409, {"code": "LLM_NOT_CONFIGURED", "message": "请先配置结构化查询模型"})
     api_key = decrypt_secret(model.api_key_encrypted)
     if not api_key:
-        raise HTTPException(409, {"code": "LLM_KEY_NOT_CONFIGURED", "message": "默认大模型尚未配置 API Key"})
+        raise HTTPException(409, {"code": "LLM_KEY_NOT_CONFIGURED", "message": "结构化查询模型尚未配置可用凭据"})
     config = model.config or {}
     policy = get_or_create_preview_policy(db, source)
     value_hints = collect_semantic_value_hints(source, schema, policy, version)

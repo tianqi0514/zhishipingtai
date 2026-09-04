@@ -34,6 +34,7 @@ from .models import (
     QueryRun,
 )
 from .media import media_type_for
+from .model_routing import resolve_model_for_scene
 from .security import decrypt_secret
 
 
@@ -534,17 +535,7 @@ def execute_hybrid_search(
 
     reranked = False
     if use_reranker and prepared:
-        reranker = db.scalar(
-            select(ModelConfig)
-            .where(
-                ModelConfig.tenant_id == tenant_id,
-                ModelConfig.model_kind == "reranker",
-                ModelConfig.enabled.is_(True),
-                ModelConfig.is_default.is_(True),
-                _active(ModelConfig),
-            )
-            .limit(1)
-        )
+        reranker = resolve_model_for_scene(db, tenant_id, "reranking").model
         if reranker:
             rerank_started = time.perf_counter()
             try:

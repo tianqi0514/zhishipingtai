@@ -155,5 +155,6 @@ log "启动传神智库全部服务"
 )
 
 WAIT_SECONDS="${WAIT_SECONDS:-900}" "${SCRIPT_DIR}/healthcheck.sh"
-log "部署完成：http://127.0.0.1:8080/"
-
+api_bind_address="$(read_env_value API_BIND_ADDRESS)"
+api_published_port="$(read_env_value API_PUBLISHED_PORT)"
+log "部署完成：http://${api_bind_address:-127.0.0.1}:${api_published_port:-8080}/"

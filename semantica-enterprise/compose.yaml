@@ -1,7 +1,7 @@
 name: semantica-enterprise
 
 x-app-environment: &app-environment
-  ENVIRONMENT: development
+  ENVIRONMENT: ${ENVIRONMENT:-development}
   APP_SECRET_KEY: ${APP_SECRET_KEY:-local-semantic-enterprise-2026-change-me}
   BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
   BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-Admin@123456}
@@ -69,7 +69,7 @@ services:
     volumes:
       - rabbitmq313-data:/var/lib/rabbitmq
     ports:
-      - "127.0.0.1:15672:15672"
+      - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
     healthcheck:
       # `ping` only proves that the Erlang node is alive.  The API may start
       # before the AMQP listener is ready and lose the first published job.
@@ -90,7 +90,7 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      - "127.0.0.1:9001:9001"
+      - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -111,7 +111,7 @@ services:
     volumes:
       - opensearch-data:/usr/share/opensearch/data
     ports:
-      - "127.0.0.1:9200:9200"
+      - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${OPENSEARCH_PUBLISHED_PORT:-9200}:9200"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
       interval: 10s
@@ -125,7 +125,7 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
     ports:
-      - "127.0.0.1:6333:6333"
+      - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${QDRANT_PUBLISHED_PORT:-6333}:6333"
     healthcheck:
       test: ["CMD-SHELL", "bash -c ': >/dev/tcp/127.0.0.1/6333'"]
       interval: 8s
@@ -138,7 +138,7 @@ services:
     volumes:
       - falkordb-data:/var/lib/falkordb/data
     ports:
-      - "127.0.0.1:6380:6379"
+      - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${FALKORDB_PUBLISHED_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 8s
@@ -179,7 +179,7 @@ services:
     volumes:
       - application-data:/app/data
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PUBLISHED_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -280,7 +280,7 @@ services:
       MCP_PORT: "8091"
       MCP_REQUEST_TIMEOUT: "600"
     ports:
-      - "127.0.0.1:8091:8091"
+      - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${MCP_PUBLISHED_PORT:-8091}:8091"
     depends_on:
       api:
         condition: service_healthy

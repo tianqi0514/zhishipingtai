@@ -275,6 +275,22 @@ class ModelConfigUpdate(BaseModel):
     is_default: bool | None = None
 
 
+class ModelRoutingPolicyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    routes: dict[str, str | None] = Field(default_factory=dict)
+    enabled: bool = True
+    is_default: bool = False
+
+
+class ModelRoutingPolicyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    routes: dict[str, str | None] | None = None
+    enabled: bool | None = None
+    is_default: bool | None = None
+
+
 class ParserPolicyCreate(BaseModel):
     name: str
     parser_type: Literal["auto", "native", "docling"] = "auto"

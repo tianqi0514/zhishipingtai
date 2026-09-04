@@ -38,6 +38,7 @@ from packages.platform.media import (
     uses_cloud_vision,
 )
 from packages.platform.media_policy import ensure_policy_version, resolve_media_policy
+from packages.platform.model_routing import resolve_model_for_scene
 from packages.platform.models import (
     ContentElement,
     Document,
@@ -288,13 +289,8 @@ def validate_media_policy(
         configured_id = item.get("model_config_id")
         model = db.get(ModelConfig, configured_id) if configured_id else None
         if model is None and not configured_id:
-            model = db.scalar(select(ModelConfig).where(
-                ModelConfig.tenant_id == user.tenant_id,
-                ModelConfig.model_kind == kind,
-                ModelConfig.enabled.is_(True),
-                ModelConfig.is_default.is_(True),
-                ModelConfig.deleted_at.is_(None),
-            ))
+            scene = "speech_recognition" if kind == "asr" else "vision_understanding"
+            model = resolve_model_for_scene(db, user.tenant_id, scene).model
         valid = bool(model and model.tenant_id == user.tenant_id and model.enabled and model.deleted_at is None and model.model_kind == kind)
         checks.append({
             "name": section,

@@ -6,6 +6,22 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP_DIR="${REPO_ROOT}/semantica-enterprise"
 WAIT_SECONDS="${WAIT_SECONDS:-600}"
 POLL_SECONDS="${POLL_SECONDS:-5}"
+API_PUBLISHED_PORT="${API_PUBLISHED_PORT:-}"
+
+if [[ -z "$API_PUBLISHED_PORT" && -f "${APP_DIR}/.env" ]]; then
+  API_PUBLISHED_PORT="$(python3 - "${APP_DIR}/.env" <<'PY'
+import pathlib
+import sys
+
+for raw_line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if line and not line.startswith("#") and line.startswith("API_PUBLISHED_PORT="):
+        print(line.split("=", 1)[1].strip())
+        break
+PY
+)"
+fi
+API_PUBLISHED_PORT="${API_PUBLISHED_PORT:-8080}"
 
 command -v docker >/dev/null 2>&1 || {
   printf '[health] ERROR: 缺少 docker\n' >&2
@@ -52,7 +68,7 @@ while (( SECONDS < deadline )); do
     exit 1
   fi
 
-  if [[ "${#pending[@]}" -eq 0 ]] && curl -fsS --max-time 5 http://127.0.0.1:8080/health/ready >/dev/null; then
+  if [[ "${#pending[@]}" -eq 0 ]] && curl -fsS --max-time 5 "http://127.0.0.1:${API_PUBLISHED_PORT}/health/ready" >/dev/null; then
     printf '[health] 全部 %s 个服务健康，API Ready\n' "${#services[@]}"
     (cd "$APP_DIR" && docker compose ps)
     exit 0

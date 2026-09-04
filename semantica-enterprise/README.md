@@ -36,7 +36,7 @@ docker compose ps
 - 人工治理：在 Semantica 自动画像、解析元素、Chunk、实体与事实之上叠加可回滚约束；治理工作台按“待处理—人工调整—发布记录”组织业务闭环，支持主动查找、批次归并、真实进度、失败重试和影响预览；原始自动结果不被覆盖。
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
 - 结构化数据：MySQL/PostgreSQL Schema 发现与版本差异、实时数据/同步快照预览、服务端分页筛选和脱敏、本体映射版本、严格 Semantic Query Plan/Query IR、确定性参数化 SQL、只读实时查询与结构化数据引用。
-- 模型：LLM、Embedding、Reranker、Vision、ASR 统一配置、默认项、启停和真实连接测试。
+- 模型：LLM、Embedding、Reranker、Vision、ASR 统一配置、默认项、启停和真实连接测试；模型路由策略可按问答、图谱语义抽取、治理画像、结构化查询、视觉、向量、重排和语音场景独立选模。
 - 知识治理：统一组织治理概览、内容治理、白底 3D 知识图谱、规则推演和发布记录；图谱节点/边真实 CRUD，规则推演继续由 Semantica Datalog 执行，发布版本可校验和追溯。
 - 检索：OpenSearch 全文、Qdrant 向量、FalkorDB 图谱召回，RRF 融合、可选重排、排序依据和真实片段引用。
 - 对话：DeepSeek Harness Agent Loop、多轮 Session、SSE、停止、重试、重启恢复；桌面端三栏展示真实 Agent 执行事件、检索轨迹与按最终排名排列的召回依据，不展示模型私有思维链。
@@ -159,6 +159,7 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [知识加工性能与模型调用策略](docs/KNOWLEDGE_PROCESSING_PERFORMANCE.md)
 - [数据源支持矩阵](docs/SOURCE_MATRIX.md)
 - [模型配置](docs/MODELS.md)
+- [模型路由策略](docs/MODEL_ROUTING.md)
 - [REST、MCP、CLI](docs/INTEGRATIONS.md)
 - [测试报告](docs/TEST_REPORT.md)
 - [2026-09-02 国联集团知识底座全业务验收](docs/FULL_PLATFORM_VALIDATION_20260902.md)

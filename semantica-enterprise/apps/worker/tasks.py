@@ -64,6 +64,7 @@ from packages.platform.knowledge_processing import (
     processing_mode_for_targets,
     processing_targets,
 )
+from packages.platform.model_routing import resolve_model_for_scene
 from packages.platform.security import decrypt_secret
 from packages.platform.storage import object_storage
 from packages.platform.structured_materialization import materialize_database_mapping
@@ -159,13 +160,8 @@ def _media_model(db, tenant_id: str, kind: str, configured_id: str | None) -> Mo
             # and send data to a provider the user did not select.
             return None
         return row
-    return db.scalar(select(ModelConfig).where(
-            ModelConfig.tenant_id == tenant_id,
-            ModelConfig.model_kind == kind,
-            ModelConfig.is_default.is_(True),
-            ModelConfig.enabled.is_(True),
-            ModelConfig.deleted_at.is_(None),
-        ))
+    scene = {"asr": "speech_recognition", "vision": "vision_understanding"}.get(kind)
+    return resolve_model_for_scene(db, tenant_id, scene).model if scene else None
 
 
 def _media_model_secret(db, model: ModelConfig | None) -> str | None:
@@ -1660,15 +1656,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         # Running a general-purpose LLM once per row is both slower and less
         # reliable than the mapping-backed materializer.  Administrators can
         # explicitly opt in for free-text database columns when needed.
-        embedding_model = db.scalar(
-            select(ModelConfig).where(
-                ModelConfig.tenant_id == version.tenant_id,
-                ModelConfig.model_kind == "embedding",
-                ModelConfig.is_default.is_(True),
-                ModelConfig.enabled.is_(True),
-                ModelConfig.deleted_at.is_(None),
-            )
-        )
+        embedding_model = resolve_model_for_scene(db, version.tenant_id, "embedding").model
         missing: list[str] = []
         if chunk_policy is None:
             missing.append("切片策略")
@@ -1681,11 +1669,12 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         if missing:
             _fail(db, job, "KNOWLEDGE_POLICY_MISSING", f"知识加工配置不完整：{'、'.join(missing)}")
             return {"status": "failed"}
-        llm_model = (
-            db.get(ModelConfig, extraction_policy.model_config_id)
-            if extraction_policy and extraction_policy.model_config_id
-            else None
-        )
+        llm_model = resolve_model_for_scene(
+            db,
+            version.tenant_id,
+            "semantic_extract",
+            explicit_model_id=extraction_policy.model_config_id if extraction_policy else None,
+        ).model
         execute_semantic_extraction = graph_enabled and generic_semantic_extraction_enabled
         if execute_semantic_extraction and (llm_model is None or not llm_model.enabled):
             _fail(db, job, "EXTRACTION_MODEL_MISSING", "语义抽取策略未关联可用大模型")
@@ -1857,12 +1846,17 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             _step(db, job.id, "document_profile", 2, "running")
             deterministic = build_deterministic_profile(elements)
             profile_config = governance_policy.config or {}
-            profile_model = llm_model
-            configured_profile_model_id = profile_config.get("model_config_id")
-            if configured_profile_model_id:
-                candidate = db.get(ModelConfig, str(configured_profile_model_id))
-                if candidate and candidate.tenant_id == version.tenant_id and candidate.enabled:
-                    profile_model = candidate
+            configured_profile_model_id = str(profile_config.get("model_config_id") or "") or None
+            profile_model = resolve_model_for_scene(
+                db,
+                version.tenant_id,
+                "document_governance",
+                explicit_model_id=configured_profile_model_id,
+            ).model
+            if profile_model is None and configured_profile_model_id is None:
+                # Preserve the legacy extraction-model fallback when neither a
+                # route nor a same-kind default exists.
+                profile_model = llm_model
             model_analysis_enabled = bool(profile_config.get("enable_model_analysis", True))
             if is_database_snapshot and not database_profile_model_enabled:
                 model_analysis_enabled = False

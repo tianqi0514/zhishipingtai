@@ -26,6 +26,7 @@ from apps.api.utils import serialize_row
 from packages.platform.audit import audit
 from packages.platform.database import get_db
 from packages.platform.knowledge_search import execute_hybrid_search
+from packages.platform.model_routing import resolve_model_for_scene
 from packages.platform.curation import effective_chunk_text, effective_entity, effective_fact
 from packages.platform.analysis import execute_inference_run, inference_result_rows
 from packages.platform.models import (
@@ -244,22 +245,12 @@ def get_agent_model(
     )
     if conversation is None:
         raise HTTPException(404, "Harness 会话未映射到业务会话")
-    model = db.scalar(
-        select(ModelConfig)
-        .where(
-            ModelConfig.tenant_id == conversation.tenant_id,
-            ModelConfig.model_kind == "llm",
-            ModelConfig.enabled.is_(True),
-            ModelConfig.is_default.is_(True),
-            _active(ModelConfig),
-        )
-        .limit(1)
-    )
+    model = resolve_model_for_scene(db, conversation.tenant_id, "agent_chat").model
     if model is None:
-        raise HTTPException(409, "未配置默认大模型")
+        raise HTTPException(409, "智能问答尚未配置可用模型")
     api_key = decrypt_secret(model.api_key_encrypted)
     if not api_key:
-        raise HTTPException(409, "默认大模型未配置 API Key")
+        raise HTTPException(409, "智能问答模型未配置可用凭据")
     config = model.config or {}
     return {
         "provider": model.provider,

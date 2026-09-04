@@ -14,6 +14,6 @@ API Key 保存时用 `APP_SECRET_KEY` 派生的 Fernet 密钥加密；列表和�
 
 系统默认创建的“BGE 中文向量”是通过 Semantica `TextEmbedder` 调用 FastEmbed 在 CPU 本地运行的 `BAAI/bge-small-zh-v1.5`，不需要 Base URL 或 API Key。第一次测试或向量检索会下载 ONNX 模型；Docker 将其缓存在 `application-data` Volume 中，容器重建后继续复用。测试会实际生成一条 512 维向量，加载或推理失败时状态必须为失败，禁止使用哈希向量伪装成功。
 
-Kimi K3 可以作为默认 LLM，但密钥只从现有 Docker Secret 或加密数据库读取。Harness 插件、前端、Session JSONL、审计与测试报告均不得出现密钥。
+当前验收环境将内网 `Qwen3.8-27B-NVFP4` 设为默认 LLM；Kimi K3 保留为可选云端模型。模型选择不再只依赖“类型默认”，管理员可以通过[模型路由策略](MODEL_ROUTING.md)按业务场景指定模型。所有凭据只从 Docker Secret 或加密数据库读取，Harness 插件、前端、Session JSONL、审计与测试报告均不得出现密钥。
 
 生产建议：每个租户至少配置一个默认 LLM 与 Embedding；Reranker、Vision、ASR 按业务需要配置。保存前先执行“测试”，再设默认。更换 `APP_SECRET_KEY` 前必须实施密钥重加密迁移。

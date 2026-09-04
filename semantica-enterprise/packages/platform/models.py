@@ -134,6 +134,20 @@ class ModelConfig(Base, TimestampMixin):
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ModelRoutingPolicy(Base, TimestampMixin):
+    __tablename__ = "model_routing_policies"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_model_routing_policy_tenant_name"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    routes: Mapped[dict] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class ParserPolicy(Base, TimestampMixin):
     __tablename__ = "parser_policies"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

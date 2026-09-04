@@ -58,6 +58,8 @@ from apps.api.schemas import (
     LoginRequest,
     ModelConfigCreate,
     ModelConfigUpdate,
+    ModelRoutingPolicyCreate,
+    ModelRoutingPolicyUpdate,
     OntologyCreate,
     OntologyTermCreate,
     OntologyTermUpdate,
@@ -137,6 +139,7 @@ from packages.platform.models import (
     KnowledgeSpace,
     KnowledgeRelease,
     ModelConfig,
+    ModelRoutingPolicy,
     MediaParsingPolicy,
     Ontology,
     OntologyTerm,
@@ -153,6 +156,12 @@ from packages.platform.models import (
 )
 from packages.platform.knowledge_search import execute_hybrid_search
 from packages.platform.knowledge_processing import normalize_processing_mode
+from packages.platform.model_routing import (
+    MODEL_ROUTE_SCENES,
+    ModelRoutingError,
+    resolved_routes,
+    validate_model_routes,
+)
 from packages.platform.graph_release import publish_graph_snapshot
 from packages.platform.curation import (
     create_decision,
@@ -704,8 +713,102 @@ def test_model(row_id: str, admin: User = Depends(require_admin), db: Session = 
 
 @router.delete("/model-configs/{row_id}")
 def delete_model(row_id: str, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    row = _must_tenant(db, ModelConfig, row_id, admin.tenant_id, "模型配置"); _soft_delete(db, row)
+    row = _must_tenant(db, ModelConfig, row_id, admin.tenant_id, "模型配置")
+    used_by = [
+        policy.name for policy in db.scalars(select(ModelRoutingPolicy).where(
+            ModelRoutingPolicy.tenant_id == admin.tenant_id,
+            ModelRoutingPolicy.deleted_at.is_(None),
+        )) if row.id in set((policy.routes or {}).values())
+    ]
+    if used_by:
+        raise HTTPException(409, f"该模型正被模型路由策略使用：{'、'.join(used_by[:3])}")
+    _soft_delete(db, row)
     audit(db, admin.tenant_id, admin.id, "model.delete", "model_config", row.id); db.commit(); return {"ok": True}
+
+
+@router.get("/model-routing-policies/resolved")
+def get_resolved_model_routes(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return {"scenes": MODEL_ROUTE_SCENES, "routes": resolved_routes(db, user.tenant_id)}
+
+
+@router.get("/model-routing-policies")
+def list_model_routing_policies(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [serialize_row(row) for row in db.scalars(select(ModelRoutingPolicy).where(
+        ModelRoutingPolicy.tenant_id == user.tenant_id,
+        _active(ModelRoutingPolicy),
+    ).order_by(ModelRoutingPolicy.is_default.desc(), ModelRoutingPolicy.name))]
+
+
+@router.get("/model-routing-policies/{row_id}")
+def get_model_routing_policy(row_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return serialize_row(_must_tenant(db, ModelRoutingPolicy, row_id, user.tenant_id, "模型路由策略"))
+
+
+@router.post("/model-routing-policies")
+def create_model_routing_policy(
+    payload: ModelRoutingPolicyCreate,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        routes = validate_model_routes(db, admin.tenant_id, payload.routes)
+    except ModelRoutingError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    row = ModelRoutingPolicy(
+        tenant_id=admin.tenant_id,
+        **{**payload.model_dump(exclude={"routes"}), "routes": routes},
+    )
+    db.add(row); db.flush()
+    if row.is_default:
+        _set_only_default(db, ModelRoutingPolicy, admin.tenant_id, row.id)
+    audit(db, admin.tenant_id, admin.id, "model_routing.create", "model_routing_policy", row.id)
+    _commit(db, "模型路由策略名称已存在")
+    return serialize_row(row)
+
+
+@router.put("/model-routing-policies/{row_id}")
+def update_model_routing_policy(
+    row_id: str,
+    payload: ModelRoutingPolicyUpdate,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    row = _must_tenant(db, ModelRoutingPolicy, row_id, admin.tenant_id, "模型路由策略")
+    values = payload.model_dump(exclude_unset=True)
+    if "routes" in values:
+        try:
+            values["routes"] = validate_model_routes(db, admin.tenant_id, values["routes"])
+        except ModelRoutingError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    apply_patch(row, values, {"name", "description", "routes", "enabled", "is_default"})
+    if row.is_default:
+        _set_only_default(db, ModelRoutingPolicy, admin.tenant_id, row.id)
+    audit(db, admin.tenant_id, admin.id, "model_routing.update", "model_routing_policy", row.id)
+    _commit(db, "模型路由策略名称已存在")
+    return serialize_row(row)
+
+
+@router.delete("/model-routing-policies/{row_id}")
+def delete_model_routing_policy(
+    row_id: str,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    row = _must_tenant(db, ModelRoutingPolicy, row_id, admin.tenant_id, "模型路由策略")
+    if row.is_default:
+        replacement = db.scalar(select(ModelRoutingPolicy).where(
+            ModelRoutingPolicy.tenant_id == admin.tenant_id,
+            ModelRoutingPolicy.id != row.id,
+            ModelRoutingPolicy.enabled.is_(True),
+            ModelRoutingPolicy.deleted_at.is_(None),
+        ))
+        if replacement is None:
+            raise HTTPException(409, "至少保留一条可用的默认模型路由策略")
+        replacement.is_default = True
+    _soft_delete(db, row)
+    audit(db, admin.tenant_id, admin.id, "model_routing.delete", "model_routing_policy", row.id)
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/parser-policies")
@@ -1585,11 +1688,10 @@ def list_extraction_policies(user: User = Depends(get_current_user), db: Session
 
 @router.post("/extraction-policies")
 def create_extraction_policy(payload: ExtractionPolicyCreate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
-    model_id = payload.model_config_id or db.scalar(select(ModelConfig.id).where(ModelConfig.tenant_id == admin.tenant_id, ModelConfig.model_kind == "llm", ModelConfig.is_default.is_(True), ModelConfig.deleted_at.is_(None)))
-    if not model_id: raise HTTPException(422, "请选择大模型")
-    model = _must(db, ModelConfig, model_id, "模型")
-    if model.tenant_id != admin.tenant_id or model.model_kind != "llm": raise HTTPException(422, "抽取策略只能使用本租户大模型")
-    row = ExtractionPolicy(tenant_id=admin.tenant_id, **{**payload.model_dump(), "model_config_id": model_id})
+    if payload.model_config_id:
+        model = _must(db, ModelConfig, payload.model_config_id, "模型")
+        if model.tenant_id != admin.tenant_id or model.model_kind != "llm": raise HTTPException(422, "抽取策略只能使用本租户大模型")
+    row = ExtractionPolicy(tenant_id=admin.tenant_id, **payload.model_dump())
     db.add(row); db.flush()
     if row.is_default: _set_only_default(db, ExtractionPolicy, admin.tenant_id, row.id)
     db.commit(); return serialize_row(row)
@@ -1599,7 +1701,10 @@ def create_extraction_policy(payload: ExtractionPolicyCreate, admin: User = Depe
 def update_extraction_policy(row_id: str, payload: ExtractionPolicyUpdate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     row = _must(db, ExtractionPolicy, row_id, "抽取策略")
     if row.tenant_id != admin.tenant_id: raise HTTPException(404, "抽取策略不存在")
-    values = payload.model_dump(exclude_unset=True, exclude_none=True)
+    submitted = payload.model_dump(exclude_unset=True)
+    values = {key: value for key, value in submitted.items() if value is not None}
+    if "model_config_id" in submitted:
+        values["model_config_id"] = submitted["model_config_id"]
     if values.get("model_config_id"):
         model = _must(db, ModelConfig, values["model_config_id"], "模型")
         if model.tenant_id != admin.tenant_id or model.model_kind != "llm": raise HTTPException(422, "抽取策略只能使用本租户大模型")

@@ -6,6 +6,18 @@
 - 建议至少 8 核 CPU、16GB 内存、30GB 可用磁盘
 - `8080`、`8091`、`9001`、`9200`、`6333`、`6380`、`15672` 本机端口可用
 
+所有宿主机端口均可通过 `.env` 调整。生产或测试服务器应仅公开 Web/API 入口，数据库、中间件、MCP 和模型运行时继续绑定环回地址。例如将平台发布在 `9001`：
+
+```dotenv
+ENVIRONMENT=test
+API_BIND_ADDRESS=0.0.0.0
+API_PUBLISHED_PORT=9001
+INTERNAL_BIND_ADDRESS=127.0.0.1
+MINIO_CONSOLE_PORT=19001
+```
+
+这里把 MinIO 控制台移到本机 `19001`，避免与平台入口冲突；它仍不对公网开放。
+
 应用镜像已内置 `ffmpeg/ffprobe`、LibreOffice headless、Tesseract 中英文语言包、`file/libmagic` 和文泉驿正黑中文字体。中文 Office 转换、扫描件 OCR 和验收数据生成不依赖宿主机字体或本地安装的软件。
 
 Dockerfile 默认使用 Debian 官方软件源。受限网络环境可以在构建时传入 `DEBIAN_MIRROR` 和 `DEBIAN_SECURITY_MIRROR`，例如：
@@ -43,7 +55,7 @@ API 启动时先执行追加式 SQL 迁移，使用 PostgreSQL advisory lock 避
 
 | 服务 | 用途 | 对外端口 |
 |---|---|---|
-| api | FastAPI、Web、权限、会话、检索 | `127.0.0.1:8080` |
+| api | FastAPI、Web、权限、会话、检索 | `${API_BIND_ADDRESS}:${API_PUBLISHED_PORT}`，默认 `127.0.0.1:8080` |
 | worker | 解析、治理、抽取、发布、同步 | 无 |
 | scheduler | 数据源定时同步 | 无 |
 | agent-runtime | DeepSeek Harness Runtime | 仅 Docker 内网 `8090` |
