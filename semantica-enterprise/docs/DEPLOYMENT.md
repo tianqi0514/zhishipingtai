@@ -26,6 +26,7 @@ Dockerfile 默认使用 Debian 官方软件源。受限网络环境可以在构�
 docker compose build \
   --build-arg DEBIAN_MIRROR=https://mirrors.aliyun.com/debian \
   --build-arg DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security \
+  --build-arg PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
   api
 ```
 
