@@ -8,8 +8,7 @@ USER root
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_INDEX_URL=${PIP_INDEX_URL}
+    PIP_NO_CACHE_DIR=1
 
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec \
     sed -i \
@@ -22,6 +21,8 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
        libreoffice-calc libreoffice-impress libreoffice-writer \
        tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 
 WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
