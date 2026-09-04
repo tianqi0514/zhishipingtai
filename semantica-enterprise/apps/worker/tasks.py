@@ -33,6 +33,7 @@ from packages.platform.models import (
     ExtractionRun,
     Fact,
     GovernancePolicy,
+    GraphRelease,
     IndexRelease,
     InferenceRun,
     Job,
@@ -57,6 +58,12 @@ from packages.platform.curation import (
 )
 from packages.platform.graph_release import publish_graph_snapshot
 from packages.platform.index_release import activate_knowledge_release, publish_index_snapshot
+from packages.platform.knowledge_processing import (
+    completed_processing_targets,
+    normalize_processing_mode,
+    processing_mode_for_targets,
+    processing_targets,
+)
 from packages.platform.security import decrypt_secret
 from packages.platform.storage import object_storage
 from packages.platform.structured_materialization import materialize_database_mapping
@@ -841,7 +848,7 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                 for element_id, element_row in existing_elements.items():
                     if element_id not in retained_element_ids:
                         element_row.deleted_at = now()
-                version.parse_summary = summary
+                version.parse_summary = {**(version.parse_summary or {}), **summary}
                 version.status = "ready"
                 version.error_code = None
                 version.error_message = None
@@ -899,11 +906,17 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                 )
                 process_job = db.scalar(select(Job).where(Job.idempotency_key == knowledge_key))
                 if process_job is None:
+                    processing_mode = normalize_processing_mode(
+                        (version.parse_summary or {}).get("knowledge_processing_mode")
+                    )
                     process_job = Job(
                         tenant_id=version.tenant_id,
                         job_type="process_knowledge",
                         idempotency_key=knowledge_key,
-                        input={"version_id": version.id},
+                        input={
+                            "version_id": version.id,
+                            "knowledge_processing_mode": processing_mode,
+                        },
                     )
                     db.add(process_job)
                     db.commit()
@@ -1393,6 +1406,7 @@ def _canonical_for_name(
     entity_type: str = "其他",
     confidence: float = 0.7,
     scope_tokens: list[str] | None = None,
+    new_status: str = "published",
 ) -> CanonicalEntity:
     from semantica.normalize import EntityNormalizer
 
@@ -1421,6 +1435,7 @@ def _canonical_for_name(
             entity_type=entity_type[:100],
             confidence=confidence,
             scope_tokens=scope_tokens or [],
+            status=new_status,
         )
         db.add(row)
         db.flush()
@@ -1600,10 +1615,34 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         if version.status != "ready":
             _fail(db, job, "VERSION_NOT_READY", "文档尚未完成解析")
             return {"status": "failed"}
-        if (version.parse_summary or {}).get("knowledge_status") == "published" and not job.input.get("force"):
+        try:
+            processing_mode = normalize_processing_mode(
+                (job.input or {}).get("knowledge_processing_mode")
+                or (version.parse_summary or {}).get("knowledge_processing_mode")
+            )
+        except ValueError as exc:
+            _fail(db, job, "KNOWLEDGE_MODE_INVALID", str(exc))
+            return {"status": "failed"}
+        originally_requested_mode = processing_mode
+        requested_targets = set(processing_targets(processing_mode))
+        completed_targets = completed_processing_targets(version.parse_summary)
+        # A forced rebuild means content or governance changed. Rebuild every
+        # projection that is already effective for this version so search and
+        # graph never describe different revisions of the same chunks.
+        if (job.input or {}).get("force"):
+            requested_targets.update(completed_targets)
+            processing_mode = processing_mode_for_targets(requested_targets)
+        vector_enabled = "vector" in requested_targets
+        graph_enabled = "graph" in requested_targets
+        if requested_targets.issubset(completed_targets) and not (job.input or {}).get("force"):
             job.status = "succeeded"
             job.progress = 100
-            job.result = {"version_id": version.id, "unchanged": True}
+            job.result = {
+                "version_id": version.id,
+                "unchanged": True,
+                "knowledge_processing_mode": processing_mode,
+                "knowledge_targets_completed": sorted(completed_targets),
+            }
             job.finished_at = now()
             db.commit()
             return job.result
@@ -1630,11 +1669,25 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 ModelConfig.deleted_at.is_(None),
             )
         )
-        if not all([chunk_policy, extraction_policy, governance_policy, embedding_model]):
-            _fail(db, job, "KNOWLEDGE_POLICY_MISSING", "切片、抽取、治理或向量模型配置不完整")
+        missing: list[str] = []
+        if chunk_policy is None:
+            missing.append("切片策略")
+        if governance_policy is None:
+            missing.append("治理策略")
+        if graph_enabled and generic_semantic_extraction_enabled and extraction_policy is None:
+            missing.append("抽取策略")
+        if vector_enabled and embedding_model is None:
+            missing.append("向量模型")
+        if missing:
+            _fail(db, job, "KNOWLEDGE_POLICY_MISSING", f"知识加工配置不完整：{'、'.join(missing)}")
             return {"status": "failed"}
-        llm_model = db.get(ModelConfig, extraction_policy.model_config_id) if extraction_policy.model_config_id else None
-        if llm_model is None or not llm_model.enabled:
+        llm_model = (
+            db.get(ModelConfig, extraction_policy.model_config_id)
+            if extraction_policy and extraction_policy.model_config_id
+            else None
+        )
+        execute_semantic_extraction = graph_enabled and generic_semantic_extraction_enabled
+        if execute_semantic_extraction and (llm_model is None or not llm_model.enabled):
             _fail(db, job, "EXTRACTION_MODEL_MISSING", "语义抽取策略未关联可用大模型")
             return {"status": "failed"}
 
@@ -1645,8 +1698,30 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         document.status = "processing"
         db.commit()
         prior_parse_summary = deepcopy(version.parse_summary or {})
+        version.parse_summary = {
+            **prior_parse_summary,
+            "knowledge_processing_protocol": "targets_v1",
+            "knowledge_processing_requested_mode": originally_requested_mode,
+            "knowledge_targets_requested": sorted(requested_targets),
+        }
+        db.commit()
         rollback_chunk_state: dict[str, dict[str, Any]] = {}
         rollback_fact_state: dict[str, dict[str, Any]] = {}
+        rollback_entity_state: dict[str, dict[str, Any]] = {}
+        entity_state_fields = (
+            "canonical_name", "normalized_name", "entity_type", "aliases", "properties",
+            "confidence", "source_count", "scope_tokens", "status", "deleted_at",
+        )
+        if graph_enabled:
+            rollback_entity_state = {
+                row.id: {field: deepcopy(getattr(row, field)) for field in entity_state_fields}
+                for row in db.scalars(
+                    select(CanonicalEntity).where(
+                        CanonicalEntity.tenant_id == version.tenant_id,
+                        CanonicalEntity.space_id == document.space_id,
+                    )
+                )
+            }
         try:
             _step(db, job.id, "normalize_split", 1, "running")
             old_chunks = list(db.scalars(select(Chunk).where(Chunk.version_id == version.id)))
@@ -1679,33 +1754,35 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     row.id: {field: deepcopy(getattr(row, field)) for field in chunk_state_fields}
                     for row in old_chunks
                 }
-                old_facts = list(db.scalars(select(Fact).where(Fact.source_chunk_id.in_(old_ids))))
-                fact_state_fields = (
-                    "subject_entity_id", "predicate", "object_entity_id", "object_value",
-                    "confidence", "scope_tokens", "status", "deleted_at",
-                )
-                rollback_fact_state = {
-                    fact.id: {field: deepcopy(getattr(fact, field)) for field in fact_state_fields}
-                    for fact in old_facts
-                }
-                for fact in old_facts:
-                    fact.status = "superseded"
-                run_ids = list(db.scalars(select(ExtractionRun.id).where(ExtractionRun.version_id == version.id)))
-                if run_ids:
-                    db.execute(delete(EventAssertion).where(EventAssertion.run_id.in_(run_ids)))
-                    db.execute(delete(RelationAssertion).where(RelationAssertion.run_id.in_(run_ids)))
-                    db.execute(delete(EntityMention).where(EntityMention.run_id.in_(run_ids)))
-                    db.execute(delete(ExtractionRun).where(ExtractionRun.id.in_(run_ids)))
+                if graph_enabled:
+                    old_facts = list(db.scalars(select(Fact).where(Fact.source_chunk_id.in_(old_ids))))
+                    fact_state_fields = (
+                        "subject_entity_id", "predicate", "object_entity_id", "object_value",
+                        "confidence", "scope_tokens", "status", "deleted_at",
+                    )
+                    rollback_fact_state = {
+                        fact.id: {field: deepcopy(getattr(fact, field)) for field in fact_state_fields}
+                        for fact in old_facts
+                    }
+                    for fact in old_facts:
+                        fact.status = "superseded"
+                    run_ids = list(db.scalars(select(ExtractionRun.id).where(ExtractionRun.version_id == version.id)))
+                    if run_ids:
+                        db.execute(delete(EventAssertion).where(EventAssertion.run_id.in_(run_ids)))
+                        db.execute(delete(RelationAssertion).where(RelationAssertion.run_id.in_(run_ids)))
+                        db.execute(delete(EntityMention).where(EntityMention.run_id.in_(run_ids)))
+                        db.execute(delete(ExtractionRun).where(ExtractionRun.id.in_(run_ids)))
                 for old_chunk in old_chunks:
                     old_chunk.status = "superseded"
-                for case in db.scalars(
-                    select(ConflictCase).where(
-                        ConflictCase.space_id == document.space_id,
-                        ConflictCase.deleted_at.is_(None),
-                    )
-                ):
-                    if set(case.source_chunk_ids or []) & set(old_ids):
-                        db.delete(case)
+                if graph_enabled:
+                    for case in db.scalars(
+                        select(ConflictCase).where(
+                            ConflictCase.space_id == document.space_id,
+                            ConflictCase.deleted_at.is_(None),
+                        )
+                    ):
+                        if set(case.source_chunk_ids or []) & set(old_ids):
+                            db.delete(case)
                 db.commit()
             raw_elements = list(
                 db.scalars(
@@ -1889,22 +1966,25 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             _progress(db, job, 20)
 
             _step(db, job.id, "semantic_extract", 3, "running")
-            run = ExtractionRun(
-                tenant_id=version.tenant_id,
-                space_id=document.space_id,
-                version_id=version.id,
-                policy_id=extraction_policy.id,
-                model_config_id=llm_model.id,
-            )
-            db.add(run)
-            db.flush()
-            api_key = decrypt_secret(llm_model.api_key_encrypted)
-            if generic_semantic_extraction_enabled and not api_key:
+            run: ExtractionRun | None = None
+            api_key = ""
+            if execute_semantic_extraction:
+                run = ExtractionRun(
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    version_id=version.id,
+                    policy_id=extraction_policy.id,
+                    model_config_id=llm_model.id,
+                )
+                db.add(run)
+                db.flush()
+                api_key = decrypt_secret(llm_model.api_key_encrypted)
+            if execute_semantic_extraction and not api_key:
                 raise ValueError("语义抽取模型未配置 API Key")
             entity_count = relation_count = event_count = 0
             selected_chunks = (
                 chunks[: extraction_policy.max_chunks]
-                if generic_semantic_extraction_enabled
+                if execute_semantic_extraction
                 else []
             )
             reused_chunk_count = 0
@@ -1964,8 +2044,8 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     continue
                 changed_chunks.append(chunk)
 
-            extraction_config = extraction_policy.config or {}
-            model_config = llm_model.config or {}
+            extraction_config = (extraction_policy.config or {}) if extraction_policy else {}
+            model_config = (llm_model.config or {}) if llm_model else {}
             batch_target_chars = int(
                 extraction_config.get("batch_chars")
                 or max(1600, min(4000, int(chunk_policy.chunk_size) * 3))
@@ -2103,8 +2183,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                                 30 * completed_source_chunks / max(1, len(selected_chunks))
                             ),
                         )
-            run.status = "partial" if extraction_errors else "succeeded"
-            run.metrics = {
+            extraction_metrics = {
                 "chunks": len(selected_chunks),
                 "model_chunks": model_chunk_count,
                 "reused_chunks": reused_chunk_count,
@@ -2119,24 +2198,37 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "relations": relation_count,
                 "events": event_count,
             }
-            if not generic_semantic_extraction_enabled:
-                run.metrics.update({
+            if not execute_semantic_extraction:
+                extraction_metrics.update({
                     "skipped": True,
-                    "reason": "database_snapshot_uses_deterministic_mapping",
+                    "reason": (
+                        "processing_mode_excludes_graph"
+                        if not graph_enabled
+                        else "database_snapshot_uses_deterministic_mapping"
+                    ),
+                    "processing_mode": processing_mode,
                     "available_chunks": len(chunks),
                 })
             if extraction_errors:
-                run.metrics["errors"] = extraction_errors
+                extraction_metrics["errors"] = extraction_errors
+            extraction_status = "partial" if extraction_errors else "succeeded"
+            if run:
+                run.status = extraction_status
+                run.metrics = extraction_metrics
                 run.error_message = (
                     f"{len(extraction_errors)} 个片段语义抽取失败；文档仍已进入全文和向量索引，可重试知识加工"
-                )
-            run.finished_at = now()
+                ) if extraction_errors else None
+                run.finished_at = now()
             db.commit()
-            _step(db, job.id, "semantic_extract", 3, run.status, run.metrics)
+            _step(db, job.id, "semantic_extract", 3, extraction_status, extraction_metrics)
             _progress(db, job, 52)
 
             _step(db, job.id, "governance", 4, "running")
-            mentions = list(db.scalars(select(EntityMention).where(EntityMention.run_id == run.id)))
+            mentions = (
+                list(db.scalars(select(EntityMention).where(EntityMention.run_id == run.id)))
+                if run
+                else []
+            )
             governed, decisions = govern_entities(
                 [
                     {
@@ -2175,6 +2267,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         entity_type=item.entity_type,
                         aliases=item.aliases,
                         confidence=item.confidence,
+                        status="staged",
                     )
                     db.add(entity)
                     db.flush()
@@ -2196,14 +2289,18 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         decision=decision,
                     )
                 )
-            relations = list(db.scalars(select(RelationAssertion).where(RelationAssertion.run_id == run.id)))
+            relations = (
+                list(db.scalars(select(RelationAssertion).where(RelationAssertion.run_id == run.id)))
+                if run
+                else []
+            )
             published_facts = 0
             for relation in relations:
                 if relation.confidence < governance_policy.publish_confidence:
                     relation.status = "rejected"
                     continue
-                subject = _canonical_for_name(db, tenant_id=version.tenant_id, space_id=document.space_id, name=relation.subject_name, confidence=relation.confidence, scope_tokens=relation.scope_tokens)
-                obj = _canonical_for_name(db, tenant_id=version.tenant_id, space_id=document.space_id, name=relation.object_name, confidence=relation.confidence, scope_tokens=relation.scope_tokens)
+                subject = _canonical_for_name(db, tenant_id=version.tenant_id, space_id=document.space_id, name=relation.subject_name, confidence=relation.confidence, scope_tokens=relation.scope_tokens, new_status="staged")
+                obj = _canonical_for_name(db, tenant_id=version.tenant_id, space_id=document.space_id, name=relation.object_name, confidence=relation.confidence, scope_tokens=relation.scope_tokens, new_status="staged")
                 fact = db.scalar(select(Fact).where(
                     Fact.space_id == document.space_id,
                     Fact.subject_entity_id == subject.id,
@@ -2233,17 +2330,28 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             for mention in mentions:
                 mention.status = "published" if mention.mention_id in mention_entity else "rejected"
             db.commit()
-            structured_materialization = materialize_database_mapping(
-                db,
-                document=document,
-                version=version,
+            structured_materialization = (
+                materialize_database_mapping(
+                    db,
+                    document=document,
+                    version=version,
+                )
+                if graph_enabled
+                else {"enabled": False, "skipped": True, "reason": "processing_mode_excludes_graph"}
             )
             if structured_materialization.get("enabled"):
                 published_facts += int(structured_materialization.get("attribute_facts") or 0)
                 published_facts += int(structured_materialization.get("relationship_facts") or 0)
             db.commit()
-            conflicts = _detect_and_resolve_conflicts(db, tenant_id=version.tenant_id, space_id=document.space_id, policy=governance_policy)
-            upsert_conflict_cases(db, version.tenant_id, document.space_id)
+            conflicts = 0
+            if graph_enabled:
+                conflicts = _detect_and_resolve_conflicts(
+                    db,
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    policy=governance_policy,
+                )
+                upsert_conflict_cases(db, version.tenant_id, document.space_id)
             db.commit()
             governance_metrics = {
                 "canonical_entities": len(governed),
@@ -2251,56 +2359,145 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "conflicts": conflicts,
                 "decisions": len(decisions),
                 "structured_materialization": structured_materialization,
+                "skipped": not graph_enabled,
+                "reason": "processing_mode_excludes_graph" if not graph_enabled else None,
             }
             _step(db, job.id, "governance", 4, "succeeded", governance_metrics)
             _progress(db, job, 68)
 
             _step(db, job.id, "graph_publish", 5, "running")
-            graph_release = publish_graph_snapshot(db, version.tenant_id, document.space_id)
-            db.flush()
-            graph_number = graph_release.release_number
-            _step(
-                db,
-                job.id,
-                "graph_publish",
-                5,
-                "succeeded",
-                {
+            if graph_enabled:
+                pending_entity_ids = {
+                    row.id
+                    for row in db.scalars(
+                        select(CanonicalEntity).where(
+                            CanonicalEntity.tenant_id == version.tenant_id,
+                            CanonicalEntity.space_id == document.space_id,
+                            CanonicalEntity.deleted_at.is_(None),
+                        )
+                    )
+                    if row.id not in rollback_entity_state
+                }
+                graph_release = publish_graph_snapshot(
+                    db,
+                    version.tenant_id,
+                    document.space_id,
+                    include_pending_version_ids={version.id},
+                    include_pending_entity_ids=pending_entity_ids,
+                )
+                db.flush()
+                graph_number = graph_release.release_number
+                graph_detail = {
                     "release": graph_number,
                     "entities": graph_release.entity_count,
                     "facts": graph_release.fact_count,
                     "asserted_facts": (graph_release.validation_report or {}).get("asserted_facts", 0),
                     "inferred_facts": (graph_release.validation_report or {}).get("inferred_facts", 0),
-                },
-            )
+                }
+            else:
+                graph_release = db.scalar(
+                    select(GraphRelease)
+                    .where(
+                        GraphRelease.tenant_id == version.tenant_id,
+                        GraphRelease.space_id == document.space_id,
+                        GraphRelease.status == "published",
+                        GraphRelease.deleted_at.is_(None),
+                    )
+                    .order_by(GraphRelease.release_number.desc())
+                    .limit(1)
+                )
+                graph_number = graph_release.release_number if graph_release else None
+                graph_detail = {
+                    "skipped": True,
+                    "reason": "processing_mode_excludes_graph",
+                    "current_release": graph_number,
+                }
+            _step(db, job.id, "graph_publish", 5, "succeeded", graph_detail)
             _progress(db, job, 78)
 
             _step(db, job.id, "index_publish", 6, "running")
-            release, index_result = publish_index_snapshot(
-                db,
-                tenant_id=version.tenant_id,
-                space_id=document.space_id,
-                graph_release=graph_release,
-                embedding_model=embedding_model,
+            index_result: dict[str, Any] = {}
+            if vector_enabled:
+                release, index_result = publish_index_snapshot(
+                    db,
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    graph_release=graph_release,
+                    embedding_model=embedding_model,
+                    include_pending_version_ids={version.id},
+                )
+                index_number = release.release_number
+                index_detail = {
+                    "release": index_number,
+                    "chunks": release.chunk_count,
+                    "dimension": release.embedding_dimension,
+                    "embedded": index_result["embedded_count"],
+                    "reused": index_result["reused_vector_count"],
+                }
+            else:
+                release = db.scalar(
+                    select(IndexRelease)
+                    .where(
+                        IndexRelease.tenant_id == version.tenant_id,
+                        IndexRelease.space_id == document.space_id,
+                        IndexRelease.status == "published",
+                        IndexRelease.deleted_at.is_(None),
+                    )
+                    .order_by(IndexRelease.release_number.desc())
+                    .limit(1)
+                )
+                index_number = release.release_number if release else None
+                index_detail = {
+                    "skipped": True,
+                    "reason": "processing_mode_excludes_vector",
+                    "current_release": index_number,
+                }
+            successful_targets = set(requested_targets)
+            if graph_enabled and extraction_errors:
+                # Partial graph output remains available with a warning, but
+                # the target is deliberately incomplete so a normal retry can
+                # rerun the failed extraction batches.
+                successful_targets.discard("graph")
+            # A rebuilt target replaces its prior completion state. This is
+            # important when a forced graph rebuild only partially succeeds:
+            # the old graph completion must not mask the need for retry.
+            completed_targets = (completed_targets - requested_targets) | successful_targets
+            effective_processing_mode = (
+                processing_mode_for_targets(completed_targets)
+                if completed_targets
+                else originally_requested_mode
             )
-            index_number = release.release_number
-            knowledge_release = activate_knowledge_release(
-                db,
-                tenant_id=version.tenant_id,
-                space_id=document.space_id,
-                graph_release=graph_release,
-                index_release=release,
+            knowledge_release = (
+                activate_knowledge_release(
+                    db,
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    graph_release=graph_release,
+                    index_release=release,
+                )
+                if graph_release and release
+                else None
             )
             for row in chunks:
                 row.status = "published"
+            if graph_enabled:
+                for entity_id in pending_entity_ids:
+                    entity = db.get(CanonicalEntity, entity_id)
+                    if entity is not None and entity.deleted_at is None:
+                        entity.status = "published"
             version.parse_summary = {
                 **(version.parse_summary or {}),
                 "knowledge_status": "published",
-                "semantic_extraction_status": run.status,
+                "knowledge_processing_mode": effective_processing_mode,
+                "knowledge_processing_requested_mode": (
+                    originally_requested_mode if extraction_errors else effective_processing_mode
+                ),
+                "knowledge_targets_completed": sorted(completed_targets),
+                "semantic_extraction_status": extraction_status if graph_enabled else "skipped",
                 "semantic_extraction_failed_chunks": len(extraction_errors),
                 "chunks": len(chunks),
-                "entities": entity_count,
-                "facts": published_facts,
+                "entities": entity_count if graph_enabled else prior_parse_summary.get("entities", 0),
+                "facts": published_facts if graph_enabled else prior_parse_summary.get("facts", 0),
                 "graph_release": graph_number,
                 "index_release": index_number,
                 "structured_materialization": structured_materialization,
@@ -2310,6 +2507,9 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             job.progress = 100
             job.result = {
                 "version_id": version.id,
+                "knowledge_processing_mode": effective_processing_mode,
+                "knowledge_processing_requested_mode": originally_requested_mode,
+                "knowledge_targets_completed": sorted(completed_targets),
                 "chunks": len(chunks),
                 "entities": entity_count,
                 "relations": relation_count,
@@ -2317,12 +2517,12 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "facts": published_facts,
                 "graph_release": graph_number,
                 "index_release": index_number,
-                "knowledge_release": knowledge_release.release_number,
+                "knowledge_release": knowledge_release.release_number if knowledge_release else None,
                 "structured_materialization": structured_materialization,
             }
             if extraction_errors:
                 job.result["warnings"] = [
-                    f"{len(extraction_errors)} 个片段的模型语义抽取失败；全文、向量和已成功抽取的图谱知识均已发布"
+                    f"{len(extraction_errors)} 个片段的模型语义抽取失败；已成功抽取的图谱知识仍已发布"
                 ]
             job.finished_at = now()
             curation_batch_id = (job.input or {}).get("curation_batch_id")
@@ -2332,13 +2532,17 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 curation_batch.published_at = now()
                 curation_batch.publish_error = None
             db.commit()
-            _step(db, job.id, "index_publish", 6, "succeeded", {"release": index_number, "chunks": release.chunk_count, "dimension": release.embedding_dimension, "embedded": index_result["embedded_count"], "reused": index_result["reused_vector_count"]})
-            automatic_runs = _queue_automatic_inference(
-                db,
-                tenant_id=version.tenant_id,
-                space_id=document.space_id,
-                document_id=document.id,
-                version_id=version.id,
+            _step(db, job.id, "index_publish", 6, "succeeded", index_detail)
+            automatic_runs = (
+                _queue_automatic_inference(
+                    db,
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    document_id=document.id,
+                    version_id=version.id,
+                )
+                if graph_enabled
+                else []
             )
             if automatic_runs:
                 job = db.get(Job, job.id)
@@ -2354,31 +2558,46 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             if job is None:
                 return {"status": "failed", "error": message}
             if version:
-                if rollback_chunk_state:
-                    current_chunks = list(db.scalars(select(Chunk).where(Chunk.version_id == version.id)))
-                    current_chunk_ids = [row.id for row in current_chunks]
-                    for row in current_chunks:
-                        snapshot = rollback_chunk_state.get(row.id)
+                current_chunks = list(db.scalars(select(Chunk).where(Chunk.version_id == version.id)))
+                current_chunk_ids = [row.id for row in current_chunks]
+                for row in current_chunks:
+                    snapshot = rollback_chunk_state.get(row.id)
+                    if snapshot:
+                        for field, value in snapshot.items():
+                            setattr(row, field, deepcopy(value))
+                    else:
+                        row.status = "superseded"
+                if current_chunk_ids and graph_enabled:
+                    for fact in db.scalars(select(Fact).where(Fact.source_chunk_id.in_(current_chunk_ids))):
+                        snapshot = rollback_fact_state.get(fact.id)
                         if snapshot:
                             for field, value in snapshot.items():
-                                setattr(row, field, deepcopy(value))
+                                setattr(fact, field, deepcopy(value))
                         else:
-                            row.status = "superseded"
-                    if current_chunk_ids:
-                        for fact in db.scalars(select(Fact).where(Fact.source_chunk_id.in_(current_chunk_ids))):
-                            snapshot = rollback_fact_state.get(fact.id)
-                            if snapshot:
-                                for field, value in snapshot.items():
-                                    setattr(fact, field, deepcopy(value))
-                            else:
-                                fact.status = "superseded"
-                    version.parse_summary = {
-                        **prior_parse_summary,
+                            fact.status = "superseded"
+                if graph_enabled:
+                    current_entities = list(db.scalars(select(CanonicalEntity).where(
+                        CanonicalEntity.tenant_id == version.tenant_id,
+                        CanonicalEntity.space_id == document.space_id,
+                    )))
+                    for entity in current_entities:
+                        snapshot = rollback_entity_state.get(entity.id)
+                        if snapshot:
+                            for field, value in snapshot.items():
+                                setattr(entity, field, deepcopy(value))
+                        else:
+                            entity.status = "superseded"
+                            entity.deleted_at = now()
+                failure_detail = {
+                    "knowledge_status": "failed",
+                    "knowledge_error": message[:1000],
+                }
+                if (job.input or {}).get("curation_batch_id"):
+                    failure_detail.update({
                         "curation_status": "publish_failed",
                         "curation_error": message[:1000],
-                    }
-                else:
-                    version.parse_summary = {**(version.parse_summary or {}), "knowledge_status": "failed", "knowledge_error": message[:1000]}
+                    })
+                version.parse_summary = {**prior_parse_summary, **failure_detail}
             if document:
                 document.status = "ready"
             curation_batch_id = (job.input or {}).get("curation_batch_id")

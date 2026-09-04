@@ -9,10 +9,18 @@ from packages.semantica_adapter.graph import publish_graph, validate_graph
 
 from .config import get_settings
 from .curation import effective_chunk_payloads, effective_entity, effective_fact
-from .models import CanonicalEntity, Chunk, Document, Fact, GraphRelease, InferredFact
+from .knowledge_processing import version_in_graph_projection
+from .models import CanonicalEntity, Chunk, Document, DocumentVersion, Fact, GraphRelease, InferredFact
 
 
-def publish_graph_snapshot(db: Session, tenant_id: str, space_id: str) -> GraphRelease:
+def publish_graph_snapshot(
+    db: Session,
+    tenant_id: str,
+    space_id: str,
+    *,
+    include_pending_version_ids: set[str] | None = None,
+    include_pending_entity_ids: set[str] | None = None,
+) -> GraphRelease:
     # Multiple documents in one space may finish governance concurrently. The
     # immutable graph name and release number must be allocated serially or two
     # workers can publish the same ``rN`` graph. Transaction advisory locks are
@@ -33,7 +41,11 @@ def publish_graph_snapshot(db: Session, tenant_id: str, space_id: str) -> GraphR
         )
     )
     entities = [(row, effective_entity(db, row)) for row in entity_rows]
-    entities = [(row, value) for row, value in entities if value.get("status") == "published"]
+    entities = [
+        (row, value)
+        for row, value in entities
+        if value.get("status") == "published" or row.id in (include_pending_entity_ids or set())
+    ]
     active_entity_ids = {row.id for row, _ in entities}
     candidate_facts = list(
         db.scalars(
@@ -58,12 +70,18 @@ def publish_graph_snapshot(db: Session, tenant_id: str, space_id: str) -> GraphR
             continue
         source_chunk = db.get(Chunk, fact.source_chunk_id)
         source_document = db.get(Document, source_chunk.document_id) if source_chunk else None
+        source_version = db.get(DocumentVersion, source_chunk.version_id) if source_chunk else None
         if (
             source_chunk is not None
             and source_chunk.deleted_at is None
             and source_document is not None
             and source_document.deleted_at is None
             and source_document.current_version_id == source_chunk.version_id
+            and source_version is not None
+            and (
+                source_version.id in (include_pending_version_ids or set())
+                or version_in_graph_projection(source_version.parse_summary)
+            )
             and effective_chunk_payloads(db, [source_chunk])
         ):
             asserted.append((fact, effective))

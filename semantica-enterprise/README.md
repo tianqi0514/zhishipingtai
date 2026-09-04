@@ -31,7 +31,7 @@ docker compose ps
 
 ## 主要能力
 
-- 文档：上传、版本、解析百分比、元素、Chunk、治理画像、增量加工与历史溯源。
+- 文档：上传、版本、解析百分比、元素、Chunk、治理画像、增量加工与历史溯源；上传或重新加工时可选择“仅检索（全文+向量）”“仅图谱”或“检索+图谱”。
 - 多模态：可版本化媒体策略；固定间隔/FPS/场景/智能抽帧；本地 SenseVoice ASR、Tesseract OCR、Kimi K3 或本地兼容 Vision；场景/关键帧/转写时间线、权限化播放器、缓存重处理和可跳转时间引用。
 - 人工治理：在 Semantica 自动画像、解析元素、Chunk、实体与事实之上叠加可回滚约束；治理工作台按“待处理—人工调整—发布记录”组织业务闭环，支持主动查找、批次归并、真实进度、失败重试和影响预览；原始自动结果不被覆盖。
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
@@ -92,6 +92,11 @@ python3 tests/e2e/conversation_agent_quality.py
 python3 tests/e2e/conversation_cancel_retry.py
 python3 tests/integration/restart_recovery.py
 python3 tests/performance/live_load.py
+
+# 真实验证仅检索、仅图谱和同时加工的投影隔离与召回差异
+docker compose exec -T api sh -lc \
+  'API_BASE=http://api:8080/api/v1 python -' \
+  < tests/e2e/document_processing_targets_live.py
 
 # 结构化数据隔离集成环境（测试账号只存在于临时 fixture 容器）
 docker compose -f compose.yaml -f compose.structured-test.yaml up -d --build

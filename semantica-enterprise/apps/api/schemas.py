@@ -467,6 +467,10 @@ class DocumentUpdate(BaseModel):
     owner_id: str | None = None
 
 
+class KnowledgeProcessingRequest(BaseModel):
+    mode: Literal["vector", "graph", "both"] = "both"
+
+
 class ChunkPolicyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     method: Literal["recursive", "sentence", "paragraph", "token", "semantic"] = "recursive"

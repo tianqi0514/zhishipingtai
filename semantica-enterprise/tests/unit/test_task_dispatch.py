@@ -90,7 +90,8 @@ def test_model_extraction_timeout_degrades_without_losing_search_index() -> None
     ).read_text(encoding="utf-8")
 
     assert "extraction_errors.append" in worker
-    assert 'run.status = "partial" if extraction_errors else "succeeded"' in worker
+    assert 'extraction_status = "partial" if extraction_errors else "succeeded"' in worker
+    assert "run.status = extraction_status" in worker
     assert '"semantic_extraction_failed_chunks": len(extraction_errors)' in worker
     assert 'job.result["warnings"]' in worker
 

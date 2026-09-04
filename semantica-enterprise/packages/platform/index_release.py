@@ -13,6 +13,7 @@ from packages.semantica_adapter.indexing import SearchIndexer, search_point_id
 from .config import get_settings
 from .curation import effective_chunk_payloads
 from .media import media_type_for
+from .knowledge_processing import version_in_vector_projection
 from .models import (
     Chunk,
     ContentElement,
@@ -30,8 +31,9 @@ def publish_index_snapshot(
     *,
     tenant_id: str,
     space_id: str,
-    graph_release: GraphRelease,
+    graph_release: GraphRelease | None,
     embedding_model: ModelConfig | None = None,
+    include_pending_version_ids: set[str] | None = None,
 ) -> tuple[IndexRelease, dict]:
     """Build one immutable search snapshot from the effective curated chunks."""
     # Index and KnowledgeRelease numbers share one serialized publication
@@ -80,6 +82,11 @@ def publish_index_snapshot(
         row = item["row"]
         document = db.get(Document, row.document_id)
         version = db.get(DocumentVersion, row.version_id)
+        if version is None or (
+            version.id not in (include_pending_version_ids or set())
+            and not version_in_vector_projection(version.parse_summary)
+        ):
+            continue
         element = db.get(ContentElement, row.element_id) if row.element_id else None
         element_metadata = dict(element.element_metadata or {}) if element else {}
         media_type = media_type_for(version.filename, version.content_type) if version else None
@@ -141,7 +148,7 @@ def publish_index_snapshot(
         release_number=release_number,
         opensearch_index=result["opensearch_index"],
         qdrant_collection=result["qdrant_collection"],
-        graph_release_id=graph_release.id,
+        graph_release_id=graph_release.id if graph_release else None,
         model_config_id=embedding_model.id,
         embedding_dimension=result["dimension"],
         document_count=len({item["document_id"] for item in chunks}),
