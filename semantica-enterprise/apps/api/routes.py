@@ -11,6 +11,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
@@ -28,11 +29,13 @@ from apps.api.deps import (
 )
 from apps.api.schemas import (
     AnalysisRuleCreate,
+    AnalysisRuleMatchPreview,
     AnalysisRuleSetCreate,
     AnalysisRuleSetUpdate,
     AnalysisRuleUpdate,
     AnalysisScenarioCreate,
     AnalysisScenarioUpdate,
+    AnalysisTaskRunCreate,
     ChunkPolicyCreate,
     ChunkPolicyUpdate,
     CurationBatchCreate,
@@ -46,6 +49,7 @@ from apps.api.schemas import (
     GrantCreate,
     GovernancePolicyCreate,
     GovernancePolicyUpdate,
+    GuidedAnalysisSetupCreate,
     KnowledgeEntityCreate,
     KnowledgeEntityUpdate,
     KnowledgeFactCreate,
@@ -77,6 +81,7 @@ from apps.api.schemas import (
     SpaceUpdate,
     UserCreate,
     UserUpdate,
+    VisualGraphQueryRequest,
 )
 from apps.api.utils import apply_patch, attachment_content_disposition, serialize_row
 from apps.worker.tasks import (
@@ -88,6 +93,14 @@ from apps.worker.tasks import (
 )
 from packages.platform.audit import audit
 from packages.platform.analysis import inference_result_rows
+from packages.platform.analysis_business import (
+    analysis_readiness,
+    analysis_vocabulary,
+    active_analysis_context,
+    preview_rule_matches,
+    run_comparison,
+    templates_for_vocabulary,
+)
 from packages.platform.config import get_settings
 from packages.platform.database import get_db
 from packages.platform.models import (
@@ -1695,6 +1708,259 @@ def _inference_run_payload(row: InferenceRun, job: Job | None = None) -> dict[st
     return data
 
 
+def _analysis_task_payload(
+    db: Session,
+    row: AnalysisScenario,
+    jobs: dict[str, Job],
+) -> dict[str, Any]:
+    data = serialize_row(row)
+    rule_set = db.get(AnalysisRuleSet, row.rule_set_id) if row.rule_set_id else None
+    last_run = db.scalar(
+        select(InferenceRun)
+        .where(InferenceRun.scenario_id == row.id, _active(InferenceRun))
+        .order_by(InferenceRun.created_at.desc())
+        .limit(1)
+    )
+    rule_count = 0
+    if row.rule_set_id:
+        rule_count = db.scalar(
+            select(func.count()).select_from(AnalysisRule).where(
+                AnalysisRule.rule_set_id == row.rule_set_id,
+                AnalysisRule.deleted_at.is_(None),
+            )
+        ) or 0
+    data.update(
+        {
+            "question": str((row.config or {}).get("question") or row.description or row.name),
+            "template_id": (row.config or {}).get("template_id"),
+            "role_labels": (row.config or {}).get("role_labels") or {},
+            "rule_set_name": rule_set.name if rule_set and rule_set.deleted_at is None else None,
+            "rule_count": int(rule_count),
+            "auto_run": bool(rule_set.auto_run) if rule_set else False,
+            "auto_publish": bool(rule_set.auto_publish) if rule_set else False,
+            "last_run": _inference_run_payload(last_run, jobs.get(last_run.id)) if last_run else None,
+        }
+    )
+    return data
+
+
+@router.get("/analysis/readiness")
+def get_analysis_readiness(
+    space_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "read")
+    return analysis_readiness(db, tenant_id=user.tenant_id, space_id=space_id)
+
+
+@router.get("/analysis/vocabulary")
+def get_analysis_vocabulary(
+    space_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "read")
+    return analysis_vocabulary(db, tenant_id=user.tenant_id, space_id=space_id)
+
+
+@router.get("/analysis/templates")
+def list_analysis_templates(
+    space_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "read")
+    vocabulary = analysis_vocabulary(db, tenant_id=user.tenant_id, space_id=space_id)
+    return {"space_id": space_id, "items": templates_for_vocabulary(vocabulary)}
+
+
+@router.post("/analysis/rules/match-preview")
+def preview_analysis_rule_matches(
+    payload: AnalysisRuleMatchPreview,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, payload.space_id, "read")
+    definition = payload.definition.model_dump()
+    normalized, dsl, compiled = _prepare_rule_definition(definition, None)
+    result = preview_rule_matches(
+        db,
+        tenant_id=user.tenant_id,
+        space_id=payload.space_id,
+        definition=normalized,
+        confidence=payload.confidence,
+        max_results=payload.max_results,
+    )
+    result.update({"definition": normalized, "dsl": dsl, "compiled": compiled})
+    return result
+
+
+@router.post("/analysis/guided-setups")
+def create_guided_analysis_setup(
+    payload: GuidedAnalysisSetupCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, payload.space_id, "manage")
+    normalized, dsl, compiled = _prepare_rule_definition(payload.definition.model_dump(), None)
+    preview = preview_rule_matches(
+        db,
+        tenant_id=user.tenant_id,
+        space_id=payload.space_id,
+        definition=normalized,
+        confidence=payload.confidence,
+        max_results=min(payload.max_results, 1000),
+    )
+    blockers = {item["code"] for item in preview["diagnostics"]}
+    if blockers & {"no_asserted_facts", "missing_predicate"}:
+        raise HTTPException(422, preview["diagnostics"][0]["message"])
+
+    rule_set = AnalysisRuleSet(
+        tenant_id=user.tenant_id,
+        name=f"{payload.name} · 规则"[:200],
+        description=payload.question,
+        category=payload.category,
+        space_ids=[payload.space_id],
+        auto_run=payload.auto_run,
+        auto_publish=payload.auto_publish,
+        config={
+            "created_from": "guided_setup",
+            "question": payload.question,
+            "template_id": payload.template_id,
+            "role_labels": payload.role_labels,
+        },
+        enabled=True,
+    )
+    db.add(rule_set)
+    _flush_or_conflict(db, "同名分析任务或规则集已存在")
+    rule = AnalysisRule(
+        tenant_id=user.tenant_id,
+        rule_set_id=rule_set.id,
+        name=payload.rule_name,
+        description=payload.question,
+        definition=normalized,
+        dsl=dsl,
+        head_predicate=normalized["conclusion"]["predicate"],
+        body_predicates=[item["predicate"] for item in normalized["conditions"]],
+        priority=payload.priority,
+        confidence=payload.confidence,
+        current_version=1,
+        enabled=True,
+    )
+    db.add(rule)
+    _flush_or_conflict(db, "分析任务中的规则名称已存在")
+    version = AnalysisRuleVersion(
+        tenant_id=user.tenant_id,
+        rule_id=rule.id,
+        version=1,
+        definition=normalized,
+        dsl=dsl,
+        compiled=compiled,
+        created_by=user.id,
+    )
+    scenario = AnalysisScenario(
+        tenant_id=user.tenant_id,
+        name=payload.name,
+        description=payload.question,
+        category=payload.category,
+        rule_set_id=rule_set.id,
+        space_ids=[payload.space_id],
+        input_schema={},
+        config={
+            "created_from": "guided_setup",
+            "question": payload.question,
+            "template_id": payload.template_id,
+            "role_labels": payload.role_labels,
+        },
+        enabled=True,
+    )
+    db.add_all([version, scenario])
+    _flush_or_conflict(db, "同名分析任务已存在")
+    run = InferenceRun(
+        tenant_id=user.tenant_id,
+        rule_set_id=rule_set.id,
+        scenario_id=scenario.id,
+        requested_by=user.id,
+        trigger_type="guided_setup",
+        mode=payload.mode,
+        space_ids=[payload.space_id],
+        run_input={"max_results": payload.max_results, "match_preview": preview},
+    )
+    db.add(run)
+    db.flush()
+    job = Job(
+        tenant_id=user.tenant_id,
+        job_type="knowledge_inference",
+        idempotency_key=f"inference:{run.id}",
+        input={"inference_run_id": run.id},
+    )
+    db.add(job)
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "analysis.guided_setup.create",
+        "analysis_scenario",
+        scenario.id,
+        {"space_id": payload.space_id, "mode": payload.mode, "template_id": payload.template_id},
+    )
+    _commit(db, "同名分析任务已存在")
+    warning = _dispatch_job(db, job, run_inference_task)
+    result = {
+        "task": _analysis_task_payload(db, scenario, {run.id: job}),
+        "rule_set": serialize_row(rule_set),
+        "rule": serialize_row(rule),
+        "rule_version": serialize_row(version),
+        "run": _inference_run_payload(run, job),
+        "match_preview": preview,
+    }
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@router.get("/analysis/tasks")
+def list_analysis_tasks(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    jobs = _inference_jobs(db, user.tenant_id)
+    rows = db.scalars(
+        select(AnalysisScenario)
+        .where(AnalysisScenario.tenant_id == user.tenant_id, _active(AnalysisScenario))
+        .order_by(AnalysisScenario.updated_at.desc())
+    )
+    return [
+        _analysis_task_payload(db, row, jobs)
+        for row in rows
+        if _visible_analysis_spaces(db, user, row.space_ids or [])
+    ]
+
+
+@router.get("/analysis/tasks/{task_id}")
+def get_analysis_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _must_tenant(db, AnalysisScenario, task_id, user.tenant_id, "分析任务")
+    _require_analysis_spaces(db, user, row.space_ids or [], "read")
+    data = _analysis_task_payload(db, row, _inference_jobs(db, user.tenant_id))
+    data["rules"] = []
+    if row.rule_set_id:
+        data["rules"] = [
+            serialize_row(rule)
+            for rule in db.scalars(
+                select(AnalysisRule).where(
+                    AnalysisRule.rule_set_id == row.rule_set_id,
+                    _active(AnalysisRule),
+                ).order_by(AnalysisRule.priority, AnalysisRule.name)
+            )
+        ]
+    return data
+
+
 @router.get("/analysis/rule-sets")
 def list_analysis_rule_sets(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = list(
@@ -1712,6 +1978,12 @@ def list_analysis_rule_sets(user: User = Depends(get_current_user), db: Session 
         data["rule_count"] = db.scalar(
             select(func.count()).select_from(AnalysisRule).where(
                 AnalysisRule.rule_set_id == row.id, _active(AnalysisRule)
+            )
+        ) or 0
+        data["task_count"] = db.scalar(
+            select(func.count()).select_from(AnalysisScenario).where(
+                AnalysisScenario.rule_set_id == row.id,
+                _active(AnalysisScenario),
             )
         ) or 0
         result.append(data)
@@ -1770,12 +2042,20 @@ def delete_analysis_rule_set(
     )
     if active_run:
         raise HTTPException(409, "规则集存在运行中的推理任务")
+    dependent_tasks = list(
+        db.scalars(
+            select(AnalysisScenario).where(
+                AnalysisScenario.rule_set_id == row.id,
+                _active(AnalysisScenario),
+            )
+        )
+    )
+    if dependent_tasks:
+        names = "、".join(item.name for item in dependent_tasks[:3])
+        suffix = "等" if len(dependent_tasks) > 3 else ""
+        raise HTTPException(409, f"该规则组正被分析任务“{names}{suffix}”使用，请先删除任务或更换其规则组")
     for rule in db.scalars(select(AnalysisRule).where(AnalysisRule.rule_set_id == row.id, _active(AnalysisRule))):
         _soft_delete(db, rule)
-    for scenario in db.scalars(
-        select(AnalysisScenario).where(AnalysisScenario.rule_set_id == row.id, _active(AnalysisScenario))
-    ):
-        scenario.rule_set_id = None
     _soft_delete(db, row)
     audit(db, user.tenant_id, user.id, "analysis.rule_set.delete", "analysis_rule_set", row.id)
     db.commit()
@@ -1922,6 +2202,19 @@ def delete_analysis_rule(
 ):
     row = _must_tenant(db, AnalysisRule, row_id, user.tenant_id, "规则")
     _must_rule_set(db, user, row.rule_set_id, "manage")
+    dependent_tasks = list(
+        db.scalars(
+            select(AnalysisScenario).where(
+                AnalysisScenario.rule_set_id == row.rule_set_id,
+                AnalysisScenario.enabled.is_(True),
+                _active(AnalysisScenario),
+            )
+        )
+    )
+    if dependent_tasks:
+        names = "、".join(item.name for item in dependent_tasks[:3])
+        suffix = "等" if len(dependent_tasks) > 3 else ""
+        raise HTTPException(409, f"该规则所在规则集正被分析任务“{names}{suffix}”使用，请先停用或解除任务绑定")
     _soft_delete(db, row)
     audit(db, user.tenant_id, user.id, "analysis.rule.delete", "analysis_rule", row.id)
     db.commit()
@@ -2061,6 +2354,37 @@ def create_inference_run(
     return data
 
 
+@router.post("/analysis/tasks/{task_id}/run")
+def run_analysis_task(
+    task_id: str,
+    payload: AnalysisTaskRunCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    scenario = _must_tenant(db, AnalysisScenario, task_id, user.tenant_id, "分析任务")
+    _require_analysis_spaces(
+        db,
+        user,
+        scenario.space_ids or [],
+        "write" if payload.mode == "publish" else "read",
+    )
+    if not scenario.enabled:
+        raise HTTPException(409, "分析任务已停用")
+    if not scenario.rule_set_id:
+        raise HTTPException(409, "分析任务没有可用规则")
+    return create_inference_run(
+        InferenceRunCreate(
+            rule_set_id=scenario.rule_set_id,
+            scenario_id=scenario.id,
+            space_ids=list(scenario.space_ids or []),
+            mode=payload.mode,
+            max_results=payload.max_results,
+        ),
+        user,
+        db,
+    )
+
+
 @router.get("/analysis/inference-runs")
 def list_inference_runs(
     rule_set_id: str | None = None,
@@ -2092,6 +2416,146 @@ def get_inference_run(
     data = _inference_run_payload(row, _inference_jobs(db, user.tenant_id).get(row.id))
     data["items"] = inference_result_rows(db, row.id)
     return data
+
+
+def _analysis_run_diagnostics(db: Session, row: InferenceRun) -> dict[str, Any]:
+    _, facts = active_analysis_context(
+        db,
+        tenant_id=row.tenant_id,
+        space_ids=list(row.space_ids or []),
+    )
+    rules = list(
+        db.scalars(
+            select(AnalysisRule).where(
+                AnalysisRule.rule_set_id == row.rule_set_id,
+                AnalysisRule.enabled.is_(True),
+                _active(AnalysisRule),
+            )
+        )
+    ) if row.rule_set_id else []
+    predicate_counts: dict[str, int] = {}
+    for fact in facts:
+        predicate_counts[fact["predicate"]] = predicate_counts.get(fact["predicate"], 0) + 1
+    required = list(dict.fromkeys(predicate for rule in rules for predicate in (rule.body_predicates or [])))
+    missing = [predicate for predicate in required if not predicate_counts.get(predicate)]
+    results = inference_result_rows(db, row.id)
+    issues: list[dict[str, str]] = []
+    if row.status == "failed":
+        issues.append({"code": "execution_failed", "message": row.error_message or "规则推演执行失败。"})
+    elif not facts:
+        issues.append({"code": "no_asserted_facts", "message": "本次范围没有可用于规则判断的已有知识关系。"})
+    elif missing:
+        issues.append({"code": "missing_predicate", "message": f"当前知识中没有关系：{'、'.join(missing)}。"})
+    elif row.status == "succeeded" and not results:
+        existing_heads = {fact["predicate"] for fact in facts}
+        heads = {rule.head_predicate for rule in rules}
+        if heads and heads.issubset(existing_heads):
+            issues.append({"code": "all_results_already_exist", "message": "满足条件的结论已经存在，本次没有产生新的结论。"})
+        else:
+            issues.append({"code": "empty_relation_intersection", "message": "规则需要的关系分别存在，但暂时无法连接到同一组业务对象。"})
+    missing_evidence = sum(
+        1
+        for result in results
+        for evidence in result.get("evidence") or []
+        if not evidence.get("source_chunk_id")
+    )
+    if missing_evidence:
+        issues.append({"code": "evidence_missing", "message": f"有 {missing_evidence} 条推导前提未关联来源片段。"})
+    if bool((row.metrics or {}).get("truncated")):
+        issues.append({"code": "result_limit_reached", "message": "结果已达到本次上限，请缩小范围或提高最大结果数。"})
+    return {
+        "run_id": row.id,
+        "status": row.status,
+        "input_fact_count": len(facts),
+        "required_predicates": [{"name": name, "fact_count": predicate_counts.get(name, 0)} for name in required],
+        "result_count": len(results),
+        "missing_evidence_count": missing_evidence,
+        "issues": issues,
+        "recommended_actions": [
+            {"code": "edit_rule", "label": "修改规则", "view": "analysis"},
+            {"code": "view_graph", "label": "查看关系数据", "view": "knowledge"},
+            {"code": "view_documents", "label": "补充知识", "view": "documents"},
+        ] if issues else [],
+    }
+
+
+@router.get("/analysis/runs/{run_id}/diagnostics")
+def get_analysis_run_diagnostics(
+    run_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _must_tenant(db, InferenceRun, run_id, user.tenant_id, "分析运行")
+    _require_analysis_spaces(db, user, row.space_ids or [], "read")
+    return _analysis_run_diagnostics(db, row)
+
+
+@router.get("/analysis/runs/{run_id}/comparison")
+def get_analysis_run_comparison(
+    run_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _must_tenant(db, InferenceRun, run_id, user.tenant_id, "分析运行")
+    _require_analysis_spaces(db, user, row.space_ids or [], "read")
+    return run_comparison(db, row)
+
+
+@router.get("/analysis/runs/{run_id}/impact")
+def get_analysis_run_impact(
+    run_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _must_tenant(db, InferenceRun, run_id, user.tenant_id, "分析运行")
+    _require_analysis_spaces(db, user, row.space_ids or [], "read")
+    results = inference_result_rows(db, row.id)
+    comparison = run_comparison(db, row)
+    missing_evidence = sum(
+        1 for result in results
+        if not result.get("evidence") or any(not evidence.get("source_chunk_id") for evidence in result["evidence"])
+    )
+    return {
+        "run_id": row.id,
+        "mode": row.mode,
+        "status": row.status,
+        "can_publish": row.mode == "preview" and row.status == "succeeded" and bool(results),
+        "can_rollback": row.mode == "publish" and row.status == "succeeded" and any(item["status"] == "published" for item in results),
+        "conclusion_count": len(results),
+        "new_count": comparison["new_count"],
+        "unchanged_count": comparison["unchanged_count"],
+        "invalidated_count": comparison["invalidated_count"],
+        "missing_evidence_count": missing_evidence,
+        "relation_types": sorted({item["predicate"] for item in results}),
+        "graph_releases_to_create": len(row.space_ids or []) if results else 0,
+    }
+
+
+@router.post("/analysis/runs/{run_id}/publish")
+def publish_analysis_run(
+    run_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _must_tenant(db, InferenceRun, run_id, user.tenant_id, "分析运行")
+    _require_analysis_spaces(db, user, row.space_ids or [], "write")
+    if row.mode != "preview" or row.status != "succeeded":
+        raise HTTPException(409, "只有已完成的预览结果可以加入知识库")
+    if not row.rule_set_id:
+        raise HTTPException(409, "本次预览关联的规则集已不存在，无法加入知识库")
+    if not inference_result_rows(db, row.id):
+        raise HTTPException(409, "本次预览没有可发布的结论")
+    return create_inference_run(
+        InferenceRunCreate(
+            rule_set_id=row.rule_set_id,
+            scenario_id=row.scenario_id,
+            space_ids=list(row.space_ids or []),
+            mode="publish",
+            max_results=int((row.run_input or {}).get("max_results") or 1000),
+        ),
+        user,
+        db,
+    )
 
 
 @router.get("/analysis/inference-runs/{run_id}/rollback-preview")
@@ -2145,6 +2609,15 @@ def rollback_inference_run(
     )
     db.commit()
     return {"ok": True, "invalidated": invalidated, "graph_releases": releases}
+
+
+@router.post("/analysis/runs/{run_id}/rollback")
+def rollback_analysis_run(
+    run_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return rollback_inference_run(run_id, user, db)
 
 
 @router.get("/analysis/saved-queries")
@@ -2210,48 +2683,19 @@ def delete_saved_graph_query(
     return {"ok": True}
 
 
-@router.post("/analysis/sparql")
-def execute_analysis_sparql(
-    payload: SparqlAnalysisRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    space_ids = _require_analysis_spaces(db, user, payload.space_ids, "read")
-    entities = list(
-        db.scalars(
-            select(CanonicalEntity).where(
-                CanonicalEntity.tenant_id == user.tenant_id,
-                CanonicalEntity.space_id.in_(space_ids),
-                _active(CanonicalEntity),
-            )
-        )
+def _analysis_graph_projection(
+    db: Session,
+    *,
+    user: User,
+    space_ids: list[str],
+    include_inferred: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    entities, facts = active_analysis_context(
+        db,
+        tenant_id=user.tenant_id,
+        space_ids=space_ids,
     )
-    entity_values = {row.id: effective_entity(db, row) for row in entities}
-    entities = [
-        row for row in entities
-        if entity_values[row.id].get("status") in {"published", "active"}
-    ]
-    active_entity_ids = {row.id for row in entities}
-    facts = list(
-        db.scalars(
-            select(Fact).where(
-                Fact.tenant_id == user.tenant_id,
-                Fact.space_id.in_(space_ids),
-                _active(Fact),
-            )
-        )
-    )
-    fact_values = {row.id: effective_fact(db, row) for row in facts}
-    facts = [
-        row for row in facts
-        if fact_values[row.id].get("status") == "published"
-        and fact_values[row.id].get("subject_entity_id") in active_entity_ids
-        and (
-            not fact_values[row.id].get("object_entity_id")
-            or fact_values[row.id].get("object_entity_id") in active_entity_ids
-        )
-    ]
-    inferred = list(
+    inferred_rows = list(
         db.scalars(
             select(InferredFact).where(
                 InferredFact.tenant_id == user.tenant_id,
@@ -2260,25 +2704,34 @@ def execute_analysis_sparql(
                 _active(InferredFact),
             )
         )
-    )
+    ) if include_inferred else []
     inferred = [
-        row for row in inferred
-        if row.subject_entity_id in active_entity_ids
-        and (not row.object_entity_id or row.object_entity_id in active_entity_ids)
+        serialize_row(row)
+        for row in inferred_rows
+        if row.subject_entity_id in entities
+        and (not row.object_entity_id or row.object_entity_id in entities)
     ]
+    return list(entities.values()), facts, inferred
+
+
+@router.post("/analysis/sparql")
+def execute_analysis_sparql(
+    payload: SparqlAnalysisRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    space_ids = _require_analysis_spaces(db, user, payload.space_ids, "read")
+    entities, facts, inferred = _analysis_graph_projection(
+        db,
+        user=user,
+        space_ids=space_ids,
+    )
     started = time.perf_counter()
     try:
         result = run_readonly_sparql(
-            entities=[
-                {
-                    "id": row.id,
-                    "name": entity_values[row.id]["canonical_name"],
-                    "type": entity_values[row.id]["entity_type"],
-                }
-                for row in entities
-            ],
-            facts=[{**serialize_row(row), **fact_values[row.id]} for row in facts],
-            inferred_facts=[serialize_row(row) for row in inferred],
+            entities=entities,
+            facts=facts,
+            inferred_facts=inferred,
             query=payload.query,
         )
     except ValueError as exc:
@@ -2302,6 +2755,90 @@ def execute_analysis_sparql(
     )
     db.commit()
     return {"query_id": query_run.id, "duration_ms": duration_ms, **result}
+
+
+@router.post("/analysis/visual-query")
+def execute_analysis_visual_query(
+    payload: VisualGraphQueryRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    space_ids = _require_analysis_spaces(db, user, payload.space_ids, "read")
+    entities, facts, inferred = _analysis_graph_projection(
+        db,
+        user=user,
+        space_ids=space_ids,
+        include_inferred=payload.include_inferred,
+    )
+
+    def sparql_literal(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+    clauses = [
+        "?subject ?predicate ?object .",
+        'FILTER(STRSTARTS(STR(?predicate), "urn:chuanshen:predicate:"))',
+    ]
+    if payload.subject_query.strip():
+        clauses.extend(
+            [
+                "?subject <http://www.w3.org/2000/01/rdf-schema#label> ?subjectLabel .",
+                f'FILTER(CONTAINS(LCASE(STR(?subjectLabel)), LCASE("{sparql_literal(payload.subject_query.strip())}")))',
+            ]
+        )
+    if payload.predicate.strip():
+        predicate_uri = "urn:chuanshen:predicate:" + quote(payload.predicate.strip(), safe="")
+        clauses.append(f"FILTER(?predicate = <{predicate_uri}>)")
+    if payload.object_type.strip():
+        type_uri = "urn:chuanshen:type:" + quote(payload.object_type.strip(), safe="")
+        clauses.append(f"?object a <{type_uri}> .")
+    query = "SELECT ?subject ?predicate ?object\nWHERE {\n  " + "\n  ".join(clauses) + f"\n}}\nLIMIT {payload.limit}"
+    started = time.perf_counter()
+    try:
+        result = run_readonly_sparql(
+            entities=entities,
+            facts=facts,
+            inferred_facts=inferred,
+            query=query,
+            max_rows=payload.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    for row in result["rows"]:
+        predicate = str(row.get("predicate") or "")
+        if predicate.startswith("urn:chuanshen:predicate:"):
+            row["predicate"] = unquote(predicate.rsplit(":", 1)[-1])
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    query_run = QueryRun(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        query="普通图谱查询",
+        space_ids=space_ids,
+        retrieval_policy={
+            "type": "visual_sparql",
+            "read_only": True,
+            "filters": payload.model_dump(exclude={"space_ids"}),
+        },
+        result_count=result["total"],
+        results=result["rows"],
+        metrics={"duration_ms": duration_ms, **result["projection"]},
+    )
+    db.add(query_run)
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "analysis.visual_query.execute",
+        "query",
+        query_run.id,
+        {"space_ids": space_ids, "result_count": result["total"]},
+    )
+    db.commit()
+    return {
+        "query_id": query_run.id,
+        "duration_ms": duration_ms,
+        "generated_query": query,
+        **result,
+    }
 
 
 # ---- P0-P3 human curation ------------------------------------------------------------

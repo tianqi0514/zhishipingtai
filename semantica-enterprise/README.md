@@ -2,7 +2,7 @@
 
 传神智库是基于 Semantica 0.6.6 源码增量开发的组织级知识平台。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理画像、OpenSearch/Qdrant/FalkorDB 三路检索、可编辑 3D 图谱、由 DeepSeek Harness 驱动的多轮知识问答，以及按“知识供给—能力场景—上线测试—接入发布—运行反馈”组织的应用构建闭环。当前交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
 
-仓库附带可重复执行的验收数据脚本：`tests/e2e/seed_guolian_acceptance.py` 建立集团组织、角色、空间和 29 份真实业务多模态资料，`tests/e2e/seed_structured_acceptance.py` 建立 MySQL/PostgreSQL 经营数据、本体和激活映射，`tests/e2e/seed_source_acceptance.py` 用于协议数据源。标准答案与使用顺序见 [集团验收数据集](docs/GUOLIAN_ACCEPTANCE_DATASET.md) 和 [集团业务旅程](docs/GROUP_BUSINESS_USER_JOURNEY.md)。
+仓库附带可重复执行的验收数据脚本：`tests/e2e/seed_guolian_acceptance.py` 建立集团组织、角色、空间和 29 份真实业务多模态资料，`tests/e2e/seed_structured_acceptance.py` 建立 MySQL/PostgreSQL 经营数据、本体和激活映射，`tests/e2e/seed_source_acceptance.py` 用于协议数据源，`tests/e2e/seed_knowledge_analysis_acceptance.py` 建立带 100% 来源证据的制度适用与供应商风险推演空间。标准答案与使用顺序见 [集团验收数据集](docs/GUOLIAN_ACCEPTANCE_DATASET.md) 和 [集团业务旅程](docs/GROUP_BUSINESS_USER_JOURNEY.md)。
 
 ## 完整启动
 
@@ -123,6 +123,12 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [系统架构](docs/ARCHITECTURE.md)
 - [DeepSeek Harness 适配与升级](docs/DEEPSEEK_HARNESS.md)
 - [知识分析与 Semantica Analyze 融合](docs/KNOWLEDGE_ANALYSIS.md)
+- [知识分析产品设计](docs/KNOWLEDGE_ANALYSIS_PRODUCT_DESIGN.md)
+- [知识分析业务使用说明](docs/KNOWLEDGE_ANALYSIS_USER_GUIDE.md)
+- [Semantica Analyze 适配边界](docs/SEMANTICA_ANALYZE_ADAPTATION.md)
+- [知识分析业务 API](docs/KNOWLEDGE_ANALYSIS_API.md)
+- [知识分析测试报告](docs/KNOWLEDGE_ANALYSIS_TEST_REPORT.md)
+- [知识分析浏览器点击测试](docs/KNOWLEDGE_ANALYSIS_BROWSER_TEST.md)
 - [智能问答 UI 与 DSH 事件模型](docs/KNOWLEDGE_SERVICE_UX.md)
 - [知识洞察与知识服务升级留痕](docs/INSIGHTS_SERVICE_UX_DELIVERY.md)
 - [人工治理 P0–P3 设计与实现](docs/HUMAN_CURATION_P0_P3.md)

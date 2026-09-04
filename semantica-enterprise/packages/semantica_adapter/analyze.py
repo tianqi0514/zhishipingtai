@@ -495,7 +495,12 @@ def run_readonly_sparql(
         obj = entity_uris.get(object_id) if object_id else Literal(str(item.get("object_value") or ""))
         if obj is None:
             return
-        predicate = URIRef(predicate_prefix + quote(str(item.get("predicate") or "related_to"), safe=""))
+        predicate_label = str(item.get("predicate") or "related_to")
+        predicate = URIRef(predicate_prefix + quote(predicate_label, safe=""))
+        # Keep the storage URI stable and safe while exposing the business
+        # relation name to SPARQL authors and result rendering.
+        labels[str(predicate)] = predicate_label
+        graph.add((predicate, RDFS.label, Literal(predicate_label)))
         graph.add((subject, predicate, obj))
         statement = URIRef(f"urn:chuanshen:{origin}:{item.get('id')}")
         graph.add((statement, RDF.subject, subject))

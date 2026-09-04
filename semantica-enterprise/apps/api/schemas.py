@@ -796,6 +796,44 @@ class InferenceRunCreate(BaseModel):
     max_results: int = Field(default=1000, ge=1, le=10000)
 
 
+class AnalysisRuleMatchPreview(BaseModel):
+    space_id: str
+    definition: AnalysisRuleDefinition
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    max_results: int = Field(default=100, ge=1, le=1000)
+
+
+class GuidedAnalysisSetupCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    question: str = Field(min_length=1, max_length=2000)
+    category: str = Field(default="通用", min_length=1, max_length=100)
+    space_id: str
+    template_id: str | None = Field(default=None, max_length=100)
+    rule_name: str = Field(min_length=1, max_length=200)
+    definition: AnalysisRuleDefinition
+    role_labels: dict[str, str] = Field(default_factory=dict)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    priority: int = Field(default=100, ge=0, le=10000)
+    auto_run: bool = False
+    auto_publish: bool = False
+    mode: Literal["preview", "publish"] = "preview"
+    max_results: int = Field(default=1000, ge=1, le=10000)
+
+
+class AnalysisTaskRunCreate(BaseModel):
+    mode: Literal["preview", "publish"] = "preview"
+    max_results: int = Field(default=1000, ge=1, le=10000)
+
+
+class VisualGraphQueryRequest(BaseModel):
+    space_ids: list[str] = Field(min_length=1, max_length=50)
+    subject_query: str = Field(default="", max_length=500)
+    predicate: str = Field(default="", max_length=200)
+    object_type: str = Field(default="", max_length=100)
+    include_inferred: bool = True
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
 class SavedGraphQueryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     query_type: Literal["sparql", "visual"] = "sparql"
