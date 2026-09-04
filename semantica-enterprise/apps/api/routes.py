@@ -1464,7 +1464,7 @@ def get_job(row_id: str, user: User = Depends(get_current_user), db: Session = D
 def retry_job(row_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     old = _must(db, Job, row_id, "任务")
     if old.tenant_id != user.tenant_id: raise HTTPException(404, "任务不存在")
-    if old.status != "failed": raise HTTPException(409, "只有失败任务可重试")
+    if old.status not in {"failed", "partial_failed"}: raise HTTPException(409, "只有失败或部分失败任务可重试")
     job_input = dict(old.input or {})
     if old.job_type in {"parse_document", "process_knowledge"} and job_input.get("version_id"):
         version = _must_tenant(db, DocumentVersion, job_input["version_id"], user.tenant_id, "文档版本")
@@ -4102,6 +4102,174 @@ def list_releases(space_id: str, user: User = Depends(get_current_user), db: Ses
         "graphs": [serialize_row(row) for row in db.scalars(select(GraphRelease).where(GraphRelease.space_id == space_id, _active(GraphRelease)).order_by(GraphRelease.release_number.desc()))],
         "indexes": [serialize_row(row) for row in db.scalars(select(IndexRelease).where(IndexRelease.space_id == space_id, _active(IndexRelease)).order_by(IndexRelease.release_number.desc()))],
         "knowledge": [serialize_row(row) for row in db.scalars(select(KnowledgeRelease).where(KnowledgeRelease.space_id == space_id, _active(KnowledgeRelease)).order_by(KnowledgeRelease.release_number.desc()))],
+    }
+
+
+@router.get("/knowledge/governance-overview")
+def knowledge_governance_overview(
+    space_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the current space's real preparation state for the governance journey.
+
+    The response deliberately derives projection state from each document's current
+    version.  A requested processing mode is not treated as completed until the
+    worker has persisted ``knowledge_targets_completed``.
+    """
+    require_space_permission(db, user, space_id, "read")
+    documents = list(
+        db.scalars(
+            select(Document)
+            .where(Document.space_id == space_id, _active(Document))
+            .order_by(Document.updated_at.desc())
+        )
+    )
+    current_version_ids = [item.current_version_id for item in documents if item.current_version_id]
+    versions = {
+        row.id: row
+        for row in db.scalars(
+            select(DocumentVersion).where(
+                DocumentVersion.id.in_(current_version_ids),
+                _active(DocumentVersion),
+            )
+        )
+    } if current_version_ids else {}
+    projection_counts = {"vector_only": 0, "graph_only": 0, "both": 0, "pending": 0}
+    parsed_documents = 0
+    for document in documents:
+        version = versions.get(document.current_version_id)
+        if version and version.status in {"parsed", "ready"}:
+            parsed_documents += 1
+        targets = set((version.parse_summary or {}).get("knowledge_targets_completed") or []) if version else set()
+        if {"vector", "graph"}.issubset(targets):
+            projection_counts["both"] += 1
+        elif "vector" in targets:
+            projection_counts["vector_only"] += 1
+        elif "graph" in targets:
+            projection_counts["graph_only"] += 1
+        else:
+            projection_counts["pending"] += 1
+
+    effective_entities = [
+        row
+        for row in db.scalars(
+            select(CanonicalEntity).where(
+                CanonicalEntity.space_id == space_id,
+                _active(CanonicalEntity),
+            )
+        )
+        if effective_entity(db, row).get("status") in {"published", "active"}
+    ]
+    effective_facts = [
+        row
+        for row in db.scalars(
+            select(Fact).where(Fact.space_id == space_id, _active(Fact))
+        )
+        if effective_fact(db, row).get("status") == "published"
+    ]
+    open_cases = db.scalar(
+        select(func.count()).select_from(CurationCase).where(
+            CurationCase.space_id == space_id,
+            CurationCase.status == "open",
+            _active(CurationCase),
+        )
+    ) or 0
+    inferred_facts = db.scalar(
+        select(func.count()).select_from(InferredFact).where(
+            InferredFact.space_id == space_id,
+            InferredFact.status == "published",
+            _active(InferredFact),
+        )
+    ) or 0
+    space_rule_set_ids = {
+        row.id
+        for row in db.scalars(
+            select(AnalysisRuleSet).where(
+                AnalysisRuleSet.tenant_id == user.tenant_id,
+                AnalysisRuleSet.enabled.is_(True),
+                _active(AnalysisRuleSet),
+            )
+        )
+        if space_id in (row.space_ids or [])
+    }
+    active_rules = (
+        db.scalar(
+            select(func.count()).select_from(AnalysisRule).where(
+                AnalysisRule.rule_set_id.in_(space_rule_set_ids),
+                AnalysisRule.enabled.is_(True),
+                _active(AnalysisRule),
+            )
+        ) or 0
+    ) if space_rule_set_ids else 0
+    latest_graph = db.scalar(
+        select(GraphRelease).where(
+            GraphRelease.space_id == space_id,
+            _active(GraphRelease),
+        ).order_by(GraphRelease.release_number.desc()).limit(1)
+    )
+    latest_index = db.scalar(
+        select(IndexRelease).where(
+            IndexRelease.space_id == space_id,
+            _active(IndexRelease),
+        ).order_by(IndexRelease.release_number.desc()).limit(1)
+    )
+    latest_knowledge = db.scalar(
+        select(KnowledgeRelease).where(
+            KnowledgeRelease.space_id == space_id,
+            _active(KnowledgeRelease),
+        ).order_by(KnowledgeRelease.release_number.desc()).limit(1)
+    )
+    visible_jobs = [
+        row
+        for row in db.scalars(
+            select(Job).where(
+                Job.tenant_id == user.tenant_id,
+                _active(Job),
+            ).order_by(Job.created_at.desc()).limit(500)
+        )
+        if space_id in _job_space_ids(db, row)
+    ]
+    running_jobs = sum(row.status in {"queued", "running"} for row in visible_jobs)
+    failed_jobs = sum(row.status == "failed" for row in visible_jobs)
+
+    if not documents:
+        next_action = {"view": "documents", "label": "上传第一份文档", "reason": "当前空间还没有知识内容"}
+    elif running_jobs:
+        next_action = {"view": "jobs", "label": "查看加工进度", "reason": f"{running_jobs} 个任务正在运行"}
+    elif failed_jobs:
+        next_action = {"view": "jobs", "label": "处理异常任务", "reason": f"{failed_jobs} 个任务需要处理"}
+    elif open_cases:
+        next_action = {"view": "curation", "label": "处理治理事项", "reason": f"{open_cases} 项知识质量问题待处理"}
+    elif not effective_entities or not effective_facts:
+        next_action = {"view": "documents", "label": "补充图谱加工", "reason": "当前空间还没有可用的知识对象与关系"}
+    elif not active_rules:
+        next_action = {"view": "analysis", "label": "创建规则推演", "reason": "图谱已准备，可以发现新的业务结论"}
+    else:
+        next_action = {"view": "search", "label": "验证知识服务", "reason": "知识已经发布，可通过检索与问答验证"}
+
+    published_at_values = [
+        row.published_at
+        for row in (latest_knowledge, latest_graph, latest_index)
+        if row and row.published_at
+    ]
+    return {
+        "space_id": space_id,
+        "document_count": len(documents),
+        "parsed_document_count": parsed_documents,
+        "processing_modes": projection_counts,
+        "open_curation_cases": open_cases,
+        "entity_count": len(effective_entities),
+        "asserted_fact_count": len(effective_facts),
+        "inferred_fact_count": inferred_facts,
+        "active_rule_count": active_rules,
+        "running_job_count": running_jobs,
+        "failed_job_count": failed_jobs,
+        "current_graph_release": serialize_row(latest_graph) if latest_graph else None,
+        "current_index_release": serialize_row(latest_index) if latest_index else None,
+        "current_knowledge_release": serialize_row(latest_knowledge) if latest_knowledge else None,
+        "last_published_at": max(published_at_values) if published_at_values else None,
+        "next_action": next_action,
     }
 
 

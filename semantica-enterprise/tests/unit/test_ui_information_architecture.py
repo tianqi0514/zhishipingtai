@@ -13,8 +13,8 @@ def test_primary_navigation_uses_nine_business_domains() -> None:
         "工作台",
         "知识资产",
         "数据接入",
+        "知识治理",
         "知识服务",
-        "知识洞察",
         "运营中心",
         "应用构建",
         "配置中心",
@@ -65,7 +65,27 @@ def test_platform_permissions_drive_application_and_audit_navigation() -> None:
     assert "function hasPlatformPermission" in APP
     assert "function canView" in APP
     assert "adminOnly:true" in APP
-    assert "state.users=state.user.is_admin?await api('/users'):[state.user]" in APP
+    assert "state.user.is_admin?cachedApi('/users',{force}):Promise.resolve([state.user])" in APP
+
+
+def test_governance_consolidates_content_graph_reasoning_and_releases() -> None:
+    governance = INDEX.split('data-nav-group="governance"', 1)[1].split(
+        'data-nav-group="service"', 1
+    )[0]
+    for label in ("治理概览", "内容治理", "知识图谱", "规则推演", "发布记录"):
+        assert label in governance
+    assert 'data-nav-group="insights"' not in INDEX
+    assert "governance:[['governance','治理概览']" in APP
+
+
+def test_navigation_has_abortable_request_lifecycle_and_scoped_cache() -> None:
+    assert "state.viewAbort=new AbortController()" in APP
+    assert "if(method==='GET'&&!detached&&!init.signal&&state.viewAbort)" in APP
+    assert "function cachedApi" in APP
+    assert "function invalidateAfterMutation" in APP
+    assert "chuanshen.activeSpace.${state.user?.id||'guest'}" in APP
+    assert "window.__chuanshenDiagnostics" in APP
+    assert "duplicate_request_count" in APP
 
 
 def test_background_jobs_use_business_labels() -> None:

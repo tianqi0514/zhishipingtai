@@ -48,12 +48,16 @@ class Platform:
             raise RuntimeError(f"{method} {path}: {response.status_code} {response.text[:1200]}")
         return response.json() if response.content else {}
 
-    def wait_job(self, job_id: str, timeout: int = 900) -> dict[str, Any]:
+    def wait_job(self, job_id: str, timeout: int = 900, retry_partial: bool = True) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         last: dict[str, Any] = {}
         while time.monotonic() < deadline:
             last = self.call("GET", f"/jobs/{job_id}")
-            if last["status"] in {"succeeded", "failed", "cancelled"}:
+            if last["status"] in {"succeeded", "failed", "partial_failed", "cancelled"}:
+                retryable_extraction = last["status"] in {"failed", "partial_failed"} and last.get("error_code") == "SEMANTIC_EXTRACTION_PARTIAL"
+                if retryable_extraction and retry_partial:
+                    retried = self.call("POST", f"/jobs/{job_id}/retry")
+                    return self.wait_job(retried["id"], timeout=max(1, int(deadline - time.monotonic())), retry_partial=False)
                 if last["status"] != "succeeded":
                     raise RuntimeError(json.dumps(last, ensure_ascii=False)[:4000])
                 return last

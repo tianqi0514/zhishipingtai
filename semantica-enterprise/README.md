@@ -37,8 +37,7 @@ docker compose ps
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
 - 结构化数据：MySQL/PostgreSQL Schema 发现与版本差异、实时数据/同步快照预览、服务端分页筛选和脱敏、本体映射版本、严格 Semantic Query Plan/Query IR、确定性参数化 SQL、只读实时查询与结构化数据引用。
 - 模型：LLM、Embedding、Reranker、Vision、ASR 统一配置、默认项、启停和真实连接测试。
-- 图谱：白底 3D 力导图，节点与边真实 CRUD，版本校验并发布到 FalkorDB。
-- 分析：按“规则中心 → 场景分析 → 推理结果 → 高级查询”组织 Semantica Datalog 能力；提供业务化规则预览、真实校验、场景卡片、任务进度、可定位来源的证据链、SPARQL 与回滚影响预览。
+- 知识治理：统一组织治理概览、内容治理、白底 3D 知识图谱、规则推演和发布记录；图谱节点/边真实 CRUD，规则推演继续由 Semantica Datalog 执行，发布版本可校验和追溯。
 - 检索：OpenSearch 全文、Qdrant 向量、FalkorDB 图谱召回，RRF 融合、可选重排、排序依据和真实片段引用。
 - 对话：DeepSeek Harness Agent Loop、多轮 Session、SSE、停止、重试、重启恢复；桌面端三栏展示真实 Agent 执行事件、检索轨迹与按最终排名排列的召回依据，不展示模型私有思维链。
 - 应用构建：以业务应用为中心显示上线准备度和下一步；底层提供最小权限凭据、不可变知识供给、能力场景版本、真实上线测试、反馈转人工治理和调用审计。
@@ -123,6 +122,12 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 
 ## 文档
 
+- [业务旅程 UI/UX 设计与实现](docs/BUSINESS_JOURNEY_UI_UX.md)
+- [知识治理信息架构](docs/KNOWLEDGE_GOVERNANCE_INFORMATION_ARCHITECTURE.md)
+- [前端导航与状态模型](docs/FRONTEND_NAVIGATION_STATE.md)
+- [前端缓存与请求生命周期](docs/FRONTEND_CACHE_AND_REQUEST_LIFECYCLE.md)
+- [UI 性能测试报告](docs/UI_PERFORMANCE_TEST_REPORT.md)
+- [业务旅程浏览器测试](docs/BUSINESS_JOURNEY_BROWSER_TEST.md)
 - [全局 UI/UX 重构与信息架构](docs/UI_UX_REDESIGN.md)
 - [Docker 部署](docs/DEPLOYMENT.md)
 - [系统架构](docs/ARCHITECTURE.md)

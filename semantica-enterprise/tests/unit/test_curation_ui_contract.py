@@ -4,11 +4,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_curation_is_an_asset_submodule_and_not_a_top_level_module() -> None:
+def test_curation_is_a_governance_submodule_and_not_a_top_level_module() -> None:
     html = (ROOT / "apps/api/static/index.html").read_text(encoding="utf-8")
     javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
-    assert '<button data-view="curation">治理工作台</button>' in html
-    assert "curation:{title:'治理工作台',group:'assets'}" in javascript
+    assert '<button data-view="curation">内容治理</button>' in html
+    assert "curation:{title:'内容治理',group:'governance'}" in javascript
     assert "async function renderCuration()" in javascript
 
 

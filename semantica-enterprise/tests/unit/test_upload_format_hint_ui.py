@@ -7,7 +7,7 @@ STYLE = (ROOT / "apps/api/static/style.css").read_text(encoding="utf-8")
 
 
 def test_upload_dialog_uses_backend_format_capability_source() -> None:
-    assert "api('/formats/capabilities')" in APP
+    assert "cachedApi('/formats/capabilities')" in APP
     assert 'accept="${esc(accept)}"' in APP
     assert "uploadFormatField(formats)" in APP
 

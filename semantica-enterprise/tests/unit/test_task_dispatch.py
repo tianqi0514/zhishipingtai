@@ -59,7 +59,7 @@ def test_upload_ui_surfaces_queue_warning() -> None:
         / "apps/api/static/app.js"
     ).read_text(encoding="utf-8")
 
-    assert "result?.warning||'已提交解析'" in app
+    assert "result?.warning||'文档已上传，正在解析与加工'" in app
 
 
 def test_database_snapshot_mode_can_skip_automatic_knowledge_processing() -> None:

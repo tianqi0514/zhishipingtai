@@ -60,3 +60,19 @@ def test_partial_job_steps_are_terminal_and_receive_a_finish_time() -> None:
     ).read_text(encoding="utf-8")
 
     assert '"partial", "partial_failed", "cancelled"' in worker
+
+
+def test_failed_graph_target_is_not_reported_as_a_successful_job() -> None:
+    worker = (
+        __import__("pathlib").Path(__file__).resolve().parents[2]
+        / "apps/worker/tasks.py"
+    ).read_text(encoding="utf-8")
+    routes = (
+        __import__("pathlib").Path(__file__).resolve().parents[2]
+        / "apps/api/routes.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'job.status = "failed" if extraction_errors else "succeeded"' in worker
+    assert '"knowledge_status": "partial_failed" if extraction_errors else "published"' in worker
+    assert 'job.error_code = "SEMANTIC_EXTRACTION_PARTIAL"' in worker
+    assert 'old.status not in {"failed", "partial_failed"}' in routes

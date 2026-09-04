@@ -2487,7 +2487,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         entity.status = "published"
             version.parse_summary = {
                 **(version.parse_summary or {}),
-                "knowledge_status": "published",
+                "knowledge_status": "partial_failed" if extraction_errors else "published",
                 "knowledge_processing_mode": effective_processing_mode,
                 "knowledge_processing_requested_mode": (
                     originally_requested_mode if extraction_errors else effective_processing_mode
@@ -2503,7 +2503,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "structured_materialization": structured_materialization,
             }
             document.status = "ready"
-            job.status = "succeeded"
+            job.status = "failed" if extraction_errors else "succeeded"
             job.progress = 100
             job.result = {
                 "version_id": version.id,
@@ -2521,16 +2521,17 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "structured_materialization": structured_materialization,
             }
             if extraction_errors:
-                job.result["warnings"] = [
-                    f"{len(extraction_errors)} 个片段的模型语义抽取失败；已成功抽取的图谱知识仍已发布"
-                ]
+                warning = f"{len(extraction_errors)} 个片段的模型语义抽取失败；已成功抽取的图谱知识仍已发布，可重试补齐"
+                job.result["warnings"] = [warning]
+                job.error_code = "SEMANTIC_EXTRACTION_PARTIAL"
+                job.error_message = warning
             job.finished_at = now()
             curation_batch_id = (job.input or {}).get("curation_batch_id")
             curation_batch = db.get(CurationBatch, curation_batch_id) if curation_batch_id else None
             if curation_batch:
-                curation_batch.status = "published"
-                curation_batch.published_at = now()
-                curation_batch.publish_error = None
+                curation_batch.status = "publish_failed" if extraction_errors else "published"
+                curation_batch.published_at = None if extraction_errors else now()
+                curation_batch.publish_error = job.error_message if extraction_errors else None
             db.commit()
             _step(db, job.id, "index_publish", 6, "succeeded", index_detail)
             automatic_runs = (
@@ -2541,7 +2542,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     document_id=document.id,
                     version_id=version.id,
                 )
-                if graph_enabled
+                if "graph" in successful_targets
                 else []
             )
             if automatic_runs:
