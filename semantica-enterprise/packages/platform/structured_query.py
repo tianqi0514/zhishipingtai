@@ -264,6 +264,7 @@ def generate_semantic_plan_ir(
     temperature: float = 0.1,
     timeout: float = 60,
     max_retries: int = 2,
+    request_parameters: dict[str, Any] | None = None,
     value_hints: dict[str, list[Any]] | None = None,
     generator=None,
 ) -> tuple[SemanticQueryPlan, SemanticQueryIR]:
@@ -297,6 +298,7 @@ IR expression kind 可用 attribute/literal/aggregate/function/binary/logical/no
             OpenAIProvider(api_key=api_key, model=model, base_url=base_url),
             timeout=timeout,
             max_retries=max_retries,
+            request_parameters=request_parameters,
         )
         generator = lambda value: provider.generate_structured(
             value,

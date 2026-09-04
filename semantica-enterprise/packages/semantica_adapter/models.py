@@ -12,6 +12,7 @@ import httpx
 from openai import OpenAI
 
 from packages.semantica_adapter.extract import _effective_temperature
+from packages.semantica_adapter.llm_transport import model_request_extra_body
 
 
 def test_model_connection(
@@ -57,6 +58,7 @@ def test_model_connection(
     timeout = float(settings.get("timeout", 20))
     max_retries = max(0, min(int(settings.get("max_retries", settings.get("retry", 2))), 10))
     temperature = _effective_temperature(model_name, float(settings.get("temperature", 0)))
+    extra_body = model_request_extra_body(settings.get("parameters"))
     if model_kind == "reranker":
         if not base_url:
             raise ValueError("重排模型未配置 API 地址")
@@ -118,7 +120,7 @@ def test_model_connection(
         buffer = io.BytesIO()
         Image.new("RGB", (32, 32), (255, 0, 0)).save(buffer, format="PNG")
         pixel = base64.b64encode(buffer.getvalue()).decode("ascii")
-        response = client.chat.completions.create(
+        request: dict[str, Any] = dict(
             model=model_name,
             messages=[{
                 "role": "user",
@@ -132,13 +134,19 @@ def test_model_connection(
             max_tokens=256,
             temperature=temperature,
         )
+        if extra_body:
+            request["extra_body"] = extra_body
+        response = client.chat.completions.create(**request)
     elif model_kind == "llm":
-        response = client.chat.completions.create(
+        request = dict(
             model=model_name,
             messages=[{"role": "user", "content": "只回答：连接成功"}],
             max_tokens=8,
             temperature=temperature,
         )
+        if extra_body:
+            request["extra_body"] = extra_body
+        response = client.chat.completions.create(**request)
     else:
         raise ValueError(f"不支持的模型类型：{model_kind}")
     if not response.choices:

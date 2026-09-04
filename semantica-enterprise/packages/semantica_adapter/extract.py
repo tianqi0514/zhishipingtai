@@ -133,6 +133,7 @@ def extract_semantics(
     temperature: float = 0.1,
     timeout: float = 60,
     max_retries: int = 2,
+    request_parameters: dict[str, Any] | None = None,
     generator: Callable[[str], dict[str, Any]] | None = None,
 ) -> ExtractionOutput:
     """Extract validated Chinese entities, relations and events using Semantica's LLM provider."""
@@ -151,6 +152,7 @@ def extract_semantics(
             OpenAIProvider(api_key=api_key, model=model, base_url=base_url),
             timeout=timeout,
             max_retries=max_retries,
+            request_parameters=request_parameters,
         )
         generator = lambda value: provider.generate_structured(
             value,

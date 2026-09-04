@@ -1907,6 +1907,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                                     "max_retries", (profile_model.config or {}).get("retry", 2)
                                 )
                             ),
+                            request_parameters=(profile_model.config or {}).get("parameters"),
                         )
                         model_status = "succeeded"
                     except Exception as exc:
@@ -2154,6 +2155,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                             temperature=extraction_temperature,
                             timeout=extraction_timeout,
                             max_retries=extraction_retries,
+                            request_parameters=model_config.get("parameters"),
                         )
                         futures[future] = batch
                     model_request_count = len(futures)

@@ -782,6 +782,7 @@ def natural_language_structured_query(
             temperature=float(config.get("temperature", 0.1)),
             timeout=float(config.get("timeout", 60)),
             max_retries=int(config.get("retry", config.get("max_retries", 2))),
+            request_parameters=config.get("parameters"),
             value_hints=value_hints,
         )
     except StructuredDataError as exc:

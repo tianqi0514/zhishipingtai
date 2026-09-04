@@ -148,6 +148,7 @@ def analyze_profile_with_model(
     tag_count: int = 8,
     timeout: float = 60,
     max_retries: int = 2,
+    request_parameters: dict[str, Any] | None = None,
     generator: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     prompt = f"""你是组织级知识治理器。只输出 JSON 对象，不要 Markdown，不得补充原文不存在的事实。
@@ -161,6 +162,7 @@ def analyze_profile_with_model(
             OpenAIProvider(api_key=api_key, model=model, base_url=base_url),
             timeout=timeout,
             max_retries=max_retries,
+            request_parameters=request_parameters,
         )
         generator = lambda value: provider.generate_structured(
             value, temperature=_effective_temperature(model, 0.1)
