@@ -36,12 +36,13 @@ docker compose build \
 
 ```bash
 mkdir -p deploy/secrets
+chmod 700 deploy/secrets
 printf '%s' 'your-model-api-key' > deploy/secrets/kimi_api_key
 openssl rand -hex 32 > deploy/secrets/agent_service_secret
-chmod 600 deploy/secrets/*
+chmod 444 deploy/secrets/*
 ```
 
-不得把 Secret 提交到 Git、复制到镜像或写入日志。`APP_SECRET_KEY` 同时用于签发平台 Token 和派生 Fernet 密钥；已有数据环境不可随意更换，否则已加密的模型/数据源密钥无法解密。
+独立 Linux Docker Engine 会把文件型 Secret 作为只读 bind mount 提供给非 root 容器用户，因此 Secret 文件使用 `0444`，而宿主机目录必须保持 `0700`，只有部署账号能遍历和读取。不得把 Secret 提交到 Git、复制到镜像或写入日志。`APP_SECRET_KEY` 同时用于签发平台 Token 和派生 Fernet 密钥；已有数据环境不可随意更换，否则已加密的模型/数据源密钥无法解密。
 
 ## 构建与启动
 

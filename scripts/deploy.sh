@@ -123,6 +123,7 @@ fi
 
 umask 077
 mkdir -p "$SECRET_DIR"
+chmod 700 "$SECRET_DIR"
 if [[ ! -s "$KIMI_SECRET" ]]; then
   [[ -n "${KIMI_API_KEY:-}" ]] || fail "首次部署请设置环境变量 KIMI_API_KEY"
   printf '%s' "$KIMI_API_KEY" > "$KIMI_SECRET"
@@ -130,7 +131,12 @@ fi
 if [[ ! -s "$AGENT_SECRET" ]]; then
   openssl rand -hex 32 > "$AGENT_SECRET"
 fi
-chmod 600 "$KIMI_SECRET" "$AGENT_SECRET"
+# Compose implements file-backed secrets as bind mounts on a standalone Linux
+# engine, so host ownership is preserved and service-level uid/gid remapping is
+# unavailable.  Keep the containing directory root/operator-only while making
+# the mounted files readable by the non-root container users.  The mounts stay
+# read-only and exist only in services that explicitly declare each secret.
+chmod 444 "$KIMI_SECRET" "$AGENT_SECRET"
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   log "从仓库源码构建 Semantica CPU 基础镜像"
