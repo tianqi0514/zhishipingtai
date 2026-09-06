@@ -73,6 +73,21 @@ def _allowed_space_ids(db: Session, user: User, requested: list[str]) -> list[st
     return allowed
 
 
+def _turn_retrieval_settings(conversation: Conversation) -> dict[str, Any]:
+    current = dict(conversation.settings or {})
+    try:
+        top_k = int(current.get("top_k", 10))
+    except (TypeError, ValueError):
+        top_k = 10
+    return {
+        "use_keyword": current.get("use_keyword") is not False,
+        "use_vector": current.get("use_vector") is not False,
+        "use_graph": current.get("use_graph") is not False,
+        "use_reranker": current.get("use_reranker") is not False,
+        "top_k": max(1, min(50, top_k)),
+    }
+
+
 def _reconcile_stale_turn(db: Session, conversation: Conversation) -> bool:
     """Close a user-visible turn whose SSE bridge can no longer be alive.
 
@@ -730,6 +745,7 @@ async def _stream_turn(
     harness_session_id: str,
     assistant_id: str,
     content: str,
+    retrieval_settings: dict[str, Any],
 ) -> AsyncIterator[str]:
     yield _sse("message_created", {"assistant_message_id": assistant_id})
     url = f"{settings.agent_runtime_url.rstrip('/')}/v1/sessions/{harness_session_id}/turns"
@@ -739,7 +755,11 @@ async def _stream_turn(
     try:
         timeout = httpx.Timeout(settings.agent_request_timeout_seconds, connect=15)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, json={"content": content}) as response:
+            async with client.stream(
+                "POST",
+                url,
+                json={"content": content, "settings": retrieval_settings},
+            ) as response:
                 if response.status_code >= 400:
                     body = (await response.aread()).decode("utf-8", errors="replace")[:500]
                     raise RuntimeError(f"Agent Runtime {response.status_code}: {body}")
@@ -828,6 +848,7 @@ def send_message(
             conversation.harness_session_id,
             assistant.id,
             payload.content.strip(),
+            _turn_retrieval_settings(conversation),
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

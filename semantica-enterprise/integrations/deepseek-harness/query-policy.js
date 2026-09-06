@@ -5,6 +5,23 @@ const DIRECT_RESPONSE_PATTERNS = [
   /^(帮助|help|你能做什么|你会什么|怎么用你|如何使用你|使用帮助|有什么功能)[？?。！!\s]*$/iu,
 ]
 
+const RETRIEVAL_SETTINGS_PATTERN = /<chuanshen-retrieval-settings>(\{[^<]*\})<\/chuanshen-retrieval-settings>/gu
+
+
+function currentUserText(events) {
+  const message = [...(events || [])].reverse().find(event => (
+    event?.type === 'user/message'
+    && event?.data?.source?.kind === 'user'
+  ))
+  const content = message?.data?.content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter(block => block?.type === 'text')
+    .map(block => String(block.text || ''))
+    .join('')
+    .trim()
+}
+
 
 export function requiresKnowledgeSearch(input) {
   const query = String(input || '').trim()
@@ -85,13 +102,14 @@ export function requiresKnowledgeReason(input) {
 }
 
 
-export function evidenceRequirements(input) {
+export function evidenceRequirements(input, settings = {}) {
   const query = String(input || '').trim()
   if (!requiresKnowledgeSearch(query)) return []
   const structured = requiresStructuredQuery(query)
   const document = !structured || DOCUMENT_EVIDENCE_PATTERNS.some(pattern => pattern.test(query))
-  const graph = requiresGraphQuery(query)
-  const reasoning = requiresKnowledgeReason(query)
+  const graphEnabled = settings?.use_graph !== false
+  const graph = graphEnabled && requiresGraphQuery(query)
+  const reasoning = graphEnabled && requiresKnowledgeReason(query)
   return [
     ...(document ? ['knowledge_search'] : []),
     ...(graph ? ['knowledge_graph_query'] : []),
@@ -102,15 +120,19 @@ export function evidenceRequirements(input) {
 
 
 export function currentUserQuery(events) {
-  const message = [...(events || [])].reverse().find(event => (
-    event?.type === 'user/message'
-    && event?.data?.source?.kind === 'user'
-  ))
-  const content = message?.data?.content
-  if (!Array.isArray(content)) return ''
-  return content
-    .filter(block => block?.type === 'text')
-    .map(block => String(block.text || ''))
-    .join('')
-    .trim()
+  return currentUserText(events).replace(RETRIEVAL_SETTINGS_PATTERN, '').trim()
+}
+
+
+export function currentRetrievalSettings(events) {
+  const text = currentUserText(events)
+  const matches = [...text.matchAll(RETRIEVAL_SETTINGS_PATTERN)]
+  const encoded = matches.at(-1)?.[1]
+  if (!encoded) return {}
+  try {
+    const value = JSON.parse(encoded)
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  } catch {
+    return {}
+  }
 }

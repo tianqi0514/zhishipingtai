@@ -186,6 +186,33 @@ def _require_conversation(claims: dict[str, Any], conversation_id: str) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "凭据不能访问其他会话")
 
 
+def _conversation_tool_settings(
+    db: Session,
+    claims: dict[str, Any],
+    conversation_id: str,
+) -> dict[str, Any]:
+    conversation = db.get(Conversation, conversation_id)
+    if (
+        conversation is None
+        or conversation.status == "deleted"
+        or conversation.tenant_id != claims.get("tenant_id")
+        or conversation.user_id != claims.get("sub")
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "凭据不能访问该会话设置")
+    current = dict(conversation.settings or {})
+    try:
+        top_k = int(current.get("top_k", 10))
+    except (TypeError, ValueError):
+        top_k = 10
+    return {
+        "use_keyword": current.get("use_keyword") is not False,
+        "use_vector": current.get("use_vector") is not False,
+        "use_graph": current.get("use_graph") is not False,
+        "use_reranker": current.get("use_reranker") is not False,
+        "top_k": max(1, min(50, top_k)),
+    }
+
+
 @router.post("/credentials")
 def issue_credential(
     payload: AgentCredentialRequest,
@@ -291,6 +318,7 @@ def agent_knowledge_search(
     db: Session = Depends(get_db),
 ):
     _require_conversation(claims, payload.conversation_id)
+    tool_settings = _conversation_tool_settings(db, claims, payload.conversation_id)
     token_spaces = set(claims.get("space_ids") or [])
     requested = payload.space_ids or list(token_spaces)
     if not set(requested).issubset(token_spaces):
@@ -317,11 +345,11 @@ def agent_knowledge_search(
         user_id=claims["sub"],
         query=payload.query,
         space_ids=requested,
-        top_k=payload.top_k,
-        use_keyword=payload.use_keyword,
-        use_vector=payload.use_vector,
-        use_graph=payload.use_graph,
-        use_reranker=payload.use_reranker,
+        top_k=tool_settings["top_k"],
+        use_keyword=tool_settings["use_keyword"],
+        use_vector=tool_settings["use_vector"],
+        use_graph=tool_settings["use_graph"],
+        use_reranker=tool_settings["use_reranker"],
         filters=payload.filters,
         audit_action="agent.knowledge.search",
     )
@@ -398,6 +426,25 @@ def agent_graph_query(
     db: Session = Depends(get_db),
 ):
     _require_conversation(claims, payload.conversation_id)
+    tool_settings = _conversation_tool_settings(db, claims, payload.conversation_id)
+    if not tool_settings["use_graph"]:
+        audit(
+            db,
+            claims["tenant_id"],
+            claims["sub"],
+            "agent.knowledge.graph.disabled",
+            "conversation",
+            payload.conversation_id,
+        )
+        db.commit()
+        return {
+            "entities": [],
+            "facts": [],
+            "evidence_chunk_ids": [],
+            "graph_release": None,
+            "disabled": True,
+            "warnings": ["当前会话已关闭图谱检索"],
+        }
     token_spaces = set(claims.get("space_ids") or [])
     spaces = payload.space_ids or list(token_spaces)
     if not set(spaces).issubset(token_spaces):
@@ -572,6 +619,24 @@ def agent_knowledge_reason(
     db: Session = Depends(get_db),
 ):
     _require_conversation(claims, payload.conversation_id)
+    tool_settings = _conversation_tool_settings(db, claims, payload.conversation_id)
+    if not tool_settings["use_graph"]:
+        audit(
+            db,
+            claims["tenant_id"],
+            claims["sub"],
+            "agent.knowledge.reason.disabled",
+            "conversation",
+            payload.conversation_id,
+        )
+        db.commit()
+        return {
+            "goal": payload.goal,
+            "runs": [],
+            "items": [],
+            "disabled": True,
+            "warnings": ["当前会话已关闭图谱检索，未执行规则推演"],
+        }
     token_spaces = set(claims.get("space_ids") or [])
     requested = set(payload.space_ids or token_spaces)
     if not requested.issubset(token_spaces):

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  currentRetrievalSettings,
   currentUserQuery,
   evidenceRequirements,
   requiresGraphQuery,
@@ -51,6 +52,9 @@ test('requires graph and Semantica reasoning for explainable impact chains', () 
   ])
   assert.equal(requiresGraphQuery('采购制度适用于哪些单位？'), false)
   assert.equal(requiresKnowledgeReason('采购制度适用于哪些单位？'), false)
+  assert.deepEqual(evidenceRequirements(question, { use_graph: false }), [
+    'knowledge_search',
+  ])
 })
 
 
@@ -66,4 +70,30 @@ test('reads the latest real user message and ignores plugin steering', () => {
     },
   ]
   assert.equal(currentUserQuery(events), '你是谁')
+})
+
+
+test('separates platform retrieval settings from the user question', () => {
+  const events = [{
+    type: 'user/message',
+    data: {
+      content: [{
+        type: 'text',
+        text: '东方智造延期会影响哪些项目？\n\n<chuanshen-retrieval-settings>{"use_keyword":true,"use_vector":true,"use_graph":false,"use_reranker":false,"top_k":10}</chuanshen-retrieval-settings>',
+      }],
+      source: { kind: 'user' },
+    },
+  }]
+  assert.equal(currentUserQuery(events), '东方智造延期会影响哪些项目？')
+  assert.deepEqual(currentRetrievalSettings(events), {
+    use_keyword: true,
+    use_vector: true,
+    use_graph: false,
+    use_reranker: false,
+    top_k: 10,
+  })
+  assert.deepEqual(
+    evidenceRequirements(currentUserQuery(events), currentRetrievalSettings(events)),
+    ['knowledge_search'],
+  )
 })

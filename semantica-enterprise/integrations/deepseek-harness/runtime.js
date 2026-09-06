@@ -32,6 +32,24 @@ async function body(req) {
   return JSON.parse(Buffer.concat(parts).toString('utf8') || '{}')
 }
 
+function retrievalSettings(value) {
+  const settings = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const configuredTopK = Number(settings.top_k)
+  return {
+    use_keyword: settings.use_keyword !== false,
+    use_vector: settings.use_vector !== false,
+    use_graph: settings.use_graph !== false,
+    use_reranker: settings.use_reranker !== false,
+    top_k: Number.isInteger(configuredTopK) && configuredTopK >= 1 && configuredTopK <= 50
+      ? configuredTopK
+      : 10,
+  }
+}
+
+function userContentWithRetrievalSettings(content, settings) {
+  return `${content.trim()}\n\n<chuanshen-retrieval-settings>${JSON.stringify(settings)}</chuanshen-retrieval-settings>`
+}
+
 async function modelConfig(sessionId) {
   const response = await fetch(`${PLATFORM_API}/internal/agent/model/${encodeURIComponent(sessionId)}`, {
     headers: { 'X-Agent-Service-Secret': serviceSecret() },
@@ -332,6 +350,7 @@ function normalizeEvent(event, toolStarts, turnState) {
 async function runTurn(req, res, sessionId) {
   const input = await body(req)
   if (typeof input.content !== 'string' || !input.content.trim()) return json(res, 422, { detail: '消息不能为空' })
+  const settings = retrievalSettings(input.settings)
   const entry = await harnessFor(sessionId)
   if (entry.running) return json(res, 409, { detail: '该会话正在生成' })
   entry.running = true
@@ -343,13 +362,13 @@ async function runTurn(req, res, sessionId) {
   })
   const toolStarts = new Map()
   const turnState = {
-    requiredTools: new Set(evidenceRequirements(input.content)),
+    requiredTools: new Set(evidenceRequirements(input.content, settings)),
     satisfiedTools: new Set(),
     suppressedAnswer: false,
   }
   let completedSeen = false
   try {
-    const result = await entry.harness.run(input.content.trim(), {
+    const result = await entry.harness.run(userContentWithRetrievalSettings(input.content, settings), {
       sessionId,
       onNotification(notification) {
         if (notification.method !== 'session.event' || notification.params?.sessionId !== sessionId) return

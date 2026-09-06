@@ -171,6 +171,31 @@ test('impact-chain questions require graph query and governed reasoning', () => 
 })
 
 
+test('does not enforce graph tools when the platform disables graph retrieval', () => {
+  const { listeners } = fixture()
+  const steered = []
+  const agent = {
+    session: { events: [
+      {
+        type: 'user/message',
+        data: {
+          content: [{
+            type: 'text',
+            text: '东方智造延期会影响哪些项目？请给出完整关系路径。\n\n<chuanshen-retrieval-settings>{"use_keyword":true,"use_vector":true,"use_graph":false,"use_reranker":false,"top_k":10}</chuanshen-retrieval-settings>',
+          }],
+          source: { kind: 'user' },
+        },
+      },
+      { type: 'tool/call', data: { turn: 7, callId: 'search-7', name: 'knowledge_search' } },
+      { type: 'tool/result', data: { callId: 'search-7', content: [] } },
+    ] },
+    steer(message) { steered.push(message) },
+  }
+  listeners.get('agent/turn-stopping')({ agent, turn: 7, signal: new AbortController().signal })
+  assert.equal(steered.length, 0)
+})
+
+
 test('does not steer after knowledge_search was durably logged', () => {
   const { listeners } = fixture()
   const steered = []
