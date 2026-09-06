@@ -276,7 +276,7 @@ Ontology2SQL 锁定在 `ece05d1cc988d9bce602a7a9e1b73cd5767a860a`，用于严格
 
 ### 2026-09-06 最终生产镜像与交付复核
 
-完成生产 Dockerfile 的 Linux/amd64 干净构建并重建应用服务。最终镜像为 `semantica-enterprise:0.10.0`，摘要 `sha256:441f39ee40a1b743dc8c277edf5cd32a18f1b53e8b724915276002af9a423c93`；以非 root `app` 用户（UID 10001）运行，`pip check` 通过。镜像内 Semantica 0.6.6、torch 2.13.0+cpu、Docling 2.124.0 可导入，DOCX 转换、OCR 和 `ffprobe` 实际检查通过。API、Worker、Scheduler、MCP 已由该镜像重建，Agent Runtime 使用独立最终镜像；全部必需服务健康且重启计数为 0。
+完成生产 Dockerfile 的 Linux/amd64 干净构建并重建应用服务。最终镜像为 `semantica-enterprise:0.10.0`，摘要 `sha256:441f39ee40a1b743dc8c277edf5cd32a18f1b53e8b724915276002af9a423c93`；以非 root `app` 用户（UID 10001）运行，`pip check` 通过。镜像内 Semantica 0.6.6、torch 2.13.0+cpu、Docling 2.124.0 可导入，DOCX 转换、OCR 和 `ffprobe` 实际检查通过。API、Worker、Scheduler、MCP 已由该镜像重建，Agent Runtime 使用独立最终镜像；最终收口时 16 个正式演示容器全部健康，15 个重启计数为 0。ASR Runtime 在启动早期累计重启 10 次，随后自 17:09 CST 起稳定运行，并连续通过模型检查、真实转写和三次完整自动预检；已在测试报告与已知限制中如实记录。
 
 最终测试证据：Python 共收集 495 项，478 passed、17 skipped、0 failed；17 项为默认环境门控，并由单独 live 运行覆盖：两个 analysis live 与 PostgreSQL Fact 合计 3/3、结构化数据库 10/10、结构化 API live 1/1。DeepSeek Harness 契约测试 18/18。最终完整预检共 54 项，52/52 required 通过；PostgreSQL/MySQL Ground Truth 各 20/20，平台结构化 API 20/20；REST、DSH、MCP（11 个工具且原始 SQL 被拒绝）和 CLI 均通过。
 

@@ -127,7 +127,7 @@ API Key、数据库密码和内部 Token 未写入本报告。模型“已配置
 
 最终生产镜像为 `semantica-enterprise:0.10.0`，镜像摘要为 `sha256:441f39ee40a1b743dc8c277edf5cd32a18f1b53e8b724915276002af9a423c93`。该镜像在 Linux/amd64 上完成干净构建，以非 root 用户 `app`（UID 10001）运行；`pip check` 通过。关键运行时版本为 Semantica 0.6.6、torch 2.13.0+cpu、Docling 2.124.0，镜像内 DOCX→PDF 转换、OCR 和 `ffprobe` 媒体探测均已实测通过。
 
-最终预检时，API、Worker、Scheduler、Agent Runtime、MCP、ASR Runtime、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB、Fixture 服务以及两个演示数据库容器满足本机 required 健康检查。API、Worker、Scheduler 和 MCP 已用最终生产镜像重建；Agent Runtime 使用其独立最终镜像并保持健康。相关容器均为 `healthy` 且重启计数为 0。
+最终预检时，API、Worker、Scheduler、Agent Runtime、MCP、ASR Runtime、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB、Fixture 服务以及两个演示数据库容器满足本机 required 健康检查。API、Worker、Scheduler 和 MCP 已用最终生产镜像重建；Agent Runtime 使用其独立最终镜像并保持健康。最终收口检查中 16 个正式演示容器均为 `healthy`；其中 15 个重启计数为 0。ASR Runtime 在本次启动早期累计重启 10 次，随后自 2026-09-06 17:09 CST 起稳定运行，并连续通过模型连接、WAV/MP4 转写和三次完整自动预检。该历史重启计数不能表述为“全部容器零重启”，现场前仍应复核。
 
 随后执行了一次不删除 Volume 的应用层持久化回归：正常停止并重新启动 API、Worker、Scheduler、Agent Runtime 和 MCP。重启后全部必需容器恢复为 `healthy`；平台仍能读取 33 份演示空间文档、338 个实体、522 条事实和 3 个会话，最近会话恢复出 2 条消息与 113 个事件。重启后的仅向量检索返回 5 条结果、15 个底层候选且无 Warning；浏览器刷新后登录状态、当前知识空间和图谱版本 R85 均恢复，Console 仍为 0 个应用错误。
 
@@ -149,6 +149,7 @@ API Key、数据库密码和内部 Token 未写入本报告。模型“已配置
 - 三轮完整客户彩排尚未宣称完成；本报告只记录最终预检和已执行浏览器关键链。
 - Kimi 和内网 Qwen 当前不可用，不参与路由。
 - Reranker 未配置，只能真实演示 RRF 融合与明确降级。
+- ASR Runtime 本次启动早期留下 10 次历史重启计数；当前健康且连续完成真实转写，但正式演示前仍应通过预检确认其保持稳定。
 - 制度谱系、条款级差异、过期知识自动下线、非结构化 PII 发布阻断仍是产品边界。
 - 模型超时/429、全部跨租户负向场景及全部管理菜单的穷举浏览器操作，不由本次关键链证据扩展为“全部通过”。
 

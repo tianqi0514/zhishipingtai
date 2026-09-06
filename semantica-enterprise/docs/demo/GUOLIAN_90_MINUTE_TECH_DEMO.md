@@ -103,7 +103,7 @@
 | 证据 | 本机 | 远端 |
 |---|---|---|
 | Git commit / 镜像 | 当前分支 HEAD（精确 SHA 见 Git 历史）；生产镜像 `semantica-enterprise:0.10.0`，摘要 `sha256:441f39ee40a1b743dc8c277edf5cd32a18f1b53e8b724915276002af9a423c93`，Linux/amd64 干净构建通过 | 远端待验证 |
-| Docker 健康 | API、Worker、Scheduler、MCP 已由最终生产镜像重建；Agent Runtime 及核心中间件健康，重启计数 0；不删 Volume 恢复已通过 | 远端待验证 |
+| Docker 健康 | API、Worker、Scheduler、MCP 已由最终生产镜像重建；16 个正式演示容器当前全部健康；15 个重启计数为 0，ASR 启动早期累计重启 10 次后已稳定并连续通过转写/预检；不删 Volume 恢复已通过 | 远端待验证；演示前复核 ASR |
 | Semantica 版本/Run | Semantica 0.6.6；证据对齐后 3/3 个真实 Run、7 条结论，均由 `semantica.reasoning.DatalogReasoner` 生成；9/9 种子事实、8/8 前提通过 | 远端待验证 |
 | Harness commit | `cd5ef8148158c3a752a658978873241fdf8e2bbc`；契约测试 18/18 | 远端待验证 |
 | 20 条 DB GT | MySQL 20/20 + PostgreSQL 20/20 直连实算；平台公开 NL→Plan→IR→参数化 SQL→执行 20/20 | 远端待验证 |
