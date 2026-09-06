@@ -1,13 +1,141 @@
 #!/usr/bin/env python3
-"""Deterministic Web/REST/RSS/Sitemap fixture for the 智慧流程中枢 demo."""
+"""Deterministic account-free source protocols for customer demonstrations.
+
+The HTTP endpoints cover Web, REST, RSS and Sitemap ingestion. A tiny local
+``git daemon`` serves a real repository on port 9418, so the Git connector is
+also exercised without depending on GitHub or an external account.
+"""
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
+import shutil
+import socket
+import subprocess
+import tempfile
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 
 BASE = "http://source-fixture:8088"
+GIT_PORT = 9418
+GIT_REPOSITORY_NAME = "guolian-demo.git"
+GIT_FILES = {
+    "README.md": """# 国联集团组织级知识底座演示配置
+
+本仓库为演示数据，不代表国联集团真实经营数据。
+
+东方智造供应 NexusOne；NexusOne 用于智慧流程中枢项目。项目由数字科技公司负责，
+风险管理部持续跟踪交付延期风险。
+""",
+    "config/project-dependencies.yaml": """project: 智慧流程中枢项目
+owner: 数字科技公司
+products:
+  - NexusOne
+dependencies:
+  - 集团数据交换平台
+risk_tracking_department: 风险管理部
+data_notice: 演示数据，不代表国联集团真实经营数据。
+""",
+    "rules/risk-routing.json": json.dumps(
+        {
+            "supplier": "东方智造",
+            "risk": "交付延期",
+            "affected_product": "NexusOne",
+            "affected_project": "智慧流程中枢项目",
+            "action": "数字化管理部协调替代方案",
+            "data_notice": "演示数据，不代表国联集团真实经营数据。",
+        },
+        ensure_ascii=False,
+        indent=2,
+    ),
+}
+
+
+def _run_git(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        env=env,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+
+
+def create_git_fixture(root: Path) -> Path:
+    """Create a deterministic, exportable bare repository under ``root``."""
+
+    work = root / "work"
+    bare = root / GIT_REPOSITORY_NAME
+    work.mkdir(parents=True, exist_ok=True)
+    _run_git("init", "--initial-branch=main", cwd=work)
+    for relative, content in GIT_FILES.items():
+        target = work / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    env = dict(os.environ)
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "传神智库演示",
+            "GIT_AUTHOR_EMAIL": "demo@chuanshen.invalid",
+            "GIT_COMMITTER_NAME": "传神智库演示",
+            "GIT_COMMITTER_EMAIL": "demo@chuanshen.invalid",
+            "GIT_AUTHOR_DATE": "2026-09-01T09:00:00+08:00",
+            "GIT_COMMITTER_DATE": "2026-09-01T09:00:00+08:00",
+        }
+    )
+    _run_git("add", ".", cwd=work, env=env)
+    _run_git("commit", "-m", "prepare deterministic Guolian demo configuration", cwd=work, env=env)
+    _run_git("clone", "--bare", str(work), str(bare), cwd=root)
+    (bare / "git-daemon-export-ok").touch()
+    return bare
+
+
+def start_git_fixture() -> tuple[Path, subprocess.Popen[bytes]]:
+    root = Path(tempfile.mkdtemp(prefix="guolian-source-git-"))
+    create_git_fixture(root)
+    process = subprocess.Popen(
+        [
+            "git",
+            "daemon",
+            "--reuseaddr",
+            "--export-all",
+            f"--base-path={root}",
+            "--listen=0.0.0.0",
+            f"--port={GIT_PORT}",
+            str(root),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    def cleanup() -> None:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        shutil.rmtree(root, ignore_errors=True)
+
+    atexit.register(cleanup)
+    for _ in range(50):
+        if process.poll() is not None:
+            cleanup()
+            raise RuntimeError("Git fixture failed to start")
+        try:
+            with socket.create_connection(("127.0.0.1", GIT_PORT), timeout=0.2):
+                return root, process
+        except OSError:
+            time.sleep(0.05)
+    cleanup()
+    raise RuntimeError("Git fixture did not become ready")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -102,10 +230,100 @@ class Handler(BaseHTTPRequestHandler):
                 f"""<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
                 <url><loc>{BASE}/portal</loc></url><url><loc>{BASE}/process/manual</loc></url></urlset>""",
             )
+        if self.path == "/guolian/portal":
+            return self.respond(
+                200,
+                "text/html; charset=utf-8",
+                """<!doctype html><html><head><title>集团项目运行门户（演示）</title></head>
+                <body><h1>智慧流程中枢项目运行状态</h1>
+                <p>本页面为演示数据，不代表国联集团真实经营数据。</p>
+                <p>智慧流程中枢项目由数字科技公司负责，核心产品 NexusOne 由东方智造供应。</p>
+                <p>东方智造发生交付延期，数字化管理部正在协调替代方案，风险管理部持续跟踪。</p>
+                </body></html>""",
+            )
+        if self.path == "/guolian/api/risks":
+            return self.respond(
+                200,
+                "application/json; charset=utf-8",
+                json.dumps(
+                    {
+                        "generated_at": "2026-09-01T15:30:00+08:00",
+                        "data_notice": "演示数据，不代表国联集团真实经营数据。",
+                        "items": [
+                            {
+                                "risk_id": "DEMO-RISK-001",
+                                "supplier": "东方智造",
+                                "risk_type": "交付延期",
+                                "risk_level": "高",
+                                "product": "NexusOne",
+                                "project": "智慧流程中枢项目",
+                                "owner_department": "风险管理部",
+                                "status": "跟踪中",
+                            },
+                            {
+                                "risk_id": "DEMO-RISK-002",
+                                "supplier": "太湖云科",
+                                "risk_type": "资料待补充",
+                                "risk_level": "低",
+                                "project": "集团知识底座项目",
+                                "owner_department": "集团采购管理部",
+                                "status": "整改中",
+                            },
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        if self.path == "/guolian/feed.xml":
+            return self.respond(
+                200,
+                "application/rss+xml; charset=utf-8",
+                f"""<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>
+                <title>集团采购与供应商风险动态（演示）</title><link>{BASE}/guolian/portal</link>
+                <description>演示数据，不代表国联集团真实经营数据。</description>
+                <item><title>东方智造交付延期风险</title><link>{BASE}/guolian/portal</link>
+                <description>东方智造供应的 NexusOne 交付延期，可能影响智慧流程中枢项目。</description></item>
+                <item><title>采购制度现行版本提示</title><link>{BASE}/guolian/policies</link>
+                <description>演示问答应优先使用 2025 演示现行版采购实施细则。</description></item>
+                </channel></rss>""",
+            )
+        if self.path == "/guolian/sitemap.xml":
+            return self.respond(
+                200,
+                "application/xml; charset=utf-8",
+                f"""<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+                <url><loc>{BASE}/guolian/portal</loc></url>
+                <url><loc>{BASE}/guolian/policies</loc></url>
+                <url><loc>{BASE}/guolian/projects</loc></url></urlset>""",
+            )
+        if self.path == "/guolian/policies":
+            return self.respond(
+                200,
+                "text/html; charset=utf-8",
+                """<!doctype html><html><head><title>采购制度知识页（演示）</title></head><body>
+                <h1>集团本部采购实施细则</h1><p>演示数据，不代表国联集团真实经营数据。</p>
+                <p>有效采购金额统计应排除已取消订单；供应商出现重大交付风险时应持续跟踪并制定替代方案。</p>
+                </body></html>""",
+            )
+        if self.path == "/guolian/projects":
+            return self.respond(
+                200,
+                "text/html; charset=utf-8",
+                """<!doctype html><html><head><title>项目依赖知识页（演示）</title></head><body>
+                <h1>智慧流程中枢项目</h1><p>演示数据，不代表国联集团真实经营数据。</p>
+                <p>项目使用 NexusOne，并依赖集团数据交换平台和统一身份组件，由数字科技公司负责。</p>
+                </body></html>""",
+            )
         return self.respond(404, "text/plain; charset=utf-8", "not found")
 
     def log_message(self, *_args: object) -> None:
         return
 
 
-ThreadingHTTPServer(("0.0.0.0", 8088), Handler).serve_forever()
+def main() -> None:
+    start_git_fixture()
+    ThreadingHTTPServer(("0.0.0.0", 8088), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

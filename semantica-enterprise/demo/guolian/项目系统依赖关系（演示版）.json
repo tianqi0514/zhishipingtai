@@ -1,0 +1,71 @@
+{
+  "dataset": "guolian-enterprise-demo",
+  "disclaimer": "演示数据，不代表国联集团真实经营数据",
+  "as_of": "2026-09-01T09:00:00+08:00",
+  "organizations": [
+    {"id": "ORG-DEMO-001", "name": "国联集团", "type": "集团", "procurement_target_2026": 0},
+    {"id": "ORG-DEMO-002", "name": "集团本部", "type": "总部", "parent_id": "ORG-DEMO-001", "procurement_target_2026": 500000},
+    {"id": "ORG-DEMO-003", "name": "数字科技公司", "aliases": ["国联数科", "数科公司"], "type": "子企业", "parent_id": "ORG-DEMO-001", "procurement_target_2026": 800000},
+    {"id": "ORG-DEMO-004", "name": "能源服务公司", "type": "子企业", "parent_id": "ORG-DEMO-001", "procurement_target_2026": 450000},
+    {"id": "ORG-DEMO-005", "name": "金融科技公司", "type": "子企业", "parent_id": "ORG-DEMO-001", "procurement_target_2026": 350000}
+  ],
+  "departments": [
+    {"id": "DEPT-DEMO-001", "name": "集团采购管理部", "organization_id": "ORG-DEMO-002"},
+    {"id": "DEPT-DEMO-002", "name": "数字化管理部", "organization_id": "ORG-DEMO-003"},
+    {"id": "DEPT-DEMO-003", "name": "风险管理部", "organization_id": "ORG-DEMO-001"},
+    {"id": "DEPT-DEMO-004", "name": "项目管理办公室", "organization_id": "ORG-DEMO-003"}
+  ],
+  "suppliers": [
+    {"id": "SUP-DEMO-001", "name": "东方智造", "aliases": ["东方智造有限公司", "东方智造（无锡）"], "risk_level": "高"},
+    {"id": "SUP-DEMO-002", "name": "江南信息", "risk_level": "低"},
+    {"id": "SUP-DEMO-003", "name": "太湖云科", "risk_level": "中"},
+    {"id": "SUP-DEMO-004", "name": "华东系统集成", "risk_level": "低"},
+    {"id": "SUP-DEMO-005", "name": "新城数据服务", "risk_level": "待评估"}
+  ],
+  "products": [
+    {"id": "PROD-DEMO-001", "name": "NexusOne", "type": "知识平台组件"},
+    {"id": "PROD-DEMO-002", "name": "智慧流程引擎", "type": "流程组件"},
+    {"id": "PROD-DEMO-003", "name": "集团数据交换平台", "type": "集成平台"},
+    {"id": "PROD-DEMO-004", "name": "统一身份组件", "type": "基础组件"},
+    {"id": "PROD-DEMO-005", "name": "临时数据服务", "type": "数据服务"}
+  ],
+  "projects": [
+    {
+      "id": "PRJ-DEMO-001",
+      "name": "智慧流程中枢项目",
+      "owner_organization_id": "ORG-DEMO-003",
+      "owner_department_ids": ["DEPT-DEMO-002", "DEPT-DEMO-004"],
+      "product_ids": ["PROD-DEMO-001", "PROD-DEMO-002"],
+      "depends_on_product_ids": ["PROD-DEMO-003", "PROD-DEMO-004"]
+    },
+    {
+      "id": "PRJ-DEMO-002",
+      "name": "集团知识底座项目",
+      "owner_organization_id": "ORG-DEMO-004",
+      "owner_department_ids": ["DEPT-DEMO-002"],
+      "product_ids": ["PROD-DEMO-003"],
+      "depends_on_product_ids": ["PROD-DEMO-004"]
+    },
+    {
+      "id": "PRJ-DEMO-003",
+      "name": "采购协同平台升级项目",
+      "owner_organization_id": "ORG-DEMO-002",
+      "owner_department_ids": ["DEPT-DEMO-001"],
+      "product_ids": ["PROD-DEMO-002", "PROD-DEMO-004"],
+      "depends_on_product_ids": ["PROD-DEMO-003"]
+    }
+  ],
+  "relationships": [
+    {"subject": "东方智造", "predicate": "供应", "object": "NexusOne", "source": "采购订单明细（演示版）.csv"},
+    {"subject": "NexusOne", "predicate": "用于", "object": "智慧流程中枢项目", "source": "采购订单明细（演示版）.csv"},
+    {"subject": "数字科技公司", "predicate": "负责", "object": "智慧流程中枢项目", "source": "智慧流程中枢建设说明（演示版）.rst"},
+    {"subject": "智慧流程中枢项目", "predicate": "依赖", "object": "集团数据交换平台", "source": "项目系统依赖关系（演示版）.json"},
+    {"subject": "智慧流程中枢项目", "predicate": "依赖", "object": "统一身份组件", "source": "项目系统依赖关系（演示版）.json"},
+    {"subject": "数字化管理部", "predicate": "协调", "object": "NexusOne替代方案", "source": "智慧流程中枢项目例会要点（演示版）.txt"},
+    {"subject": "风险管理部", "predicate": "跟踪", "object": "东方智造交付延期", "source": "东方智造交付延期通知（演示版）.eml"}
+  ],
+  "policy_applicability": [
+    {"policy": "集团本部采购实施细则（2025演示现行版）", "applies_to": "国联集团"},
+    {"policy": "集团本部采购实施细则（2025演示现行版）", "applies_to": "数字科技公司", "basis": "国联集团管理数字科技公司"}
+  ]
+}

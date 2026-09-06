@@ -39,12 +39,15 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
     && rm -rf /var/lib/apt/lists/*
 COPY apps /app/apps
 COPY packages /app/packages
+COPY scripts /app/scripts
+COPY demo /app/demo
 RUN pip install --no-cache-dir --no-deps -e .
 
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --home /app --shell /usr/sbin/nologin app \
     && mkdir -p /app/data \
     && chown -R app:app /app
+ENV HOME=/app
 USER app
 
 EXPOSE 8080

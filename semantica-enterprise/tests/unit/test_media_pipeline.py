@@ -23,7 +23,13 @@ from packages.platform.media import (
     timecode,
 )
 from packages.platform.media_policy import resolve_media_policy
-from packages.platform.models import KnowledgeSpace, MediaParsingPolicy, ModelConfig, Tenant
+from packages.platform.models import (
+    KnowledgeSpace,
+    MediaParsingPolicy,
+    MediaParsingPolicyVersion,
+    ModelConfig,
+    Tenant,
+)
 from packages.platform.config import Settings
 from packages.platform.storage import ObjectStorage
 from packages.semantica_adapter.vision import StructuredVisionResult, _json_object
@@ -95,6 +101,31 @@ def test_policy_snapshot_hash_ignores_database_ids_but_tracks_functional_config(
     )
     assert first["config_hash"] == second["config_hash"]
     assert first["config_hash"] != changed["config_hash"]
+
+
+def test_policy_versions_can_intentionally_return_to_an_earlier_configuration() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        tenant = Tenant(code="media-reuse", name="媒体版本复用")
+        db.add(tenant); db.flush()
+        policy = MediaParsingPolicy(
+            tenant_id=tenant.id, name="可回退策略", applicable_media_types=["video"],
+            config=DEFAULT_MEDIA_POLICY, enabled=True,
+        )
+        db.add(policy); db.flush()
+        db.add_all([
+            MediaParsingPolicyVersion(
+                tenant_id=tenant.id, policy_id=policy.id, version_number=1,
+                snapshot={"version_number": 1}, config_hash="same-functional-config",
+            ),
+            MediaParsingPolicyVersion(
+                tenant_id=tenant.id, policy_id=policy.id, version_number=2,
+                snapshot={"version_number": 2}, config_hash="same-functional-config",
+            ),
+        ])
+        db.commit()
+        assert db.query(MediaParsingPolicyVersion).count() == 2
 
 
 def test_stage_fingerprints_only_invalidate_downstream_dependencies() -> None:

@@ -103,6 +103,21 @@ class SemanticMetricFilter(StrictModel):
     upper: Any = None
 
 
+class SemanticMetricRelationshipConstraint(StrictModel):
+    """A server-owned population rule that must hold on a related entity.
+
+    The contract contains semantic IDs only.  Physical join columns remain in
+    the activated relationship mapping and are resolved by the deterministic
+    compiler.
+    """
+
+    relationship_id: str = Field(min_length=1, max_length=100)
+    target_entity_id: str = Field(min_length=1, max_length=100)
+    quantifier: Literal["exists", "not_exists"] = "exists"
+    filters: list[SemanticMetricFilter] = Field(default_factory=list, max_length=10)
+    description: str = Field(default="", max_length=1000)
+
+
 class SemanticAttributeMapping(StrictModel):
     id: str = Field(min_length=1, max_length=100)
     ontology_term_id: str = Field(min_length=1)
@@ -118,6 +133,7 @@ class SemanticAttributeMapping(StrictModel):
     business_definition: str = Field(default="", max_length=2000)
     default_aggregate: Literal["count", "sum", "average", "min", "max"] | None = None
     required_filters: list[SemanticMetricFilter] = Field(default_factory=list, max_length=10)
+    required_relationships: list[SemanticMetricRelationshipConstraint] = Field(default_factory=list, max_length=8)
     confidence: float = Field(default=1.0, ge=0, le=1)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -126,14 +142,64 @@ class SemanticRelationshipMapping(StrictModel):
     id: str = Field(min_length=1, max_length=100)
     ontology_term_id: str = Field(min_length=1)
     label: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=2000)
     from_entity_id: str = Field(min_length=1)
     to_entity_id: str = Field(min_length=1)
     predicates: list[MappingJoinPredicate] = Field(min_length=1)
+    required_filters: list[SemanticMetricFilter] = Field(default_factory=list, max_length=10)
     cardinality: Literal[
         "one_to_one", "one_to_many", "many_to_one", "many_to_many", "unknown"
     ] = "unknown"
     confidence: float = Field(default=1.0, ge=0, le=1)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SemanticDerivedMetricDimension(StrictModel):
+    """A governed grouping path for a derived business metric."""
+
+    entity_id: str = Field(min_length=1, max_length=100)
+    attribute_id: str = Field(min_length=1, max_length=100)
+    numerator_relationship_id: str = Field(min_length=1, max_length=100)
+    denominator_relationship_id: str = Field(min_length=1, max_length=100)
+    label: str = Field(min_length=1, max_length=200)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+
+
+class SemanticDerivedMetric(StrictModel):
+    """An auditable ratio assembled from two mapped measures at query time.
+
+    This is semantic metadata only.  It never contains SQL, table names,
+    physical column names, credentials, or precomputed answers.
+    """
+
+    id: str = Field(min_length=1, max_length=100)
+    label: str = Field(min_length=1, max_length=200)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    numerator_attribute_id: str = Field(min_length=1, max_length=100)
+    denominator_attribute_id: str = Field(min_length=1, max_length=100)
+    numerator_display_label: str | None = Field(default=None, max_length=200)
+    denominator_display_label: str | None = Field(default=None, max_length=200)
+    scale: float = Field(default=100, gt=0, le=10_000)
+    numerator_time_attribute_id: str | None = Field(default=None, max_length=100)
+    denominator_period_attribute_id: str | None = Field(default=None, max_length=100)
+    default_period: int | None = Field(default=None, ge=1900, le=9999)
+    dimensions: list[SemanticDerivedMetricDimension] = Field(default_factory=list, max_length=8)
+    description: str = Field(default="", max_length=2000)
+
+
+class SemanticRecordSet(StrictModel):
+    """A governed, reusable business population expressed with semantic IDs."""
+
+    id: str = Field(min_length=1, max_length=100)
+    label: str = Field(min_length=1, max_length=200)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    base_entity_id: str = Field(min_length=1, max_length=100)
+    identity_attribute_id: str = Field(min_length=1, max_length=100)
+    filters: list[SemanticMetricFilter] = Field(default_factory=list, max_length=10)
+    relationship_constraints: list[SemanticMetricRelationshipConstraint] = Field(
+        default_factory=list, max_length=8
+    )
+    description: str = Field(default="", max_length=2000)
 
 
 class SemanticMappingManifest(StrictModel):
@@ -144,6 +210,9 @@ class SemanticMappingManifest(StrictModel):
     entities: list[SemanticEntityMapping] = Field(default_factory=list)
     attributes: list[SemanticAttributeMapping] = Field(default_factory=list)
     relationships: list[SemanticRelationshipMapping] = Field(default_factory=list)
+    derived_metrics: list[SemanticDerivedMetric] = Field(default_factory=list)
+    record_sets: list[SemanticRecordSet] = Field(default_factory=list)
+    governed_queries: list["SemanticGovernedQuery"] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -287,6 +356,10 @@ class QueryExpression(StrictModel):
     upper: "QueryExpression | None" = None
     options: list["QueryExpression"] = Field(default_factory=list)
     query: "SemanticQueryIR | None" = None
+    relationship_id: str | None = Field(default=None, min_length=1, max_length=100)
+    source_binding: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+    target_binding: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+    target_entity_id: str | None = Field(default=None, min_length=1, max_length=100)
     negated: bool = False
     whens: list[dict[str, Any]] = Field(default_factory=list)
     else_expression: "QueryExpression | None" = None
@@ -304,7 +377,7 @@ class QueryExpression(StrictModel):
             "not": ["expression"], "between": ["expression", "lower", "upper"],
             "in": ["expression"], "is_null": ["expression"], "case": [],
             "cast": ["expression", "target_type"], "subquery": ["query"],
-            "exists": ["query"], "window": ["function"],
+            "exists": [], "window": ["function"],
         }[self.kind]
         missing = [name for name in required if getattr(self, name) is None]
         if missing:
@@ -317,6 +390,29 @@ class QueryExpression(StrictModel):
             raise ValueError("IN 表达式必须且只能提供值列表或子查询")
         if self.kind == "case" and not self.whens:
             raise ValueError("CASE 表达式至少需要一个分支")
+        relationship_fields = (
+            self.relationship_id,
+            self.source_binding,
+            self.target_binding,
+            self.target_entity_id,
+        )
+        if self.kind == "exists":
+            has_relationship_form = any(value is not None for value in relationship_fields)
+            if self.query is not None and has_relationship_form:
+                raise ValueError("EXISTS 不能同时使用子查询和语义关系约束")
+            if self.query is None:
+                missing_relationship = [
+                    name for name, value in zip(
+                        ("relationship_id", "source_binding", "target_binding", "target_entity_id"),
+                        relationship_fields,
+                    ) if value is None
+                ]
+                if missing_relationship:
+                    raise ValueError(f"关系 EXISTS 缺少字段：{', '.join(missing_relationship)}")
+                if self.source_binding == self.target_binding:
+                    raise ValueError("关系 EXISTS 的来源和目标绑定不能相同")
+        elif any(value is not None for value in relationship_fields):
+            raise ValueError("只有 EXISTS 表达式可以声明语义关系约束")
         return self
 
 
@@ -369,6 +465,28 @@ class SemanticQueryIR(StrictModel):
 
 
 QueryExpression.model_rebuild()
+
+
+class SemanticGovernedQuery(StrictModel):
+    """An administrator-governed semantic query, stored without SQL.
+
+    The plan and IR may only contain activated semantic IDs.  They are sealed
+    with the mapping version and always pass through the same deterministic
+    validation/compiler/executor path as model-produced plans.  ``default_year``
+    is a runtime parameter: date/year literals equal to that value are replaced
+    by an explicit year found in the user's question.
+    """
+
+    id: str = Field(min_length=1, max_length=100)
+    label: str = Field(min_length=1, max_length=300)
+    aliases: list[str] = Field(default_factory=list, max_length=30)
+    default_year: int | None = Field(default=None, ge=1900, le=9999)
+    plan: SemanticQueryPlan
+    query_ir: SemanticQueryIR
+    description: str = Field(default="", max_length=2000)
+
+
+SemanticMappingManifest.model_rebuild()
 
 
 class StructuredPlanValidationRequest(StrictModel):

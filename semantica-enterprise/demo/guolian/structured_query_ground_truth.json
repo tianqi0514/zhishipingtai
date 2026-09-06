@@ -1,0 +1,1072 @@
+{
+  "schema_version": "chuanshen.guolian-structured-ground-truth/v1",
+  "dataset": "guolian-enterprise-demo",
+  "demo_data_notice": "演示数据，不代表国联集团真实经营数据。",
+  "synthetic": true,
+  "questions": [
+    {
+      "question_id": "SQL-DEMO-001",
+      "question": "2026 年集团演示有效采购总额是多少？",
+      "metric_definition": "在 2026 年时间边界内，只保留审批已通过且订单状态为已签约、执行中或已验收的订单，按订单主键去重后汇总订单头金额。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批状态不是已通过",
+        "已取消订单",
+        "按订单明细重复累计订单头金额"
+      ],
+      "business_objects": [
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": 1700000,
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "2026 年符合现行制度统计口径的演示采购订单"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT SUM(po.amount) AS total FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved"
+        },
+        "result_mode": "scalar",
+        "value_column": "total"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-002",
+      "question": "2026 年各单位有效采购金额分别是多少？",
+      "metric_definition": "按现行制度过滤有效订单，按所属组织单位分组，并按金额从高到低汇总。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单",
+        "订单明细造成的重复金额"
+      ],
+      "business_objects": [
+        "组织单位",
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": [
+        {
+          "org_unit": "数字科技公司",
+          "amount": 600000
+        },
+        {
+          "org_unit": "集团本部",
+          "amount": 420000
+        },
+        {
+          "org_unit": "能源服务公司",
+          "amount": 380000
+        },
+        {
+          "org_unit": "金融科技公司",
+          "amount": 300000
+        }
+      ],
+      "tolerance": {
+        "amount": 0
+      },
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "org_units",
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "组织单位及其 2026 年有效采购订单"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT ou.unit_name AS org_unit, SUM(po.amount) AS amount FROM purchase_orders po JOIN org_units ou ON ou.id = po.org_unit_id WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved) GROUP BY ou.id, ou.unit_name ORDER BY amount DESC, ou.id ASC",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved"
+        },
+        "result_mode": "rows",
+        "order_sensitive": true
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-003",
+      "question": "有效采购金额最高的供应商是谁？",
+      "metric_definition": "按供应商汇总符合制度口径的订单头金额，降序排列后取第一名。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单"
+      ],
+      "business_objects": [
+        "供应商",
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": {
+        "supplier": "东方智造",
+        "amount": 600000
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "suppliers",
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "按供应商归集的有效采购订单"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT s.supplier_name AS supplier, SUM(po.amount) AS amount FROM purchase_orders po JOIN suppliers s ON s.id = po.supplier_id WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved) GROUP BY s.id, s.supplier_name ORDER BY amount DESC, s.id ASC LIMIT :limit_rows",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved",
+          "limit_rows": 1
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-004",
+      "question": "2026 年 NexusOne 有效采购金额是多少？",
+      "metric_definition": "通过采购订单明细定位 NexusOne，按订单主键去重后汇总符合制度口径的订单头金额。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单",
+        "同一订单的多条明细重复金额"
+      ],
+      "business_objects": [
+        "产品",
+        "采购订单",
+        "采购订单明细",
+        "审批记录"
+      ],
+      "expected_value": {
+        "product": "NexusOne",
+        "amount": 600000
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "products",
+            "purchase_order_items",
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "NexusOne 对应的有效采购订单及明细"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT :product_name AS product, SUM(m.amount) AS amount FROM (SELECT DISTINCT po.id, po.amount FROM purchase_orders po JOIN purchase_order_items poi ON poi.purchase_order_id = po.id JOIN products p ON p.id = poi.product_id WHERE p.product_name = :product_name AND po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)) m",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved",
+          "product_name": "NexusOne"
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-005",
+      "question": "2026 年集团采购目标完成率是多少？",
+      "metric_definition": "用 2026 年有效采购总额 1700000 元除以同期采购目标 2100000 元并乘以 100%。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "目标值为空或为零",
+        "审批未通过订单",
+        "已取消订单"
+      ],
+      "business_objects": [
+        "采购订单",
+        "审批记录",
+        "采购目标"
+      ],
+      "expected_value": {
+        "numerator": 1700000,
+        "denominator": 2100000,
+        "percent": 80.95238095
+      },
+      "tolerance": 0.01,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders",
+            "approval_records",
+            "procurement_targets"
+          ],
+          "description": "有效采购金额与 2026 年采购目标"
+        }
+      ],
+      "database_check": {
+        "sql": "WITH actual_total AS (SELECT SUM(po.amount) AS numerator FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)), target_total AS (SELECT SUM(target_amount) AS denominator FROM procurement_targets WHERE target_year = :target_year) SELECT actual_total.numerator, target_total.denominator, actual_total.numerator * 100.0 / NULLIF(target_total.denominator, 0) AS percent FROM actual_total CROSS JOIN target_total",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved",
+          "target_year": 2026
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-006",
+      "question": "各单位采购目标完成率分别是多少？",
+      "metric_definition": "按组织单位分别汇总有效采购金额，再除以该单位 2026 年采购目标并乘以 100%。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "目标值为空或为零",
+        "审批未通过订单",
+        "已取消订单"
+      ],
+      "business_objects": [
+        "组织单位",
+        "采购订单",
+        "审批记录",
+        "采购目标"
+      ],
+      "expected_value": [
+        {
+          "org_unit": "数字科技公司",
+          "actual": 600000,
+          "target": 800000,
+          "percent": 75.0
+        },
+        {
+          "org_unit": "集团本部",
+          "actual": 420000,
+          "target": 500000,
+          "percent": 84.0
+        },
+        {
+          "org_unit": "能源服务公司",
+          "actual": 380000,
+          "target": 450000,
+          "percent": 84.44444444
+        },
+        {
+          "org_unit": "金融科技公司",
+          "actual": 300000,
+          "target": 350000,
+          "percent": 85.71428571
+        }
+      ],
+      "tolerance": {
+        "actual": 0,
+        "target": 0,
+        "percent": 0.01
+      },
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "org_units",
+            "purchase_orders",
+            "approval_records",
+            "procurement_targets"
+          ],
+          "description": "各单位有效采购金额与年度采购目标"
+        }
+      ],
+      "database_check": {
+        "sql": "WITH actual_by_unit AS (SELECT po.org_unit_id, SUM(po.amount) AS actual FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved) GROUP BY po.org_unit_id) SELECT ou.unit_name AS org_unit, a.actual, t.target_amount AS target, a.actual * 100.0 / NULLIF(t.target_amount, 0) AS percent FROM actual_by_unit a JOIN org_units ou ON ou.id = a.org_unit_id JOIN procurement_targets t ON t.org_unit_id = a.org_unit_id AND t.target_year = :target_year ORDER BY a.actual DESC, ou.id ASC",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved",
+          "target_year": 2026
+        },
+        "result_mode": "rows",
+        "order_sensitive": true
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-007",
+      "question": "有多少笔订单已经执行但审批尚未完成？",
+      "metric_definition": "统计订单已进入执行状态、但审批记录仍为待补充的采购订单。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "尚未执行的草稿订单",
+        "审批已通过订单"
+      ],
+      "business_objects": [
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": {
+        "count": 1
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "已执行但审批待补充的合规异常订单"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT COUNT(DISTINCT po.id) AS count FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status = :executing AND po.executed_at IS NOT NULL AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :pending)",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "executing": "executing",
+          "pending": "pending"
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-008",
+      "question": "2026 年高风险供应商事件共有多少起？",
+      "metric_definition": "统计发生日期位于 2026 年且风险等级为高的供应商风险事件记录数。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "中风险和低风险事件",
+        "时间范围外事件"
+      ],
+      "business_objects": [
+        "供应商",
+        "风险事件"
+      ],
+      "expected_value": {
+        "count": 2
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": false,
+        "deduplication": false
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "risk_events"
+          ],
+          "description": "2026 年高风险供应商事件"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT COUNT(*) AS count FROM risk_events WHERE event_date >= :start_date AND event_date < :end_date AND risk_level = :risk_level",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "risk_level": "high"
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-009",
+      "question": "高风险供应商去重后有多少家？",
+      "metric_definition": "筛选高风险事件后，按供应商稳定标识去重计数。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "中风险和低风险事件",
+        "同一供应商的重复风险事件"
+      ],
+      "business_objects": [
+        "供应商",
+        "风险事件"
+      ],
+      "expected_value": {
+        "count_distinct": 1
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "suppliers",
+            "risk_events"
+          ],
+          "description": "高风险事件关联供应商的去重结果"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT COUNT(DISTINCT supplier_id) AS count_distinct FROM risk_events WHERE event_date >= :start_date AND event_date < :end_date AND risk_level = :risk_level",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "risk_level": "high"
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-010",
+      "question": "东方智造的高风险事件影响多少个项目？",
+      "metric_definition": "筛选东方智造的高风险事件，通过受影响产品与项目产品关系定位项目，并按项目去重计数。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "非高风险事件",
+        "重复项目"
+      ],
+      "business_objects": [
+        "供应商",
+        "风险事件",
+        "产品",
+        "项目"
+      ],
+      "expected_value": {
+        "count_distinct": 1
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "suppliers",
+            "risk_events",
+            "products",
+            "project_products",
+            "projects"
+          ],
+          "description": "东方智造高风险事件影响的项目范围"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT COUNT(DISTINCT pp.project_id) AS count_distinct FROM risk_events re JOIN suppliers s ON s.id = re.supplier_id JOIN project_products pp ON pp.product_id = re.affected_product_id AND pp.active = :active WHERE s.supplier_name = :supplier_name AND re.risk_level = :risk_level AND re.event_date >= :start_date AND re.event_date < :end_date",
+        "parameters": {
+          "active": true,
+          "supplier_name": "东方智造",
+          "risk_level": "high",
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01"
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-011",
+      "question": "按月份统计 2026 年有效采购金额。",
+      "metric_definition": "按现行制度筛选有效订单，将订单日期截取到月份后分组汇总订单头金额。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单"
+      ],
+      "business_objects": [
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": [
+        {
+          "year_num": 2026,
+          "month_num": 1,
+          "amount": 360000
+        },
+        {
+          "year_num": 2026,
+          "month_num": 2,
+          "amount": 240000
+        },
+        {
+          "year_num": 2026,
+          "month_num": 3,
+          "amount": 420000
+        },
+        {
+          "year_num": 2026,
+          "month_num": 4,
+          "amount": 380000
+        },
+        {
+          "year_num": 2026,
+          "month_num": 5,
+          "amount": 300000
+        }
+      ],
+      "tolerance": {
+        "amount": 0
+      },
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "按订单日期月份归集的有效采购订单"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT EXTRACT(YEAR FROM po.order_date) AS year_num, EXTRACT(MONTH FROM po.order_date) AS month_num, SUM(po.amount) AS amount FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved) GROUP BY EXTRACT(YEAR FROM po.order_date), EXTRACT(MONTH FROM po.order_date) ORDER BY year_num ASC, month_num ASC",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved"
+        },
+        "result_mode": "rows",
+        "order_sensitive": true
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-012",
+      "question": "每个供应商最近一笔符合制度口径的订单是什么？",
+      "metric_definition": "按供应商分区，将符合制度口径的订单按订单日期和稳定主键降序排列，取每组第一笔。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单"
+      ],
+      "business_objects": [
+        "供应商",
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": [
+        {
+          "supplier": "东方智造",
+          "order_id": "PO-DEMO-2026-002",
+          "order_date": "2026-02-15"
+        },
+        {
+          "supplier": "江南信息",
+          "order_id": "PO-DEMO-2026-003",
+          "order_date": "2026-03-11"
+        },
+        {
+          "supplier": "太湖云科",
+          "order_id": "PO-DEMO-2026-004",
+          "order_date": "2026-04-09"
+        },
+        {
+          "supplier": "华东系统集成",
+          "order_id": "PO-DEMO-2026-005",
+          "order_date": "2026-05-20"
+        }
+      ],
+      "tolerance": 0,
+      "requires": {
+        "aggregation": false,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "suppliers",
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "每个供应商按日期排序后的最近有效订单"
+        }
+      ],
+      "database_check": {
+        "sql": "WITH ranked AS (SELECT s.id AS supplier_id, s.supplier_name AS supplier, po.order_no AS order_id, po.order_date, ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY po.order_date DESC, po.id DESC) AS row_num FROM purchase_orders po JOIN suppliers s ON s.id = po.supplier_id WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)) SELECT supplier, order_id, order_date FROM ranked WHERE row_num = :first_row ORDER BY supplier_id ASC",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved",
+          "first_row": 1
+        },
+        "result_mode": "rows",
+        "order_sensitive": true
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-013",
+      "question": "哪些供应商没有符合制度口径的采购订单？",
+      "metric_definition": "以供应商全集为基准，反连接符合制度口径的订单，返回没有匹配订单的供应商。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "存在至少一笔有效订单的供应商"
+      ],
+      "business_objects": [
+        "供应商",
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": [
+        {
+          "supplier": "新城数据服务"
+        }
+      ],
+      "tolerance": 0,
+      "requires": {
+        "aggregation": false,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "suppliers",
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "供应商全集与有效订单的反连接结果"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT s.supplier_name AS supplier FROM suppliers s WHERE NOT EXISTS (SELECT 1 FROM purchase_orders po WHERE po.supplier_id = s.id AND po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)) ORDER BY s.id ASC",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved"
+        },
+        "result_mode": "rows",
+        "order_sensitive": true
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-014",
+      "question": "哪些项目同时使用 NexusOne 和智慧流程引擎？",
+      "metric_definition": "关联项目、项目产品关系和产品，按项目分组后要求两种目标产品均出现。",
+      "time_range": "截至 2026-09-01 的当前演示数据",
+      "exclusions": [
+        "只使用其中一种产品的项目",
+        "已失效项目产品关系"
+      ],
+      "business_objects": [
+        "项目",
+        "产品",
+        "项目产品关系"
+      ],
+      "expected_value": [
+        {
+          "project": "智慧流程中枢项目"
+        }
+      ],
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "projects",
+            "products",
+            "project_products"
+          ],
+          "description": "同时关联 NexusOne 和智慧流程引擎的项目"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT pr.project_name AS project FROM projects pr JOIN project_products pp ON pp.project_id = pr.id AND pp.active = :active JOIN products p ON p.id = pp.product_id WHERE p.product_name IN (:product_a, :product_b) GROUP BY pr.id, pr.project_name HAVING COUNT(DISTINCT p.product_name) = :required_count ORDER BY pr.id ASC",
+        "parameters": {
+          "active": true,
+          "product_a": "NexusOne",
+          "product_b": "智慧流程引擎",
+          "required_count": 2
+        },
+        "result_mode": "rows",
+        "order_sensitive": true
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-015",
+      "question": "只排除已取消订单、暂不应用审批条件时，2026 年订单金额是多少？",
+      "metric_definition": "仅排除已取消订单并汇总 2026 年订单头金额；该值不是制度定义的有效采购金额，因为包含审批待补充的 90000 元订单。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "已取消订单"
+      ],
+      "business_objects": [
+        "采购订单"
+      ],
+      "expected_value": 1790000,
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": false,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders"
+          ],
+          "description": "只排除取消状态、尚未应用审批口径的订单金额"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT SUM(amount) AS total FROM purchase_orders WHERE order_date >= :start_date AND order_date < :end_date AND status <> :cancelled",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "cancelled": "cancelled"
+        },
+        "result_mode": "scalar",
+        "value_column": "total"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-016",
+      "question": "符合制度口径的订单有多少笔，涉及多少家供应商？",
+      "metric_definition": "筛选有效订单后，同时计算订单主键数量和供应商稳定标识去重数量。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单"
+      ],
+      "business_objects": [
+        "采购订单",
+        "审批记录",
+        "供应商"
+      ],
+      "expected_value": {
+        "order_count": 5,
+        "supplier_count_distinct": 4
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders",
+            "approval_records",
+            "suppliers"
+          ],
+          "description": "有效订单数和去重供应商数"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT COUNT(DISTINCT po.id) AS order_count, COUNT(DISTINCT po.supplier_id) AS supplier_count_distinct FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved"
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-017",
+      "question": "有效采购金额与有效订单数量分别是多少？",
+      "metric_definition": "对同一组符合制度口径的订单分别计算订单头金额总和与订单主键数量。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单"
+      ],
+      "business_objects": [
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": {
+        "amount_sum": 1700000,
+        "order_count": 5
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "同一有效订单集合的金额总和与记录数量"
+        }
+      ],
+      "database_check": {
+        "sql": "SELECT SUM(po.amount) AS amount_sum, COUNT(DISTINCT po.id) AS order_count FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved"
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-018",
+      "question": "关联订单明细后，如何避免重复累计订单金额？",
+      "metric_definition": "订单与明细关联后，先按订单主键聚合或去重订单头，再汇总一次订单金额。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单",
+        "直接对连接后的每条明细重复求和"
+      ],
+      "business_objects": [
+        "采购订单",
+        "采购订单明细",
+        "审批记录"
+      ],
+      "expected_value": {
+        "deduplicated_order_total": 1700000
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders",
+            "purchase_order_items",
+            "approval_records"
+          ],
+          "description": "按订单主键去重后的订单头金额"
+        }
+      ],
+      "database_check": {
+        "sql": "WITH distinct_orders AS (SELECT DISTINCT po.id, po.amount FROM purchase_orders po JOIN purchase_order_items poi ON poi.purchase_order_id = po.id WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)) SELECT SUM(amount) AS deduplicated_order_total FROM distinct_orders",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved"
+        },
+        "result_mode": "object"
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-019",
+      "question": "按有效采购金额列出前五名供应商，包括没有有效订单的供应商。",
+      "metric_definition": "从供应商全集左连接有效采购订单，无有效订单金额按零处理，按金额降序排名后取前五名。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单"
+      ],
+      "business_objects": [
+        "供应商",
+        "采购订单",
+        "审批记录"
+      ],
+      "expected_value": [
+        {
+          "ranking": 1,
+          "supplier": "东方智造",
+          "amount": 600000
+        },
+        {
+          "ranking": 2,
+          "supplier": "江南信息",
+          "amount": 420000
+        },
+        {
+          "ranking": 3,
+          "supplier": "太湖云科",
+          "amount": 380000
+        },
+        {
+          "ranking": 4,
+          "supplier": "华东系统集成",
+          "amount": 300000
+        },
+        {
+          "ranking": 5,
+          "supplier": "新城数据服务",
+          "amount": 0
+        }
+      ],
+      "tolerance": {
+        "ranking": 0,
+        "amount": 0
+      },
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "suppliers",
+            "purchase_orders",
+            "approval_records"
+          ],
+          "description": "供应商全集与有效采购金额排名"
+        }
+      ],
+      "database_check": {
+        "sql": "WITH valid_amounts AS (SELECT po.supplier_id, SUM(po.amount) AS amount FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved) GROUP BY po.supplier_id), ranked AS (SELECT s.id AS supplier_id, s.supplier_name AS supplier, COALESCE(v.amount, 0) AS amount, ROW_NUMBER() OVER (ORDER BY COALESCE(v.amount, 0) DESC, s.id ASC) AS ranking FROM suppliers s LEFT JOIN valid_amounts v ON v.supplier_id = s.id) SELECT ranking, supplier, amount FROM ranked ORDER BY ranking ASC LIMIT :limit_rows",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved",
+          "limit_rows": 5
+        },
+        "result_mode": "rows",
+        "order_sensitive": true
+      }
+    },
+    {
+      "question_id": "SQL-DEMO-020",
+      "question": "集团目标完成率的分子和分母分别是什么？",
+      "metric_definition": "目标完成率的分子是 2026 年有效采购金额，分母是 2026 年采购目标。",
+      "time_range": "2026-01-01（含）至 2027-01-01（不含）",
+      "exclusions": [
+        "审批未通过订单",
+        "已取消订单",
+        "目标值为空或为零"
+      ],
+      "business_objects": [
+        "采购订单",
+        "审批记录",
+        "采购目标"
+      ],
+      "expected_value": {
+        "numerator_label": "2026年有效采购金额",
+        "numerator": 1700000,
+        "denominator_label": "2026年采购目标",
+        "denominator": 2100000
+      },
+      "tolerance": 0,
+      "requires": {
+        "aggregation": true,
+        "join": true,
+        "deduplication": true
+      },
+      "expected_citations": [
+        {
+          "source": "国联集团经营数据验收库（演示）",
+          "objects": [
+            "purchase_orders",
+            "approval_records",
+            "procurement_targets"
+          ],
+          "description": "采购目标完成率的分子和分母口径"
+        }
+      ],
+      "database_check": {
+        "sql": "WITH actual_total AS (SELECT SUM(po.amount) AS numerator FROM purchase_orders po WHERE po.order_date >= :start_date AND po.order_date < :end_date AND po.status IN (:status_signed, :status_executing, :status_accepted) AND EXISTS (SELECT 1 FROM approval_records ar WHERE ar.purchase_order_id = po.id AND ar.decision = :approved)), target_total AS (SELECT SUM(target_amount) AS denominator FROM procurement_targets WHERE target_year = :target_year) SELECT :numerator_label AS numerator_label, actual_total.numerator, :denominator_label AS denominator_label, target_total.denominator FROM actual_total CROSS JOIN target_total",
+        "parameters": {
+          "start_date": "2026-01-01",
+          "end_date": "2027-01-01",
+          "status_signed": "signed",
+          "status_executing": "executing",
+          "status_accepted": "accepted",
+          "approved": "approved",
+          "target_year": 2026,
+          "numerator_label": "2026年有效采购金额",
+          "denominator_label": "2026年采购目标"
+        },
+        "result_mode": "object"
+      }
+    }
+  ]
+}

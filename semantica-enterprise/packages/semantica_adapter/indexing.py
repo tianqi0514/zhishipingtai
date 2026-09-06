@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 from .embedding import SemanticEmbedder
+from .resilience import classify_external_failure, retry_transient_call
 
 
 def search_point_id(chunk_id: str) -> str:
@@ -69,9 +72,36 @@ def summarize_bulk_errors(payload: dict[str, Any], *, limit: int = 3) -> str:
 
 
 class SearchIndexer:
-    def __init__(self, *, opensearch_url: str, qdrant_url: str):
+    def __init__(
+        self,
+        *,
+        opensearch_url: str,
+        qdrant_url: str,
+        qdrant_timeout_seconds: float = 60,
+        qdrant_max_attempts: int = 3,
+        retry_sleeper: Callable[[float], Any] = time.sleep,
+    ):
         self.opensearch_url = opensearch_url.rstrip("/")
         self.qdrant_url = qdrant_url
+        self.qdrant_timeout_seconds = max(1.0, min(float(qdrant_timeout_seconds), 300.0))
+        self.qdrant_max_attempts = max(1, min(int(qdrant_max_attempts), 5))
+        self.retry_sleeper = retry_sleeper
+
+    def _qdrant_call(self, operation_name: str, operation: Callable[[], Any]) -> Any:
+        """Run an idempotent Qdrant operation with bounded transient retries."""
+
+        try:
+            return retry_transient_call(
+                operation,
+                max_attempts=self.qdrant_max_attempts,
+                sleeper=self.retry_sleeper,
+            )
+        except Exception as exc:
+            failure = classify_external_failure(exc)
+            raise RuntimeError(
+                f"Qdrant {operation_name}失败（{failure.category}）：{failure.error_type}: "
+                f"{failure.message}"
+            ) from exc
 
     def build_release(
         self,
@@ -113,10 +143,25 @@ class SearchIndexer:
                     raise RuntimeError(f"OpenSearch 批量写入存在失败项：{summarize_bulk_errors(bulk_payload)}")
 
         store = QdrantStore(url=self.qdrant_url)
-        store.connect()
-        if store.client.collection_exists(collection_name):
-            store.client.delete_collection(collection_name)
-        store.create_collection(collection_name, vector_size=embedder.dimension, distance="Cosine")
+        # Semantica intentionally owns the Qdrant adapter.  The platform only
+        # supplies an explicit request timeout because qdrant-client's default
+        # is too short while a CPU-bound embedding job is publishing in
+        # parallel on a small demonstration host.
+        store.connect(timeout=self.qdrant_timeout_seconds)
+
+        def prepare_collection() -> Any:
+            # The release-specific collection is safe to recreate.  If a
+            # create request reached Qdrant but its response timed out, the
+            # retry first removes that incomplete collection.
+            if store.client.collection_exists(collection_name):
+                store.client.delete_collection(collection_name)
+            return store.create_collection(
+                collection_name,
+                vector_size=embedder.dimension,
+                distance="Cosine",
+            )
+
+        self._qdrant_call("准备发布集合", prepare_collection)
         payloads = {
             item["id"]: {
                 "tenant_id": tenant_id,
@@ -145,16 +190,26 @@ class SearchIndexer:
             for item in chunks
         }
         reused_ids: set[str] = set()
-        if previous_collection and store.client.collection_exists(previous_collection) and chunks:
+        previous_exists = bool(
+            previous_collection
+            and self._qdrant_call(
+                "检查上一版本集合",
+                lambda: store.client.collection_exists(previous_collection),
+            )
+        )
+        if previous_collection and previous_exists and chunks:
             from qdrant_client.models import PointStruct
 
             requested = [item["id"] for item in chunks]
             for offset in range(0, len(requested), 256):
-                records = store.client.retrieve(
-                    collection_name=previous_collection,
-                    ids=requested[offset : offset + 256],
-                    with_vectors=True,
-                    with_payload=False,
+                records = self._qdrant_call(
+                    "读取上一版本向量",
+                    lambda offset=offset: store.client.retrieve(
+                        collection_name=previous_collection,
+                        ids=requested[offset : offset + 256],
+                        with_vectors=True,
+                        with_payload=False,
+                    ),
                 )
                 points = []
                 for record in records:
@@ -164,16 +219,26 @@ class SearchIndexer:
                     reused_ids.add(point_id)
                     points.append(PointStruct(id=record.id, vector=record.vector, payload=payloads[point_id]))
                 if points:
-                    store.client.upsert(collection_name=collection_name, points=points, wait=True)
+                    self._qdrant_call(
+                        "复用上一版本向量",
+                        lambda points=points: store.client.upsert(
+                            collection_name=collection_name,
+                            points=points,
+                            wait=True,
+                        ),
+                    )
         changed_chunks = [item for item in chunks if item["id"] not in reused_ids]
         vectors = embedder.embed_batch([str(item["text"]) for item in changed_chunks]) if changed_chunks else []
         if chunks:
             if changed_chunks:
-                store.insert_vectors(
-                    vectors=list(vectors),
-                    ids=[item["id"] for item in changed_chunks],
-                    payloads=[payloads[item["id"]] for item in changed_chunks],
-                    wait=True,
+                self._qdrant_call(
+                    "写入当前版本向量",
+                    lambda: store.insert_vectors(
+                        vectors=list(vectors),
+                        ids=[item["id"] for item in changed_chunks],
+                        payloads=[payloads[item["id"]] for item in changed_chunks],
+                        wait=True,
+                    ),
                 )
 
         with httpx.Client(timeout=30) as client:

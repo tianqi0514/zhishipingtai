@@ -9,22 +9,34 @@
 推荐从仓库根目录使用部署脚本，它会生成本地 Secret、从 Semantica 源码构建 CPU 基础镜像、启动服务并等待健康检查：
 
 ```bash
-cd ..
-export BOOTSTRAP_ADMIN_PASSWORD='your-strong-admin-password'
-export KIMI_API_KEY='your-kimi-api-key'
+export BOOTSTRAP_ADMIN_PASSWORD='REPLACE_WITH_URL_SAFE_ADMIN_SECRET'
+# 可选：export KIMI_API_KEY='REPLACE_WITH_KIMI_API_KEY'
 ./scripts/deploy.sh
 ```
 
-以下为已经准备好基础镜像和本地 Secret 时的手工启动方式：
+以下为生产手工启动方式。不要在服务器上只运行基础 Compose，也绝不能用模板覆盖已有 `.env`（否则可能导致既有密文无法解密或持久卷凭据失配）：
 
 ```bash
-cp .env.example .env
+test -f .env || cp .env.example .env
+chmod 600 .env
+# 首次部署必须先编辑 .env，替换 APP_SECRET_KEY、BOOTSTRAP_ADMIN_PASSWORD、
+# MINIO_ROOT_USER、MINIO_ROOT_PASSWORD、POSTGRES_PASSWORD、RABBITMQ_PASSWORD；
+# 已有部署必须保留初始化当前数据卷时使用的原值。
+umask 077
 mkdir -p deploy/secrets
-printf '%s' 'your-kimi-api-key' > deploy/secrets/kimi_api_key
-openssl rand -hex 32 > deploy/secrets/agent_service_secret
-chmod 600 deploy/secrets/*
-docker compose up -d --build
-docker compose ps
+# 仅首次初始化文件；已有环境绝不截断 Key 或轮换内部 Agent Secret
+if [[ ! -e deploy/secrets/kimi_api_key ]]; then
+  printf '%s' "${KIMI_API_KEY:-}" > deploy/secrets/kimi_api_key
+fi
+if [[ ! -s deploy/secrets/agent_service_secret ]]; then
+  openssl rand -hex 32 > deploy/secrets/agent_service_secret
+fi
+chmod 700 deploy/secrets
+chmod 444 deploy/secrets/*
+scripts/deploy_server.sh config
+scripts/deploy_server.sh build
+scripts/deploy_server.sh up
+scripts/deploy_server.sh check
 ```
 
 管理员密码由首次部署时的 `BOOTSTRAP_ADMIN_PASSWORD` 决定。正式环境必须使用强应用密钥、管理员密码和中间件密码；模型密钥仅通过 Secret 文件或加密数据库保存，浏览器不会获得明文。
@@ -32,7 +44,7 @@ docker compose ps
 ## 主要能力
 
 - 文档：上传、版本、解析百分比、元素、Chunk、治理画像、增量加工与历史溯源；上传或重新加工时可选择“仅检索（全文+向量）”“仅图谱”或“检索+图谱”。
-- 多模态：可版本化媒体策略；固定间隔/FPS/场景/智能抽帧；本地 SenseVoice ASR、Tesseract OCR、Kimi K3 或本地兼容 Vision；场景/关键帧/转写时间线、权限化播放器、缓存重处理和可跳转时间引用。
+- 多模态：可版本化媒体策略；固定间隔/FPS/场景/智能抽帧；本地 SenseVoice ASR、Tesseract OCR、统一模型配置中的云端或本地兼容 Vision；场景/关键帧/转写时间线、权限化播放器、缓存重处理和可跳转时间引用。
 - 人工治理：在 Semantica 自动画像、解析元素、Chunk、实体与事实之上叠加可回滚约束；治理工作台按“待处理—人工调整—发布记录”组织业务闭环，支持主动查找、批次归并、真实进度、失败重试和影响预览；原始自动结果不被覆盖。
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
 - 结构化数据：MySQL/PostgreSQL Schema 发现与版本差异、实时数据/同步快照预览、服务端分页筛选和脱敏、本体映射版本、严格 Semantic Query Plan/Query IR、确定性参数化 SQL、只读实时查询与结构化数据引用。
@@ -62,7 +74,8 @@ API 文档：<http://localhost:8080/docs>；RabbitMQ：<http://localhost:15672>�
 ```bash
 # 单元与 Semantica 合约测试（镜像不内置测试文件，因此挂载工作区）
 docker run --rm --network semantica-enterprise_default \
-  -v "$PWD:/app" -w /app semantica-enterprise:0.10.0 python -m pytest -q
+  -v "$(cd .. && pwd):/workspace" -w /workspace/semantica-enterprise \
+  semantica-enterprise:0.10.0 python -m pytest -q
 
 # API 与发布链路
 bash tests/e2e/api_crud_smoke.sh
@@ -75,7 +88,7 @@ docker run --rm -v "$PWD:/workspace" -w /workspace \
   semantica-enterprise:0.10.0 python tests/integration/multimodal_live.py
 bash tests/integration/run_source_matrix.sh
 
-# 完整媒体专项：先生成真实 fixture，再验证本地 ASR、Kimi Vision、
+# 完整媒体专项：先生成真实 fixture，再验证本地 ASR、当前路由的 Vision 模型、
 # 时间线、Range、检索引用、缓存和 MinIO 视频数据源
 python tests/fixtures/generate_media_acceptance.py
 docker compose run --rm --no-deps -T \
@@ -122,6 +135,11 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 
 ## 文档
 
+- [国联集团完整平台演示脚本](docs/demo/GUOLIAN_FULL_PLATFORM_DEMO_SCRIPT.md)
+- [国联集团演示预检指南](docs/demo/DEMO_PREFLIGHT_GUIDE.md)
+- [国联集团演示测试报告](docs/demo/DEMO_TEST_REPORT.md)
+- [国联集团演示浏览器测试报告](docs/demo/DEMO_BROWSER_TEST_REPORT.md)
+- [国联集团演示已知限制](docs/demo/DEMO_KNOWN_LIMITATIONS.md)
 - [业务旅程 UI/UX 设计与实现](docs/BUSINESS_JOURNEY_UI_UX.md)
 - [知识治理信息架构](docs/KNOWLEDGE_GOVERNANCE_INFORMATION_ARCHITECTURE.md)
 - [前端导航与状态模型](docs/FRONTEND_NAVIGATION_STATE.md)

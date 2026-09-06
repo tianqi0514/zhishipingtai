@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:8080"
     opensearch_url: str = "http://localhost:9200"
     qdrant_url: str = "http://localhost:6333"
+    qdrant_search_timeout_seconds: float = 30.0
+    qdrant_search_max_attempts: int = 2
     falkordb_host: str = "localhost"
     falkordb_port: int = 6379
     source_scheduler_seconds: int = 60
@@ -56,6 +58,8 @@ class Settings(BaseSettings):
     source_private_host_allowlist: str = "minio,postgres,opensearch,rabbitmq,source-fixture,webdav-fixture,ftp-fixture,sftp-fixture"
     knowledge_auto_process: bool = True
     agent_runtime_url: str = "http://agent-runtime:8090"
+    mcp_public_url: str = ""
+    agent_public_url: str = ""
     agent_service_secret_file: Path = Path("/run/secrets/agent_service_secret")
     agent_access_token_minutes: int = 5
     agent_request_timeout_seconds: int = 600
@@ -65,13 +69,27 @@ class Settings(BaseSettings):
         if self.environment == "production":
             weak = {
                 "dev-only-change-this-secret-at-least-32-bytes",
+                "local-semantic-enterprise-2026-change-me",
                 "Admin@123456",
+                "replace-with-a-long-random-secret",
+                "replace-with-a-strong-password",
+                "semantica",
                 "semantica-dev-secret",
             }
+            secret_values = (
+                self.app_secret_key,
+                self.bootstrap_admin_password,
+                self.object_store_secret_key,
+            )
+            weak_url_credentials = (
+                "://semantica:semantica@",
+                "://guest:guest@",
+                "replace-with-a-strong-password",
+            )
             if (
-                self.app_secret_key in weak
-                or self.bootstrap_admin_password in weak
-                or self.object_store_secret_key in weak
+                any(value in weak or len(value) < 12 for value in secret_values)
+                or any(marker in self.database_url for marker in weak_url_credentials)
+                or any(marker in self.celery_broker_url for marker in weak_url_credentials)
             ):
                 raise ValueError("Production secrets must be supplied through environment variables")
         return self

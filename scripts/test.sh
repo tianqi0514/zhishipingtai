@@ -15,8 +15,7 @@ printf '[test] 执行平台 Python 测试\n'
 docker run --rm \
   --network semantica-enterprise_default \
   --env DATABASE_URL=sqlite+pysqlite:///:memory: \
-  --volume "${APP_DIR}:/app" \
-  --workdir /app \
+  --volume "${REPO_ROOT}:/workspace" \
+  --workdir /workspace/semantica-enterprise \
   semantica-enterprise:0.10.0 \
   python -m pytest -q
-

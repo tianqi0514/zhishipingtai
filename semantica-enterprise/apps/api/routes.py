@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from apps.api.deps import (
+    get_effective_space_permission,
     get_current_user,
     get_user_permissions,
     has_space_permission,
@@ -42,6 +43,7 @@ from apps.api.schemas import (
     CurationCaseUpdate,
     CurationDecisionCreate,
     CurationProfileUpdate,
+    DuplicateDocumentResolution,
     DocumentUpdate,
     ExtractionPolicyCreate,
     ExtractionPolicyUpdate,
@@ -171,7 +173,9 @@ from packages.platform.curation import (
     effective_fact,
     effective_profile,
     rollback_decision,
+    scan_document_duplicate_cases,
     stable_fingerprint,
+    validate_fact_source_chunk,
 )
 from packages.platform.curation_workbench import (
     business_label,
@@ -445,6 +449,15 @@ def dashboard(
             .limit(6)
         )
     ) if space_ids else []
+    current_version_ids = set(
+        db.scalars(
+            select(Document.current_version_id).where(
+                Document.space_id.in_(space_ids),
+                Document.current_version_id.is_not(None),
+                _active(Document),
+            )
+        )
+    ) if space_ids else set()
     visible_jobs = [
         row for row in db.scalars(
             select(Job)
@@ -492,6 +505,10 @@ def dashboard(
     successful_source_statuses = {"success", "succeeded", "fetched", "unchanged"}
     successful_sources = sum(row.last_sync_status in successful_source_statuses for row in sources)
     failed_sources = sum(row.last_sync_status == "failed" for row in sources)
+    unresolved_failed_jobs = _unresolved_failed_jobs(
+        visible_jobs,
+        current_version_ids=current_version_ids,
+    )
     return {
         "spaces": len(spaces),
         "documents": count(Document, Document.space_id.in_(space_ids), _active(Document)) if space_ids else 0,
@@ -502,10 +519,7 @@ def dashboard(
             sum(row.status in {"queued", "running"} for row in visible_jobs)
             if space_id else count(Job, Job.tenant_id == user.tenant_id, Job.status.in_(["queued", "running"]), _active(Job))
         ),
-        "failed_jobs": (
-            sum(row.status == "failed" for row in visible_jobs)
-            if space_id else count(Job, Job.tenant_id == user.tenant_id, Job.status == "failed", _active(Job))
-        ),
+        "failed_jobs": len(unresolved_failed_jobs),
         "quality_score": round(sum(row.quality_score for row in profiles) / len(profiles), 1) if profiles else None,
         "quality_issues": sum(len(row.quality_issues or []) for row in profiles),
         "source_status": {
@@ -841,10 +855,23 @@ def delete_policy(row_id: str, admin: User = Depends(require_admin), db: Session
 
 # ---- Spaces and ACL ------------------------------------------------------------------
 
+def _serialize_space_for_user(db: Session, row: KnowledgeSpace, user: User) -> dict[str, Any]:
+    data = serialize_row(row)
+    data["effective_permission"] = get_effective_space_permission(db, user, row.id)
+    return data
+
+
 @router.get("/spaces")
 def list_spaces(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.scalars(select(KnowledgeSpace).where(KnowledgeSpace.tenant_id == user.tenant_id, _active(KnowledgeSpace)).order_by(KnowledgeSpace.name))
-    return [serialize_row(x) for x in rows if has_space_permission(db, user, x.id, "read")]
+    return [_serialize_space_for_user(db, x, user) for x in rows if has_space_permission(db, user, x.id, "read")]
+
+
+@router.get("/spaces/{row_id}")
+def get_space(row_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = _must_tenant(db, KnowledgeSpace, row_id, user.tenant_id, "知识空间")
+    require_space_permission(db, user, row.id, "read")
+    return _serialize_space_for_user(db, row, user)
 
 
 @router.post("/spaces")
@@ -856,7 +883,7 @@ def create_space(payload: SpaceCreate, user: User = Depends(get_current_user), d
     _must_tenant(db, User, values["owner_id"], user.tenant_id, "空间负责人")
     row = KnowledgeSpace(tenant_id=user.tenant_id, **values); db.add(row); db.flush()
     db.add(SpaceGrant(tenant_id=user.tenant_id, space_id=row.id, subject_type="user", subject_id=row.owner_id, permission="manage", effect="allow"))
-    audit(db, user.tenant_id, user.id, "space.create", "space", row.id); _commit(db); return serialize_row(row)
+    audit(db, user.tenant_id, user.id, "space.create", "space", row.id); _commit(db); return _serialize_space_for_user(db, row, user)
 
 
 @router.put("/spaces/{row_id}")
@@ -868,7 +895,7 @@ def update_space(row_id: str, payload: SpaceUpdate, user: User = Depends(get_cur
     if values.get("media_policy_id"):
         _must_tenant(db, MediaParsingPolicy, values["media_policy_id"], user.tenant_id, "媒体解析策略")
     apply_patch(row, values, {"code", "name", "description", "owner_id", "media_policy_id", "enabled"})
-    audit(db, user.tenant_id, user.id, "space.update", "space", row.id); _commit(db); return serialize_row(row)
+    audit(db, user.tenant_id, user.id, "space.update", "space", row.id); _commit(db); return _serialize_space_for_user(db, row, user)
 
 
 @router.delete("/spaces/{row_id}")
@@ -1505,14 +1532,19 @@ def sync_source(
 def list_jobs(
     status: str | None = None,
     space_id: str | None = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("job.read")),
     db: Session = Depends(get_db),
 ):
     if space_id:
         require_space_permission(db, user, space_id, "read")
     query = select(Job).where(Job.tenant_id == user.tenant_id).order_by(Job.created_at.desc()).limit(500)
     if status: query = query.where(Job.status == status)
-    rows = [row for row in db.scalars(query) if not space_id or space_id in _job_space_ids(db, row)]
+    rows = [
+        row
+        for row in db.scalars(query)
+        if _can_read_job(db, user, row)
+        and (not space_id or space_id in _job_space_ids(db, row))
+    ]
     return [_serialize_job(db, row) for row in rows[:200]]
 
 
@@ -1538,15 +1570,94 @@ def _job_space_ids(db: Session, row: Job) -> set[str]:
     return resolved
 
 
+def _can_read_job(db: Session, user: User, row: Job) -> bool:
+    """Keep task metadata inside the same knowledge-space boundary as its target.
+
+    A platform administrator can inspect tenant-wide operations.  Other users
+    must have read access to every space affected by the task.  Unscoped tasks
+    are deliberately admin-only because their input and error details can
+    otherwise disclose resources that cannot be attributed safely.
+    """
+
+    if user.is_admin:
+        return True
+    space_ids = _job_space_ids(db, row)
+    return bool(space_ids) and all(
+        has_space_permission(db, user, current_space_id, "read")
+        for current_space_id in space_ids
+    )
+
+
+def _job_durable_target(row: Job) -> tuple[str, str]:
+    """Identify retries of the same business operation without hiding history."""
+
+    payload = row.input or {}
+    target = next(
+        (
+            str(payload[key])
+            for key in (
+                "version_id", "source_id", "inference_run_id",
+                "curation_batch_id", "mapping_id", "space_id",
+            )
+            if payload.get(key)
+        ),
+        str(row.id),
+    )
+    return str(row.job_type), target
+
+
+def _unresolved_failed_jobs(
+    rows: list[Job],
+    *,
+    current_version_ids: set[str] | None = None,
+) -> list[Job]:
+    """Return only failures not superseded by a newer successful retry.
+
+    Job history is append-only and remains available in the task centre.  The
+    dashboard, however, should describe actions that still need attention,
+    rather than counting every failed attempt that has since succeeded.
+    Callers pass newest-first rows, matching the jobs API/dashboard queries.
+    """
+
+    latest: dict[tuple[str, str], Job] = {}
+    for row in rows:
+        latest.setdefault(_job_durable_target(row), row)
+    unresolved: list[Job] = []
+    for row in latest.values():
+        if row.status not in {"failed", "partial_failed"}:
+            continue
+        version_id = str((row.input or {}).get("version_id") or "")
+        if (
+            current_version_ids is not None
+            and version_id
+            and version_id not in current_version_ids
+        ):
+            continue
+        unresolved.append(row)
+    return unresolved
+
+
 def _serialize_job(db: Session, row: Job) -> dict[str, Any]:
     data = serialize_row(row)
     payload = row.input or {}
     if row.job_type == "parse_document" and payload.get("version_id"):
         target = db.get(DocumentVersion, payload["version_id"])
         data["target_name"] = target.filename if target else "文档版本已删除"
+        document = db.get(Document, target.document_id) if target else None
+        data["target_current"] = bool(
+            document
+            and document.deleted_at is None
+            and document.current_version_id == target.id
+        )
     elif row.job_type == "process_knowledge" and payload.get("version_id"):
         target = db.get(DocumentVersion, payload["version_id"])
         data["target_name"] = target.filename if target else "文档版本已删除"
+        document = db.get(Document, target.document_id) if target else None
+        data["target_current"] = bool(
+            document
+            and document.deleted_at is None
+            and document.current_version_id == target.id
+        )
     elif row.job_type == "sync_source" and payload.get("source_id"):
         target = db.get(SourceConnector, payload["source_id"])
         data["target_name"] = target.name if target else "数据源已删除"
@@ -1556,17 +1667,27 @@ def _serialize_job(db: Session, row: Job) -> dict[str, Any]:
 
 
 @router.get("/jobs/{row_id}")
-def get_job(row_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_job(
+    row_id: str,
+    user: User = Depends(require_permission("job.read")),
+    db: Session = Depends(get_db),
+):
     row = _must(db, Job, row_id, "任务")
-    if row.tenant_id != user.tenant_id: raise HTTPException(404, "任务不存在")
+    if row.tenant_id != user.tenant_id or not _can_read_job(db, user, row):
+        raise HTTPException(404, "任务不存在")
     data = _serialize_job(db, row); data["steps"] = [serialize_row(x) for x in db.scalars(select(JobStep).where(JobStep.job_id == row.id).order_by(JobStep.sequence))]
     return data
 
 
 @router.post("/jobs/{row_id}/retry")
-def retry_job(row_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def retry_job(
+    row_id: str,
+    user: User = Depends(require_permission("job.read")),
+    db: Session = Depends(get_db),
+):
     old = _must(db, Job, row_id, "任务")
-    if old.tenant_id != user.tenant_id: raise HTTPException(404, "任务不存在")
+    if old.tenant_id != user.tenant_id or not _can_read_job(db, user, old):
+        raise HTTPException(404, "任务不存在")
     if old.status not in {"failed", "partial_failed"}: raise HTTPException(409, "只有失败或部分失败任务可重试")
     job_input = dict(old.input or {})
     if old.job_type in {"parse_document", "process_knowledge"} and job_input.get("version_id"):
@@ -3140,6 +3261,33 @@ def _curation_case_payload(db: Session, row: CurationCase, *, detail: bool = Fal
     payload["effective"] = {}
     payload["comparison"] = []
     payload["recommended_actions"] = []
+    if row.case_type == "duplicate_document":
+        pair = []
+        for side in ("left", "right"):
+            reference = evidence.get(side) or {}
+            candidate = db.get(Document, reference.get("document_id")) if reference.get("document_id") else None
+            version_row = db.get(DocumentVersion, reference.get("version_id")) if reference.get("version_id") else None
+            pair.append({
+                "side": side,
+                "document_id": reference.get("document_id"),
+                "version_id": reference.get("version_id"),
+                "title": candidate.title if candidate else reference.get("title") or "文档已不可用",
+                "filename": version_row.filename if version_row else reference.get("filename"),
+                "source_id": candidate.source_id if candidate else reference.get("source_id"),
+                "current": bool(candidate and version_row and candidate.current_version_id == version_row.id),
+            })
+        payload["duplicate_documents"] = pair
+        if pair:
+            payload["deep_link"] = {
+                "view": "documents",
+                "document_id": pair[0].get("document_id"),
+                "version_id": pair[0].get("version_id"),
+                "panel": "chunks",
+                "target_id": None,
+            }
+        payload["recommended_actions"] = [
+            "比较文件名、来源和当前版本；内容确属重复时选择一个主文档，另一个来源仍保留历史追溯。"
+        ]
     if row.target_type == "document_profile" and version:
         try:
             profile = effective_profile(db, version)
@@ -3437,10 +3585,163 @@ def get_curation_case(case_id: str, user: User = Depends(get_current_user), db: 
     return _curation_case_payload(db, row, detail=True)
 
 
+@router.post("/curation/duplicates/scan")
+def scan_curation_duplicates(
+    space_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_space_permission(db, user, space_id, "write")
+    result = scan_document_duplicate_cases(db, tenant_id=user.tenant_id, space_id=space_id)
+    audit(db, user.tenant_id, user.id, "curation.duplicates.scan", "knowledge_space", space_id, result)
+    db.commit()
+    return result
+
+
+@router.post("/curation/duplicates/{case_id}/resolve")
+def resolve_curation_duplicate(
+    case_id: str,
+    payload: DuplicateDocumentResolution,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    case = _must_tenant(db, CurationCase, case_id, user.tenant_id, "重复文档待办")
+    require_space_permission(db, user, case.space_id, "write")
+    if case.case_type != "duplicate_document" or case.target_type != "document_pair":
+        raise HTTPException(409, "该待办不是重复文档问题")
+    if case.status != "open":
+        raise HTTPException(409, "该重复文档问题已经处理")
+    if not payload.reason_note.strip():
+        raise HTTPException(422, "请填写处理说明")
+    evidence = dict(case.evidence or {})
+    left_ref, right_ref = evidence.get("left") or {}, evidence.get("right") or {}
+    left = db.get(Document, left_ref.get("document_id")) if left_ref.get("document_id") else None
+    right = db.get(Document, right_ref.get("document_id")) if right_ref.get("document_id") else None
+    if (
+        left is None or right is None
+        or left.tenant_id != user.tenant_id or right.tenant_id != user.tenant_id
+        or left.space_id != case.space_id or right.space_id != case.space_id
+        or left.deleted_at is not None or right.deleted_at is not None
+    ):
+        raise HTTPException(409, "重复文档中的文件已经不可用，请重新扫描")
+    if (
+        left.current_version_id != left_ref.get("version_id")
+        or right.current_version_id != right_ref.get("version_id")
+    ):
+        raise HTTPException(409, "文档版本已经变化，请重新扫描后再处理")
+    now_value = datetime.now(timezone.utc)
+    if payload.action == "keep_both":
+        case.status = "handled"
+        case.handled_by = user.id
+        case.handled_at = now_value
+        case.evidence = {
+            **evidence,
+            "resolution": "keep_both",
+            "resolution_note": payload.reason_note.strip(),
+            "resolved_at": now_value.isoformat(),
+        }
+        audit(db, user.tenant_id, user.id, "curation.duplicate.keep_both", "curation_case", case.id, {
+            "document_ids": [left.id, right.id],
+        })
+        db.commit()
+        return {"case": _curation_case_payload(db, case, detail=True), "batch": None, "job": None}
+
+    winner, loser = (left, right) if payload.action == "merge_into_left" else (right, left)
+    loser_version_id = loser.current_version_id
+    chunks = list(db.scalars(select(Chunk).where(
+        Chunk.tenant_id == user.tenant_id,
+        Chunk.space_id == case.space_id,
+        Chunk.document_id == loser.id,
+        Chunk.version_id == loser_version_id,
+        Chunk.deleted_at.is_(None),
+        Chunk.status.in_(["staged", "published"]),
+    )))
+    if not chunks:
+        raise HTTPException(409, "待合并文档没有当前知识片段")
+    batch = CurationBatch(
+        tenant_id=user.tenant_id,
+        space_id=case.space_id,
+        name=f"合并重复文档 · 保留《{winner.title}》"[:300],
+        created_by=user.id,
+    )
+    db.add(batch)
+    db.flush()
+    chunk_ids = [row.id for row in chunks]
+    for chunk in chunks:
+        create_decision(
+            db,
+            user=user,
+            space_id=case.space_id,
+            target_type="chunk",
+            target_id=chunk.chunk_id,
+            version_id=chunk.version_id,
+            field_path="status",
+            operation="suppress",
+            value="suppressed",
+            scope="version_only",
+            reason_code="duplicate_document_merge",
+            reason_note=payload.reason_note.strip(),
+            batch_id=batch.id,
+        )
+    facts = list(db.scalars(select(Fact).where(
+        Fact.tenant_id == user.tenant_id,
+        Fact.space_id == case.space_id,
+        Fact.source_chunk_id.in_(chunk_ids),
+        Fact.deleted_at.is_(None),
+        Fact.status == "published",
+    ))) if chunk_ids else []
+    for fact in facts:
+        create_decision(
+            db,
+            user=user,
+            space_id=case.space_id,
+            target_type="fact",
+            target_id=fact.id,
+            field_path="status",
+            operation="suppress",
+            value="suppressed",
+            scope="version_only",
+            reason_code="duplicate_document_merge",
+            reason_note=payload.reason_note.strip(),
+            batch_id=batch.id,
+        )
+    job = _queue_curation_projection(db, user=user, batch=batch)
+    case.status = "handled"
+    case.handled_by = user.id
+    case.handled_at = now_value
+    case.evidence = {
+        **evidence,
+        "resolution": "merged",
+        "resolution_note": payload.reason_note.strip(),
+        "winner_document_id": winner.id,
+        "suppressed_document_id": loser.id,
+        "suppressed_chunk_count": len(chunks),
+        "suppressed_fact_count": len(facts),
+        "curation_batch_id": batch.id,
+        "resolved_at": now_value.isoformat(),
+    }
+    audit(db, user.tenant_id, user.id, "curation.duplicate.merge", "curation_case", case.id, {
+        "winner_document_id": winner.id,
+        "suppressed_document_id": loser.id,
+        "chunk_count": len(chunks),
+        "fact_count": len(facts),
+        "batch_id": batch.id,
+    })
+    db.commit()
+    _dispatch_curation_job(db, job, batch)
+    return {
+        "case": _curation_case_payload(db, case, detail=True),
+        "batch": _curation_batch_payload(db, batch),
+        "job": _serialize_job(db, job),
+    }
+
+
 @router.put("/curation/cases/{case_id}")
 def update_curation_case(case_id: str, payload: CurationCaseUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     row = _must_tenant(db, CurationCase, case_id, user.tenant_id, "治理待办")
     require_space_permission(db, user, row.space_id, "write")
+    if row.case_type == "duplicate_document":
+        raise HTTPException(409, "重复文档请使用专用处理操作；已合并结果需从关联治理批次回滚")
     row.status = payload.status
     row.handled_by = user.id if payload.status != "open" else None
     row.handled_at = datetime.now(timezone.utc) if payload.status != "open" else None
@@ -3713,6 +4014,24 @@ def rollback_curation_batch(batch_id: str, user: User = Depends(get_current_user
     except ValueError as exc:
         db.rollback(); raise HTTPException(409, str(exc)) from exc
     source_batch.status = "rolled_back"
+    for linked_case in db.scalars(select(CurationCase).where(
+        CurationCase.tenant_id == user.tenant_id,
+        CurationCase.space_id == source_batch.space_id,
+        CurationCase.case_type == "duplicate_document",
+        _active(CurationCase),
+    )):
+        linked_evidence = dict(linked_case.evidence or {})
+        if linked_evidence.get("curation_batch_id") != source_batch.id:
+            continue
+        linked_case.status = "open"
+        linked_case.handled_by = None
+        linked_case.handled_at = None
+        linked_case.evidence = {
+            **linked_evidence,
+            "resolution": "rolled_back",
+            "resolution_note": "重复文档合并已回滚，待重新处理",
+            "rolled_back_at": datetime.now(timezone.utc).isoformat(),
+        }
     rollback_batch = CurationBatch(
         tenant_id=user.tenant_id,
         space_id=source_batch.space_id,
@@ -4062,26 +4381,36 @@ def _knowledge_fact_entities(db: Session, tenant_id: str, space_id: str, subject
     return subject, obj
 
 
+def _knowledge_fact_source_chunk(
+    db: Session,
+    *,
+    tenant_id: str,
+    space_id: str,
+    source_chunk_id: str,
+) -> Chunk:
+    """Resolve a current published evidence chunk without crossing boundaries."""
+    try:
+        return validate_fact_source_chunk(
+            db,
+            tenant_id=tenant_id,
+            space_id=space_id,
+            source_chunk_id=source_chunk_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/knowledge/facts")
 def create_knowledge_fact(payload: KnowledgeFactCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_space_permission(db, user, payload.space_id, "write")
     _knowledge_fact_entities(db, user.tenant_id, payload.space_id, payload.subject_entity_id, payload.object_entity_id)
     if payload.source_chunk_id:
-        source_chunk = _must(db, Chunk, payload.source_chunk_id, "证据片段")
-        if (
-            source_chunk.tenant_id != user.tenant_id
-            or source_chunk.space_id != payload.space_id
-            or source_chunk.status != "published"
-            or source_chunk.deleted_at is not None
-        ):
-            raise HTTPException(400, "证据片段必须是当前知识空间内已发布的片段")
-        source_document = db.get(Document, source_chunk.document_id)
-        if (
-            source_document is None
-            or source_document.deleted_at is not None
-            or source_document.current_version_id != source_chunk.version_id
-        ):
-            raise HTTPException(400, "证据片段不是文档当前版本")
+        _knowledge_fact_source_chunk(
+            db,
+            tenant_id=user.tenant_id,
+            space_id=payload.space_id,
+            source_chunk_id=payload.source_chunk_id,
+        )
     duplicate = db.scalar(select(Fact).where(
         Fact.space_id == payload.space_id,
         Fact.subject_entity_id == payload.subject_entity_id,
@@ -4138,6 +4467,19 @@ def update_knowledge_fact(row_id: str, payload: KnowledgeFactUpdate, user: User 
     if "object_value" in values:
         values["object_value"] = object_value.strip() if object_value else None
     if "predicate" in values: values["predicate"] = values["predicate"].strip()
+    if "source_chunk_id" in values:
+        if not reason_note:
+            raise HTTPException(400, "修正证据片段必须填写治理原因")
+        source_chunk_id = str(values.get("source_chunk_id") or "").strip()
+        if not source_chunk_id:
+            raise HTTPException(400, "证据片段不能为空")
+        _knowledge_fact_source_chunk(
+            db,
+            tenant_id=user.tenant_id,
+            space_id=row.space_id,
+            source_chunk_id=source_chunk_id,
+        )
+        values["source_chunk_id"] = source_chunk_id
     if not values:
         raise HTTPException(400, "没有需要保存的字段")
     batch = CurationBatch(tenant_id=user.tenant_id, space_id=row.space_id, name="关系人工修正", created_by=user.id)
@@ -4336,7 +4678,10 @@ def knowledge_governance_overview(
         if space_id in _job_space_ids(db, row)
     ]
     running_jobs = sum(row.status in {"queued", "running"} for row in visible_jobs)
-    failed_jobs = sum(row.status == "failed" for row in visible_jobs)
+    failed_jobs = len(_unresolved_failed_jobs(
+        visible_jobs,
+        current_version_ids=set(current_version_ids),
+    ))
 
     if not documents:
         next_action = {"view": "documents", "label": "上传第一份文档", "reason": "当前空间还没有知识内容"}

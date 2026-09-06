@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import func, select
@@ -91,6 +92,46 @@ def _duplicates(values: list[str]) -> list[str]:
     return sorted(duplicates)
 
 
+def find_semantic_relationship_path(
+    relationships: list[dict[str, Any]],
+    from_entity_id: str,
+    to_entity_id: str,
+    *,
+    max_depth: int,
+) -> list[dict[str, Any]] | None:
+    """Return the shortest activated semantic path without exposing physical joins."""
+
+    if max_depth < 0:
+        raise ValueError("max_depth must be non-negative")
+    queue: list[tuple[str, list[dict[str, Any]]]] = [(from_entity_id, [])]
+    visited = {from_entity_id}
+    while queue:
+        entity_id, path = queue.pop(0)
+        if entity_id == to_entity_id:
+            return path
+        if len(path) >= max_depth:
+            continue
+        for relation in relationships:
+            if relation.get("from_entity_id") == entity_id:
+                other, direction = relation.get("to_entity_id"), "forward"
+            elif relation.get("to_entity_id") == entity_id:
+                other, direction = relation.get("from_entity_id"), "reverse"
+            else:
+                continue
+            if not other or other in visited:
+                continue
+            visited.add(other)
+            queue.append((other, [*path, {
+                "relationship_id": relation["id"],
+                "from_entity_id": entity_id,
+                "to_entity_id": other,
+                "direction": direction,
+                "cardinality": relation.get("cardinality", "unknown"),
+                "evidence": relation.get("evidence") or [],
+            }]))
+    return None
+
+
 def validate_mapping_manifest(
     db: Session,
     mapping_set: SemanticMappingSet,
@@ -142,6 +183,9 @@ def validate_mapping_manifest(
         ("实体", [item.id for item in manifest.entities]),
         ("属性", [item.id for item in manifest.attributes]),
         ("关系", [item.id for item in manifest.relationships]),
+        ("派生指标", [item.id for item in manifest.derived_metrics]),
+        ("业务记录集", [item.id for item in manifest.record_sets]),
+        ("受管理查询", [item.id for item in manifest.governed_queries]),
     ):
         for duplicate in _duplicates(ids):
             errors.append(f"{kind} ID 重复：{duplicate}")
@@ -191,6 +235,8 @@ def validate_mapping_manifest(
             errors.append(f"属性字段不属于绑定的数据片段：{attribute.column_id}")
         if attribute.required_filters and not attribute.is_measure:
             errors.append(f"非指标属性不能配置固定统计口径：{attribute.label}")
+        if attribute.required_relationships and not attribute.is_measure:
+            errors.append(f"非指标属性不能配置关联统计口径：{attribute.label}")
         if attribute.default_aggregate and not attribute.is_measure:
             errors.append(f"非指标属性不能配置默认聚合：{attribute.label}")
         for required_filter in attribute.required_filters:
@@ -215,6 +261,129 @@ def validate_mapping_manifest(
                 errors.append(f"关系右侧字段不存在或不属于对象：{predicate.right.column_id}")
             if left and right and left[1].get("type_family") != right[1].get("type_family"):
                 warnings.append(f"关系字段类型不同，请确认 Join 语义：{predicate.left.column_id} ↔ {predicate.right.column_id}")
+        for required_filter in relationship.required_filters:
+            filter_attribute = attributes.get(required_filter.attribute_id)
+            if filter_attribute is None:
+                errors.append(
+                    f"关系 {relationship.label} 的固定口径引用了未知属性：{required_filter.attribute_id}"
+                )
+            elif filter_attribute.entity_id not in {
+                relationship.from_entity_id, relationship.to_entity_id,
+            }:
+                errors.append(
+                    f"关系 {relationship.label} 的固定口径字段必须属于关系端点实体"
+                )
+
+    relationships = {item.id: item for item in manifest.relationships}
+    for attribute in manifest.attributes:
+        for requirement in attribute.required_relationships:
+            relationship = relationships.get(requirement.relationship_id)
+            if relationship is None:
+                errors.append(
+                    f"指标 {attribute.label} 的关联口径引用了未知关系：{requirement.relationship_id}"
+                )
+                continue
+            endpoints = {relationship.from_entity_id, relationship.to_entity_id}
+            if attribute.entity_id not in endpoints:
+                errors.append(
+                    f"指标 {attribute.label} 不在关联口径的任一端点：{requirement.relationship_id}"
+                )
+            if requirement.target_entity_id not in endpoints:
+                errors.append(
+                    f"指标 {attribute.label} 的关联口径目标实体与关系端点不匹配：{requirement.target_entity_id}"
+                )
+            if relationship.from_entity_id != relationship.to_entity_id:
+                expected_target = (
+                    relationship.to_entity_id
+                    if relationship.from_entity_id == attribute.entity_id
+                    else relationship.from_entity_id
+                )
+                if requirement.target_entity_id != expected_target:
+                    errors.append(
+                        f"指标 {attribute.label} 的关联口径必须指向关系另一端：{expected_target}"
+                    )
+            for required_filter in requirement.filters:
+                filter_attribute = attributes.get(required_filter.attribute_id)
+                if filter_attribute is None:
+                    errors.append(
+                        f"指标 {attribute.label} 的关联口径引用了未知属性：{required_filter.attribute_id}"
+                    )
+                elif filter_attribute.entity_id != requirement.target_entity_id:
+                    errors.append(
+                        f"指标 {attribute.label} 的关联口径筛选必须属于目标实体"
+                    )
+
+    for metric in manifest.derived_metrics:
+        numerator = attributes.get(metric.numerator_attribute_id)
+        denominator = attributes.get(metric.denominator_attribute_id)
+        if numerator is None or not numerator.is_measure:
+            errors.append(f"派生指标 {metric.label} 的分子不是有效指标")
+        if denominator is None or not denominator.is_measure:
+            errors.append(f"派生指标 {metric.label} 的分母不是有效指标")
+        if metric.numerator_time_attribute_id:
+            time_attribute = attributes.get(metric.numerator_time_attribute_id)
+            if time_attribute is None or (numerator and time_attribute.entity_id != numerator.entity_id):
+                errors.append(f"派生指标 {metric.label} 的分子时间属性无效")
+        if metric.denominator_period_attribute_id:
+            period_attribute = attributes.get(metric.denominator_period_attribute_id)
+            if period_attribute is None or (denominator and period_attribute.entity_id != denominator.entity_id):
+                errors.append(f"派生指标 {metric.label} 的分母期间属性无效")
+        for dimension in metric.dimensions:
+            dimension_attribute = attributes.get(dimension.attribute_id)
+            if dimension.entity_id not in entities:
+                errors.append(f"派生指标 {metric.label} 的分组实体不存在")
+            if dimension_attribute is None or dimension_attribute.entity_id != dimension.entity_id:
+                errors.append(f"派生指标 {metric.label} 的分组属性无效")
+            for relationship_id, measure in (
+                (dimension.numerator_relationship_id, numerator),
+                (dimension.denominator_relationship_id, denominator),
+            ):
+                relationship = relationships.get(relationship_id)
+                expected_endpoints = {dimension.entity_id, measure.entity_id} if measure else set()
+                if relationship is None or {
+                    relationship.from_entity_id, relationship.to_entity_id,
+                } != expected_endpoints:
+                    errors.append(f"派生指标 {metric.label} 的分组关系无效：{relationship_id}")
+
+    for record_set in manifest.record_sets:
+        identity = attributes.get(record_set.identity_attribute_id)
+        if record_set.base_entity_id not in entities:
+            errors.append(f"业务记录集 {record_set.label} 的主实体不存在")
+        if identity is None or identity.entity_id != record_set.base_entity_id:
+            errors.append(f"业务记录集 {record_set.label} 的稳定标识无效")
+        for required_filter in record_set.filters:
+            filter_attribute = attributes.get(required_filter.attribute_id)
+            if filter_attribute is None or filter_attribute.entity_id != record_set.base_entity_id:
+                errors.append(f"业务记录集 {record_set.label} 的筛选属性无效：{required_filter.attribute_id}")
+        for requirement in record_set.relationship_constraints:
+            relationship = relationships.get(requirement.relationship_id)
+            expected_endpoints = {record_set.base_entity_id, requirement.target_entity_id}
+            if relationship is None or {
+                relationship.from_entity_id, relationship.to_entity_id,
+            } != expected_endpoints:
+                errors.append(f"业务记录集 {record_set.label} 的关系约束无效：{requirement.relationship_id}")
+            for required_filter in requirement.filters:
+                filter_attribute = attributes.get(required_filter.attribute_id)
+                if filter_attribute is None or filter_attribute.entity_id != requirement.target_entity_id:
+                    errors.append(
+                        f"业务记录集 {record_set.label} 的关系筛选无效：{required_filter.attribute_id}"
+                    )
+
+    # A governed query is not trusted merely because it was stored by an
+    # administrator.  Validate its strict Plan/IR against the same activated
+    # semantic catalog used at runtime; SQL and physical identifiers are not
+    # representable in this contract.
+    from packages.platform.structured_query import validate_ir
+
+    validation_version = SimpleNamespace(status="active", manifest=manifest.model_dump())
+    for governed_query in manifest.governed_queries:
+        report = validate_ir(
+            governed_query.query_ir,
+            governed_query.plan,
+            validation_version,
+        )
+        for error in report["errors"]:
+            errors.append(f"受管理查询 {governed_query.label} 无效：{error}")
 
     # Hash the exact persisted payload. New optional contract fields must not
     # make a previously sealed version appear tampered with after an upgrade.
@@ -229,6 +398,9 @@ def validate_mapping_manifest(
             "entities": len(manifest.entities),
             "attributes": len(manifest.attributes),
             "relationships": len(manifest.relationships),
+            "derived_metrics": len(manifest.derived_metrics),
+            "record_sets": len(manifest.record_sets),
+            "governed_queries": len(manifest.governed_queries),
             "fragments": len(fragments),
         },
         "mapping_hash": sealed_hash,

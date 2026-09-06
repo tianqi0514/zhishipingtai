@@ -43,6 +43,7 @@ from packages.platform.models import (
     AnalysisRuleSet,
     Application,
     ApplicationCredential,
+    ApplicationFeedback,
     ApplicationGrant,
     ApplicationInvocation,
     ApplicationScenario,
@@ -66,6 +67,7 @@ from packages.platform.security import (
 )
 from packages.platform.application_services import (
     ApplicationConfigurationError,
+    application_delivery_readiness,
     application_has_grant,
     resolve_scenario_product_release,
 )
@@ -118,6 +120,13 @@ def _validate_org(db: Session, tenant_id: str, org_unit_id: str | None) -> None:
 
 
 def _credential_view(row: ApplicationCredential) -> dict[str, Any]:
+    expires_at = _aware_datetime(row.expires_at)
+    now = datetime.now(timezone.utc)
+    credential_status = (
+        "revoked" if row.revoked_at
+        else "expired" if expires_at is not None and expires_at <= now
+        else "active"
+    )
     return {
         "id": row.id,
         "application_id": row.application_id,
@@ -129,7 +138,7 @@ def _credential_view(row: ApplicationCredential) -> dict[str, Any]:
         "last_used_at": row.last_used_at,
         "rotated_from_id": row.rotated_from_id,
         "revoked_at": row.revoked_at,
-        "status": "revoked" if row.revoked_at else "active",
+        "status": credential_status,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -238,6 +247,23 @@ def get_application(row_id: str, user: User = Depends(get_current_user), db: Ses
         )
     )
     return data
+
+
+@router.get("/applications/{row_id}/readiness")
+def get_application_readiness(
+    row_id: str,
+    builder: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    application = _must_owned(db, Application, row_id, builder, "应用")
+    result = application_delivery_readiness(db, application)
+    result["feedback_count"] = db.scalar(
+        select(func.count()).select_from(ApplicationFeedback).where(
+            ApplicationFeedback.application_id == application.id,
+            _active(ApplicationFeedback),
+        )
+    ) or 0
+    return result
 
 
 @router.put("/applications/{row_id}")

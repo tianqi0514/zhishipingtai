@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from packages.semantica_adapter.analyze import run_graph_inference
 
-from .curation import effective_entity, effective_fact
+from .curation import effective_entities, effective_facts
 from .models import (
     AnalysisRule,
     AnalysisRuleSet,
@@ -132,9 +132,10 @@ def active_analysis_context(
             )
         )
     )
+    effective_entity_rows = effective_entities(db, entity_rows)
     entities: dict[str, dict[str, Any]] = {}
     for row in entity_rows:
-        value = effective_entity(db, row)
+        value = effective_entity_rows[row.id]
         if value.get("status") not in {"published", "active"}:
             continue
         entities[row.id] = {
@@ -153,9 +154,10 @@ def active_analysis_context(
             )
         )
     )
+    effective_fact_rows = effective_facts(db, fact_rows)
     facts: list[dict[str, Any]] = []
     for row in fact_rows:
-        value = effective_fact(db, row)
+        value = effective_fact_rows[row.id]
         if value.get("status") != "published":
             continue
         subject = entities.get(str(value.get("subject_entity_id") or ""))
@@ -336,6 +338,7 @@ def analysis_readiness(db: Session, *, tenant_id: str, space_id: str) -> dict[st
         "blocking_issues": blockers,
         "warnings": warnings,
         "recommended_actions": recommendations,
+        "templates": templates_for_vocabulary(vocabulary),
     }
 
 

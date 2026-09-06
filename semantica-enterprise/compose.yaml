@@ -23,6 +23,8 @@ x-app-environment: &app-environment
   HF_HOME: /app/data/model-cache/huggingface
   OPENSEARCH_URL: http://opensearch:9200
   QDRANT_URL: http://qdrant:6333
+  QDRANT_SEARCH_TIMEOUT_SECONDS: ${QDRANT_SEARCH_TIMEOUT_SECONDS:-30}
+  QDRANT_SEARCH_MAX_ATTEMPTS: ${QDRANT_SEARCH_MAX_ATTEMPTS:-2}
   FALKORDB_HOST: falkordb
   FALKORDB_PORT: "6379"
   # Empty by default. Local/private data sources stay blocked unless an
@@ -31,6 +33,8 @@ x-app-environment: &app-environment
   SOURCE_SCHEDULER_SECONDS: "60"
   KNOWLEDGE_AUTO_PROCESS: "true"
   AGENT_RUNTIME_URL: http://agent-runtime:8090
+  MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
+  AGENT_PUBLIC_URL: ${AGENT_PUBLIC_URL:-}
   AGENT_SERVICE_SECRET_FILE: /run/secrets/agent_service_secret
 
 services:
@@ -82,7 +86,9 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    # Pinned digest keeps server deployments reproducible; update deliberately
+    # after running the object-store integration suite.
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-semantica}
@@ -279,6 +285,7 @@ services:
       PLATFORM_API: http://api:8080/api/v1
       MCP_PORT: "8091"
       MCP_REQUEST_TIMEOUT: "600"
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
     ports:
       - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${MCP_PUBLISHED_PORT:-8091}:8091"
     depends_on:
@@ -303,7 +310,7 @@ services:
     volumes:
       - ./tests/fixtures:/fixtures:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/health', timeout=3).read()"]
+      test: ["CMD", "python", "-c", "import socket, urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/health', timeout=3).read(); socket.create_connection(('127.0.0.1', 9418), 3).close()"]
       interval: 5s
       timeout: 3s
       retries: 20

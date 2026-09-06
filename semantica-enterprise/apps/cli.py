@@ -106,6 +106,21 @@ def search(
     _print(_request("POST", "/search", payload={"query": query, "space_ids": space or [], "top_k": top_k}))
 
 
+@app.command("spaces")
+def list_spaces() -> None:
+    """列出当前 Token 可以读取的知识空间。"""
+    rows = _request("GET", "/spaces")
+    _print({
+        "items": [{
+            "id": item.get("id"),
+            "code": item.get("code"),
+            "name": item.get("name"),
+            "description": item.get("description"),
+            "effective_permission": item.get("effective_permission"),
+        } for item in rows]
+    })
+
+
 @app.command()
 def chat(
     message: str,
@@ -116,22 +131,54 @@ def chat(
     if not conversation_id:
         conversation = _request("POST", "/conversations", payload={"title": "CLI 会话", "space_ids": space or []})
         conversation_id = str(conversation["id"])
-    with httpx.stream(
-        "POST",
-        f"{_api_url()}/conversations/{conversation_id}/messages",
-        headers=_headers(),
-        json={"content": message},
-        timeout=600,
-    ) as response:
-        if response.status_code >= 400:
-            raise typer.BadParameter(response.read().decode("utf-8", errors="replace")[:500])
-        event_type = "message"
-        for line in response.iter_lines():
-            if line.startswith("event:"):
-                event_type = line[6:].strip()
-            elif line.startswith("data:") and event_type == "answer_delta":
-                typer.echo(json.loads(line[5:].strip()).get("text", ""), nl=False)
+    terminal_status: str | None = None
+    terminal_message = ""
+    event_type = "message"
+    data_lines: list[str] = []
+
+    def consume_event() -> None:
+        nonlocal event_type, data_lines, terminal_status, terminal_message
+        if not data_lines:
+            event_type = "message"
+            return
+        try:
+            payload = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter("对话流返回了无法解析的事件") from exc
+        if event_type == "answer_delta":
+            typer.echo(str(payload.get("text") or ""), nl=False)
+        elif event_type in {"turn_completed", "turn_failed", "turn_cancelled"}:
+            terminal_status = event_type.removeprefix("turn_")
+            terminal_message = str(payload.get("message") or payload.get("reason") or "")[:300]
+        event_type, data_lines = "message", []
+
+    try:
+        with httpx.stream(
+            "POST",
+            f"{_api_url()}/conversations/{conversation_id}/messages",
+            headers=_headers(),
+            json={"content": message},
+            timeout=600,
+        ) as response:
+            if response.status_code >= 400:
+                raise typer.BadParameter(response.read().decode("utf-8", errors="replace")[:500])
+            for line in response.iter_lines():
+                if line.startswith("event:"):
+                    event_type = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].strip())
+                elif not line:
+                    consume_event()
+            consume_event()
+    except httpx.HTTPError as exc:
+        raise typer.BadParameter(f"对话连接中断：{exc}") from exc
     typer.echo()
+    if terminal_status != "completed":
+        label = "生成已取消" if terminal_status == "cancelled" else "生成失败"
+        if terminal_status is None:
+            label = "对话流在完成前中断"
+        detail = f"：{terminal_message}" if terminal_message else ""
+        raise typer.BadParameter(f"{label}{detail}")
     typer.echo(f"conversation_id={conversation_id}")
 
 

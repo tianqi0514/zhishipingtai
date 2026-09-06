@@ -64,6 +64,7 @@ from packages.platform.structured_data import (
     inspect_distinct_values,
 )
 from packages.platform.structured_query import (
+    apply_activated_metric_contracts,
     cancel_active_query,
     compile_structured_query,
     execute_compiled_query,
@@ -76,6 +77,29 @@ from packages.platform.security import decrypt_secret
 
 
 router = APIRouter(tags=["structured-data"])
+
+
+def _next_structured_citation_number(db: Session, message_id: str | None) -> int:
+    """Allocate a stable, message-scoped data citation number.
+
+    A single Agent turn may execute more than one deterministic query.  Query
+    citations are unique inside each QueryRun, but the answer references them
+    in one message-level namespace (【数据1】, 【数据2】, ...).  Locking the message
+    prevents concurrent executions from receiving the same visible number.
+    """
+    if not message_id:
+        return 1
+    db.scalar(
+        select(ConversationMessage.id)
+        .where(ConversationMessage.id == message_id)
+        .with_for_update()
+    )
+    current = db.scalar(
+        select(func.max(StructuredQueryCitation.citation_number)).where(
+            StructuredQueryCitation.message_id == message_id
+        )
+    ) or 0
+    return int(current) + 1
 
 
 def _source(db: Session, source_id: str, user: User, permission: str = "read") -> SourceConnector:
@@ -739,6 +763,8 @@ def compile_structured_query_api(
     db: Session = Depends(get_db),
 ):
     _, version, source, schema = _query_context(db, payload.mapping_version_id, user, "write")
+    effective_plan, effective_ir = apply_activated_metric_contracts(payload.plan, payload.query_ir, version)
+    payload = payload.model_copy(update={"plan": effective_plan, "query_ir": effective_ir})
     report = validate_ir(payload.query_ir, payload.plan, version)
     if not report["ok"]:
         raise HTTPException(422, {"code": "QUERY_IR_INVALID", "message": "查询计划或 IR 未通过校验", "validation": report})
@@ -829,6 +855,8 @@ def execute_structured_query_api(
     db: Session = Depends(get_db),
 ):
     _, version, source, schema = _query_context(db, payload.mapping_version_id, user)
+    effective_plan, effective_ir = apply_activated_metric_contracts(payload.plan, payload.query_ir, version)
+    payload = payload.model_copy(update={"plan": effective_plan, "query_ir": effective_ir})
     report = validate_ir(payload.query_ir, payload.plan, version)
     if not report["ok"]:
         raise HTTPException(422, {"code": "QUERY_IR_INVALID", "message": "查询计划或 IR 未通过校验", "validation": report})
@@ -838,7 +866,13 @@ def execute_structured_query_api(
             raise HTTPException(404, "会话不存在")
     if payload.message_id:
         message = db.get(ConversationMessage, payload.message_id)
-        if message is None or message.user_id != user.id or message.tenant_id != user.tenant_id:
+        if (
+            message is None
+            or message.user_id != user.id
+            or message.tenant_id != user.tenant_id
+            or message.role != "assistant"
+            or (payload.conversation_id and message.conversation_id != payload.conversation_id)
+        ):
             raise HTTPException(404, "消息不存在")
     try:
         compiled = compile_structured_query(source, version, schema, payload.query_ir, max_rows=payload.max_rows)
@@ -906,11 +940,12 @@ def execute_structured_query_api(
     run.warnings = result["warnings"]
     run.finished_at = datetime.now(timezone.utc)
     source_label = source.name
+    citation_number = _next_structured_citation_number(db, payload.message_id)
     citation = StructuredQueryCitation(
         tenant_id=user.tenant_id,
         query_run_id=run.id,
         message_id=payload.message_id,
-        citation_number=1,
+        citation_number=citation_number,
         label=f"{source_label} · {payload.plan.intent[:200]}",
         summary={
             "source_id": source.id,

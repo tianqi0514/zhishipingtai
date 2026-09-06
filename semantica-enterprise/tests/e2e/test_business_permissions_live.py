@@ -58,17 +58,30 @@ def test_auditor_reads_audit_without_system_or_application_mutation() -> None:
 
 def test_space_grants_and_explicit_deny_are_enforced_for_business_users() -> None:
     employee, _ = client_for("gl_employee")
-    visible = {row["code"] for row in employee.get("/spaces").json()}
+    employee_rows = employee.get("/spaces").json()
+    visible = {row["code"] for row in employee_rows}
     assert {"gl-policy-acceptance", "gl-product-acceptance"} <= visible
     assert "gl-private-acceptance" not in visible
     assert "gl-procurement-acceptance" not in visible
+    assert {row["effective_permission"] for row in employee_rows} == {"read"}
+    policy = next(row for row in employee_rows if row["code"] == "gl-policy-acceptance")
+    assert employee.get(f"/spaces/{policy['id']}").json()["effective_permission"] == "read"
 
     builder, _ = client_for("gl_app_builder")
-    builder_visible = {row["code"] for row in builder.get("/spaces").json()}
+    builder_rows = builder.get("/spaces").json()
+    builder_visible = {row["code"] for row in builder_rows}
     assert {"gl-policy-acceptance", "gl-product-acceptance", "gl-structured-acceptance"} <= builder_visible
     assert "gl-private-acceptance" in builder_visible
+    builder_permissions = {row["code"]: row["effective_permission"] for row in builder_rows}
+    assert builder_permissions["gl-policy-acceptance"] == "read"
+    assert builder_permissions["gl-structured-acceptance"] == "read"
+    assert builder_permissions["gl-product-acceptance"] == "write"
+    assert builder_permissions["gl-private-acceptance"] == "manage"
 
     supply_user, _ = client_for("gl_supply_employee")
-    supply_visible = {row["code"] for row in supply_user.get("/spaces").json()}
+    supply_rows = supply_user.get("/spaces").json()
+    supply_visible = {row["code"] for row in supply_rows}
     assert "gl-procurement-acceptance" in supply_visible
     assert "gl-private-acceptance" not in supply_visible
+    procurement = next(row for row in supply_rows if row["code"] == "gl-procurement-acceptance")
+    assert procurement["effective_permission"] == "write"

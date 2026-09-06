@@ -5,11 +5,17 @@ import time
 import uuid
 
 import httpx
+import pytest
 
 
 BASE_URL = os.getenv("E2E_BASE_URL", "http://api:8080/api/v1").rstrip("/")
 ADMIN_USERNAME = os.getenv("BOOTSTRAP_ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.environ["BOOTSTRAP_ADMIN_PASSWORD"]
+ADMIN_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD")
+
+pytestmark = pytest.mark.skipif(
+    not ADMIN_PASSWORD,
+    reason="需要 BOOTSTRAP_ADMIN_PASSWORD 才能运行真实 Docker 知识分析验收",
+)
 
 
 POLICY_DEFINITION = {

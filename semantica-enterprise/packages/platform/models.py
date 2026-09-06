@@ -186,7 +186,6 @@ class MediaParsingPolicyVersion(Base, TimestampMixin):
     __tablename__ = "media_parsing_policy_versions"
     __table_args__ = (
         UniqueConstraint("policy_id", "version_number", name="uq_media_policy_version"),
-        UniqueConstraint("policy_id", "config_hash", name="uq_media_policy_config_hash"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)

@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from .embedding import SemanticEmbedder
+from .resilience import retry_transient_call
 
 
 def keyword_search(
@@ -54,22 +55,29 @@ def vector_search(
     allowed_space_ids: list[str],
     embedder: SemanticEmbedder,
     limit: int,
+    timeout_seconds: float = 30.0,
+    max_attempts: int = 2,
 ) -> list[dict[str, Any]]:
     from semantica.vector_store.qdrant_store import QdrantStore
 
     vector = embedder.embed_query(query)
     result: list[dict[str, Any]] = []
     for collection in collections:
-        store = QdrantStore(url=qdrant_url)
-        store.connect()
-        store.get_collection(collection)
-        if hasattr(store.client, "search"):
-            found = store.search_vectors(
-                vector,
-                limit=min(200, max(limit, limit * 3)),
-                filter={"space_id": allowed_space_ids},
-            )
-        else:
+        def search_collection() -> list[dict[str, Any]]:
+            # Semantica continues to own the Qdrant adapter. Retrieval only
+            # supplies a production-safe timeout and retries idempotent reads
+            # so a cold connection cannot fail vector-only search while the
+            # same channel succeeds moments later in a hybrid request.
+            store = QdrantStore(url=qdrant_url)
+            store.connect(timeout=max(1.0, min(float(timeout_seconds), 120.0)))
+            store.get_collection(collection)
+            if hasattr(store.client, "search"):
+                return store.search_vectors(
+                    vector,
+                    limit=min(200, max(limit, limit * 3)),
+                    filter={"space_id": allowed_space_ids},
+                )
+
             from qdrant_client.models import FieldCondition, Filter, MatchAny
 
             response = store.client.query_points(
@@ -79,10 +87,16 @@ def vector_search(
                 limit=min(200, max(limit, limit * 3)),
                 with_payload=True,
             )
-            found = [
+            return [
                 {"id": str(point.id), "score": float(point.score), "metadata": point.payload or {}}
                 for point in response.points
             ]
+
+        found = retry_transient_call(
+            search_collection,
+            max_attempts=max_attempts,
+            initial_delay_seconds=0.25,
+        )
         for item in found:
             metadata = item.get("metadata") or {}
             if metadata.get("space_id") not in allowed_space_ids:

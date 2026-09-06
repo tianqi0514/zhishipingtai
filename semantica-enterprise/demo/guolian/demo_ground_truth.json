@@ -1,0 +1,583 @@
+{
+  "schema_version": "chuanshen.guolian-demo-ground-truth/v1",
+  "dataset": "guolian-enterprise-demo",
+  "demo_data_notice": "演示数据，不代表国联集团真实经营数据。",
+  "synthetic": true,
+  "facts": [
+    {
+      "fact_id": "FACT-DEMO-001",
+      "statement": "采购实施细则适用于国联集团",
+      "source": {
+        "filename": "集团本部采购实施细则（2025演示现行版）.md",
+        "document_version": "DEMO-2025.1",
+        "structural_path": "第一章 适用范围/第二条",
+        "chunk_structural_path": "document"
+      },
+      "expected_entities": ["采购实施细则", "国联集团"],
+      "expected_relations": [
+        {"subject": "采购实施细则", "predicate": "适用于", "object": "国联集团"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": true,
+      "evidence_terms": ["采购实施细则", "适用于", "国联集团"],
+      "expected_classification": "管理制度/实施细则",
+      "expected_tags": ["采购", "适用范围", "现行制度"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-002",
+      "statement": "有效采购金额只统计审批已通过且状态为已签约、执行中或已验收的订单",
+      "source": {
+        "filename": "集团本部采购实施细则（2025演示现行版）.md",
+        "document_version": "DEMO-2025.1",
+        "structural_path": "第三章 统计口径/第九条"
+      },
+      "expected_entities": ["有效采购金额", "采购订单"],
+      "expected_relations": [],
+      "expected_tags": ["统计口径", "审批状态", "订单状态"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-003",
+      "statement": "2026 年有效采购总额为 1700000 元",
+      "source": {
+        "filename": "采购订单明细（演示版）.csv",
+        "structural_path": "数据行 2-8/include_in_2026_valid_total=true"
+      },
+      "expected_entities": ["2026 年有效采购总额", "采购订单"],
+      "expected_relations": [],
+      "expected_tags": ["1700000", "有效采购金额"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-004",
+      "statement": "NexusOne 的 2026 年有效采购金额为 600000 元",
+      "source": {
+        "filename": "采购订单明细（演示版）.csv",
+        "structural_path": "order_id=PO-DEMO-2026-001,PO-DEMO-2026-002"
+      },
+      "expected_entities": ["NexusOne", "东方智造", "智慧流程中枢项目"],
+      "expected_relations": [],
+      "expected_tags": ["600000", "有效采购金额"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-005",
+      "statement": "2026 年采购目标为 2100000 元",
+      "source": {
+        "filename": "项目系统依赖关系（演示版）.json",
+        "structural_path": "organizations[*].procurement_target_2026"
+      },
+      "expected_entities": ["国联集团", "集团本部", "数字科技公司", "能源服务公司", "金融科技公司"],
+      "expected_relations": [],
+      "expected_tags": ["2100000", "采购目标"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-006",
+      "statement": "东方智造供应 NexusOne",
+      "source": {
+        "filename": "集团本部采购实施细则（2025演示现行版）.md",
+        "document_version": "DEMO-2025.1",
+        "structural_path": "第四章 供应商风险/第十四条",
+        "chunk_structural_path": "document"
+      },
+      "expected_entities": ["东方智造", "NexusOne"],
+      "expected_relations": [
+        {"subject": "东方智造", "predicate": "供应", "object": "NexusOne"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": true,
+      "evidence_terms": ["东方智造", "供应", "NexusOne"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-007",
+      "statement": "NexusOne 用于智慧流程中枢项目",
+      "source": {
+        "filename": "集团本部采购实施细则（2025演示现行版）.md",
+        "document_version": "DEMO-2025.1",
+        "structural_path": "第四章 供应商风险/第十四条",
+        "chunk_structural_path": "document"
+      },
+      "expected_entities": ["NexusOne", "智慧流程中枢项目"],
+      "expected_relations": [
+        {"subject": "NexusOne", "predicate": "用于", "object": "智慧流程中枢项目"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": true,
+      "evidence_terms": ["NexusOne", "用于", "智慧流程中枢项目"],
+      "current": true,
+      "historical": false,
+      "governance_issue": true
+    },
+    {
+      "fact_id": "FACT-DEMO-008",
+      "statement": "数字科技公司负责智慧流程中枢项目",
+      "source": {
+        "filename": "智慧流程中枢建设说明（演示版）.rst",
+        "structural_path": "项目定位",
+        "chunk_structural_path": "document"
+      },
+      "expected_entities": ["数字科技公司", "智慧流程中枢项目"],
+      "expected_relations": [
+        {"subject": "数字科技公司", "predicate": "负责", "object": "智慧流程中枢项目"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": false,
+      "evidence_terms": ["数字科技公司", "负责", "智慧流程中枢项目"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-009",
+      "statement": "东方智造存在交付延期风险",
+      "source": {
+        "filename": "东方智造交付延期通知（演示版）.eml",
+        "structural_path": "邮件正文/风险事实",
+        "chunk_structural_path": "email/body"
+      },
+      "expected_entities": ["东方智造", "交付延期"],
+      "expected_relations": [
+        {"subject": "东方智造", "predicate": "存在风险", "object": "交付延期"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": true,
+      "evidence_terms": ["东方智造", "存在风险", "交付延期"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-010",
+      "statement": "数字化管理部负责协调 NexusOne 替代方案",
+      "source": {
+        "filename": "智慧流程中枢项目例会要点（演示版）.txt",
+        "structural_path": "00:18-00:30"
+      },
+      "expected_entities": ["数字化管理部", "NexusOne替代方案"],
+      "expected_relations": [
+        {"subject": "数字化管理部", "predicate": "协调", "object": "NexusOne替代方案"}
+      ],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-011",
+      "statement": "风险管理部负责跟踪东方智造交付延期",
+      "source": {
+        "filename": "东方智造交付延期通知（演示版）.eml",
+        "structural_path": "邮件正文/风险处置要求"
+      },
+      "expected_entities": ["风险管理部", "东方智造", "交付延期"],
+      "expected_relations": [
+        {"subject": "风险管理部", "predicate": "跟踪", "object": "东方智造交付延期"}
+      ],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-012",
+      "statement": "智慧流程中枢项目依赖集团数据交换平台和统一身份组件",
+      "source": {
+        "filename": "项目系统依赖关系（演示版）.json",
+        "structural_path": "projects[PRJ-DEMO-001].depends_on_product_ids"
+      },
+      "expected_entities": ["智慧流程中枢项目", "集团数据交换平台", "统一身份组件"],
+      "expected_relations": [
+        {"subject": "智慧流程中枢项目", "predicate": "依赖", "object": "集团数据交换平台"},
+        {"subject": "智慧流程中枢项目", "predicate": "依赖", "object": "统一身份组件"}
+      ],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-013",
+      "statement": "2025 演示现行版将纳入集团采购管理的金额阈值设为 300000 元",
+      "source": {
+        "filename": "集团本部采购实施细则（2025演示现行版）.md",
+        "document_version": "DEMO-2025.1",
+        "structural_path": "第二章 采购方式与审批/第五条"
+      },
+      "expected_entities": ["集团本部采购实施细则（2025演示现行版）", "采购管理金额阈值"],
+      "expected_relations": [],
+      "expected_tags": ["300000", "版本冲突"],
+      "current": true,
+      "historical": false,
+      "governance_issue": true
+    },
+    {
+      "fact_id": "FACT-DEMO-014",
+      "statement": "2023 演示旧版将纳入集团采购管理的金额阈值设为 200000 元",
+      "source": {
+        "filename": "集团本部采购实施细则（2023演示旧版）.md",
+        "document_version": "DEMO-2023.1",
+        "structural_path": "采购方式"
+      },
+      "expected_entities": ["集团本部采购实施细则（2023演示旧版）", "采购管理金额阈值"],
+      "expected_relations": [],
+      "expected_tags": ["200000", "历史版本", "版本冲突"],
+      "current": false,
+      "historical": true,
+      "governance_issue": true
+    },
+    {
+      "fact_id": "FACT-DEMO-015",
+      "statement": "2023 演示旧版未明确要求审批状态为已通过",
+      "source": {
+        "filename": "集团本部采购实施细则（2023演示旧版）.md",
+        "document_version": "DEMO-2023.1",
+        "structural_path": "统计口径"
+      },
+      "expected_entities": ["集团本部采购实施细则（2023演示旧版）", "审批状态"],
+      "expected_relations": [],
+      "expected_tags": ["历史口径", "版本差异"],
+      "current": false,
+      "historical": true,
+      "governance_issue": true
+    },
+    {
+      "fact_id": "FACT-DEMO-016",
+      "statement": "2025 演示现行版停止 2023 演示旧版参与默认问答，但保留历史追溯",
+      "source": {
+        "filename": "集团本部采购实施细则（2025演示现行版）.md",
+        "document_version": "DEMO-2025.1",
+        "structural_path": "第五章 知识治理与留痕/第十八条"
+      },
+      "expected_entities": ["集团本部采购实施细则（2025演示现行版）", "集团本部采购实施细则（2023演示旧版）"],
+      "expected_relations": [],
+      "expected_tags": ["当前版本", "历史追溯"],
+      "current": true,
+      "historical": false,
+      "governance_issue": true
+    },
+    {
+      "fact_id": "FACT-DEMO-017",
+      "statement": "国联数科和数科公司是数字科技公司的演示别名",
+      "source": {
+        "filename": "项目系统依赖关系（演示版）.json",
+        "structural_path": "organizations[ORG-DEMO-003].aliases"
+      },
+      "expected_entities": ["数字科技公司", "国联数科", "数科公司"],
+      "expected_relations": [],
+      "expected_tags": ["组织别名", "人工确认"],
+      "current": true,
+      "historical": false,
+      "governance_issue": true
+    },
+    {
+      "fact_id": "FACT-DEMO-018",
+      "statement": "东方智造、东方智造有限公司和东方智造（无锡）只能形成合并建议，不能仅凭名称自动合并",
+      "source": {
+        "filename": "项目系统依赖关系（演示版）.json",
+        "structural_path": "suppliers[SUP-DEMO-001].aliases"
+      },
+      "expected_entities": ["东方智造", "东方智造有限公司", "东方智造（无锡）"],
+      "expected_relations": [],
+      "expected_tags": ["供应商名称冲突", "人工确认"],
+      "current": true,
+      "historical": false,
+      "governance_issue": true
+    },
+    {
+      "fact_id": "FACT-DEMO-019",
+      "statement": "PO-DEMO-2026-007 已执行但审批待补充，不计入有效采购金额",
+      "source": {
+        "filename": "采购订单明细（演示版）.csv",
+        "structural_path": "order_id=PO-DEMO-2026-007"
+      },
+      "expected_entities": ["PO-DEMO-2026-007", "新城数据服务", "临时数据服务"],
+      "expected_relations": [],
+      "expected_tags": ["流程合规异常", "审批待补充"],
+      "current": true,
+      "historical": false,
+      "governance_issue": true
+    },
+    {
+      "fact_id": "FACT-DEMO-020",
+      "statement": "制度适用范围传递规则可推导采购实施细则适用于数字科技公司",
+      "source": {
+        "filename": "procurement_risk_rules.py",
+        "structural_path": "POLICY_SCOPE_RULE"
+      },
+      "expected_entities": ["采购实施细则", "数字科技公司"],
+      "expected_relations": [
+        {"subject": "采购实施细则", "predicate": "适用于", "object": "数字科技公司"}
+      ],
+      "expected_tags": ["Semantica 推演", "制度适用范围传递"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-021",
+      "statement": "供应商风险传导规则可推导智慧流程中枢项目受到交付延期影响",
+      "source": {
+        "filename": "procurement_risk_rules.py",
+        "structural_path": "SUPPLIER_RISK_RULE"
+      },
+      "expected_entities": ["东方智造", "NexusOne", "智慧流程中枢项目", "交付延期"],
+      "expected_relations": [
+        {"subject": "智慧流程中枢项目", "predicate": "受到影响", "object": "交付延期"}
+      ],
+      "expected_tags": ["Semantica 推演", "供应商风险传导"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-022",
+      "statement": "项目例会音频说明东方智造交付延期十个工作日、数字化管理部协调替代方案、风险管理部持续跟踪",
+      "source": {
+        "filename": "智慧流程中枢项目例会（演示版）.wav",
+        "time_start": 0,
+        "time_end": 42
+      },
+      "expected_entities": ["东方智造", "NexusOne", "数字化管理部", "风险管理部"],
+      "expected_relations": [
+        {"subject": "数字化管理部", "predicate": "协调", "object": "NexusOne替代方案"},
+        {"subject": "风险管理部", "predicate": "跟踪", "object": "东方智造交付延期"}
+      ],
+      "expected_tags": ["音频", "ASR", "时间戳"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-023",
+      "statement": "项目介绍视频画面展示 NexusOne、智慧流程引擎、集团数据交换平台、统一身份组件以及供应商风险路径",
+      "source": {
+        "filename": "智慧流程中枢项目介绍（演示版）.mp4",
+        "time_start": 0,
+        "time_end": 54
+      },
+      "expected_entities": ["NexusOne", "智慧流程引擎", "集团数据交换平台", "统一身份组件", "东方智造", "智慧流程中枢项目"],
+      "expected_relations": [
+        {"subject": "智慧流程中枢项目", "predicate": "依赖", "object": "集团数据交换平台"},
+        {"subject": "智慧流程中枢项目", "predicate": "依赖", "object": "统一身份组件"}
+      ],
+      "expected_tags": ["视频", "ASR", "关键帧", "视觉理解"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-024",
+      "statement": "本演示数据集没有提供国联集团下一年度实际利润目标",
+      "source": {
+        "filename": "README.md",
+        "structural_path": "安全边界"
+      },
+      "expected_entities": ["国联集团", "下一年度实际利润目标"],
+      "expected_relations": [],
+      "expected_tags": ["证据不足", "负向问答"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-025",
+      "statement": "扫描采购审批单记录 PO-DEMO-2026-001 由数字科技公司申请采购智慧流程中枢首批组件，金额 360000 元，集团采购管理部于 2026 年 1 月 14 日审批通过",
+      "source": {
+        "filename": "扫描采购审批单（演示版）.jpg",
+        "structural_path": "采购申请审批单/基本信息与审批记录"
+      },
+      "expected_entities": ["PO-DEMO-2026-001", "数字科技公司", "数字化管理部", "智慧流程中枢项目", "东方智造", "NexusOne", "集团采购管理部"],
+      "expected_relations": [
+        {"subject": "PO-DEMO-2026-001", "predicate": "对应", "object": "智慧流程中枢项目"},
+        {"subject": "东方智造", "predicate": "供应", "object": "NexusOne"}
+      ],
+      "expected_classification": "采购管理/采购审批单",
+      "expected_tags": ["图片", "OCR", "采购审批单", "审批通过", "360000", "演示数据"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-026",
+      "statement": "国联集团管理数字科技公司",
+      "source": {
+        "filename": "规则推演前提事实（演示版）.txt",
+        "structural_path": "组织关系",
+        "chunk_structural_path": "document"
+      },
+      "expected_entities": ["国联集团", "数字科技公司"],
+      "expected_relations": [
+        {"subject": "国联集团", "predicate": "管理", "object": "数字科技公司"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": true,
+      "evidence_terms": ["国联集团", "管理", "数字科技公司"],
+      "expected_tags": ["规则推演前提", "组织关系", "演示数据"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-027",
+      "statement": "智慧流程中枢依赖集团数据交换平台",
+      "source": {
+        "filename": "规则推演前提事实（演示版）.txt",
+        "structural_path": "系统依赖与维护事件/依赖关系",
+        "chunk_structural_path": "document"
+      },
+      "expected_entities": ["智慧流程中枢", "集团数据交换平台"],
+      "expected_relations": [
+        {"subject": "智慧流程中枢", "predicate": "依赖", "object": "集团数据交换平台"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": true,
+      "evidence_terms": ["智慧流程中枢", "依赖", "集团数据交换平台"],
+      "expected_tags": ["规则推演前提", "系统依赖", "演示数据"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-028",
+      "statement": "集团数据交换平台使用统一身份组件",
+      "source": {
+        "filename": "规则推演前提事实（演示版）.txt",
+        "structural_path": "系统依赖与维护事件/组件关系",
+        "chunk_structural_path": "document"
+      },
+      "expected_entities": ["集团数据交换平台", "统一身份组件"],
+      "expected_relations": [
+        {"subject": "集团数据交换平台", "predicate": "使用", "object": "统一身份组件"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": true,
+      "evidence_terms": ["集团数据交换平台", "使用", "统一身份组件"],
+      "expected_tags": ["规则推演前提", "组件关系", "演示数据"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-029",
+      "statement": "统一身份组件存在升级维护事件风险",
+      "source": {
+        "filename": "规则推演前提事实（演示版）.txt",
+        "structural_path": "系统依赖与维护事件/维护事件",
+        "chunk_structural_path": "document"
+      },
+      "expected_entities": ["统一身份组件", "升级维护事件"],
+      "expected_relations": [
+        {"subject": "统一身份组件", "predicate": "存在风险", "object": "升级维护事件"}
+      ],
+      "seeded_graph": true,
+      "required_for_inference": true,
+      "evidence_terms": ["统一身份组件", "存在风险", "升级维护事件"],
+      "expected_tags": ["规则推演前提", "维护事件", "演示数据"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    },
+    {
+      "fact_id": "FACT-DEMO-030",
+      "statement": "系统依赖影响规则可推导智慧流程中枢受到升级维护事件影响",
+      "source": {
+        "filename": "procurement_risk_rules.py",
+        "structural_path": "SYSTEM_DEPENDENCY_RULE"
+      },
+      "expected_entities": ["智慧流程中枢", "集团数据交换平台", "统一身份组件", "升级维护事件"],
+      "expected_relations": [
+        {"subject": "智慧流程中枢", "predicate": "受到影响", "object": "升级维护事件"}
+      ],
+      "expected_tags": ["Semantica 推演", "系统依赖影响"],
+      "current": true,
+      "historical": false,
+      "governance_issue": false
+    }
+  ],
+  "questions": [
+    {
+      "question_id": "DOC-DEMO-001",
+      "question": "集团本部采购实施细则主要适用于哪些单位？",
+      "expected_answer_points": ["适用于国联集团", "可通过管理关系推导适用于数字科技公司", "优先引用 2025 演示现行版"],
+      "fact_ids": ["FACT-DEMO-001", "FACT-DEMO-016", "FACT-DEMO-020", "FACT-DEMO-026"]
+    },
+    {
+      "question_id": "DOC-DEMO-002",
+      "question": "有效采购金额采用什么统计口径？",
+      "expected_answer_points": ["审批状态必须为已通过", "订单状态为已签约、执行中或已验收", "已取消订单不计入", "关联明细后按订单主键去重"],
+      "fact_ids": ["FACT-DEMO-002", "FACT-DEMO-003"]
+    },
+    {
+      "question_id": "DOC-DEMO-003",
+      "question": "采购估算金额达到 300000 元如何执行？",
+      "expected_answer_points": ["纳入集团采购管理", "完成采购申请、评审、合同和验收留痕", "引用现行制度而非旧版阈值"],
+      "fact_ids": ["FACT-DEMO-013", "FACT-DEMO-014", "FACT-DEMO-016"]
+    },
+    {
+      "question_id": "DOC-DEMO-004",
+      "question": "供应商晚交货会给智慧流程中枢建设带来什么影响？",
+      "expected_answer_points": ["东方智造发生交付延期", "NexusOne 部署可能受到影响", "数字化管理部协调替代方案", "风险管理部持续跟踪"],
+      "fact_ids": ["FACT-DEMO-009", "FACT-DEMO-010", "FACT-DEMO-011", "FACT-DEMO-022"]
+    },
+    {
+      "question_id": "DOC-DEMO-005",
+      "question": "东方智造交付延期会影响哪些产品、项目和部门？",
+      "expected_answer_points": ["东方智造供应 NexusOne", "NexusOne 用于智慧流程中枢项目", "数字科技公司负责该项目", "数字化管理部协调替代方案", "风险管理部跟踪风险"],
+      "fact_ids": ["FACT-DEMO-006", "FACT-DEMO-007", "FACT-DEMO-008", "FACT-DEMO-009", "FACT-DEMO-010", "FACT-DEMO-011", "FACT-DEMO-021"]
+    },
+    {
+      "question_id": "DOC-DEMO-006",
+      "question": "说明东方智造风险的完整影响路径和每一跳依据。",
+      "expected_answer_points": ["路径为供应商到产品到项目，并通过责任组织负责项目的反向遍历定位责任组织", "每一跳都有可核验来源且来源文件允许重复", "规则推演结论关联前提和规则版本"],
+      "fact_ids": ["FACT-DEMO-006", "FACT-DEMO-007", "FACT-DEMO-008", "FACT-DEMO-009", "FACT-DEMO-021"]
+    },
+    {
+      "question_id": "DOC-DEMO-007",
+      "question": "Semantica 规则推演可以发现哪些新结论？",
+      "expected_answer_points": ["采购实施细则适用于数字科技公司", "智慧流程中枢项目受到交付延期影响", "智慧流程中枢受到统一身份组件升级维护事件影响", "结论必须保留规则、前提和来源证据"],
+      "fact_ids": ["FACT-DEMO-020", "FACT-DEMO-021", "FACT-DEMO-030"]
+    },
+    {
+      "question_id": "DOC-DEMO-008",
+      "question": "当前制度版本与历史版本有什么差异？",
+      "expected_answer_points": ["采购管理阈值从 200000 元调整为 300000 元", "现行版增加审批状态过滤", "默认问答不引用历史版本但历史仍可追溯"],
+      "fact_ids": ["FACT-DEMO-013", "FACT-DEMO-014", "FACT-DEMO-015", "FACT-DEMO-016"]
+    },
+    {
+      "question_id": "DOC-DEMO-009",
+      "question": "项目例会和项目介绍视频分别提供了哪些可定位证据？",
+      "expected_answer_points": ["音频提供交付延期、替代方案和风险跟踪的时间区间", "视频关键帧提供系统组件和风险路径", "音视频引用应包含时间戳"],
+      "fact_ids": ["FACT-DEMO-022", "FACT-DEMO-023"]
+    },
+    {
+      "question_id": "DOC-DEMO-010",
+      "question": "国联集团明年的实际利润目标是多少？",
+      "expected_answer_points": ["当前知识空间中未检索到足够依据", "不得把采购目标误当作利润目标", "不得编造数值"],
+      "fact_ids": ["FACT-DEMO-005", "FACT-DEMO-024"]
+    },
+    {
+      "question_id": "DOC-DEMO-011",
+      "question": "治理工作台应该提示哪些人工确认问题？",
+      "expected_answer_points": ["现行与历史制度版本冲突", "组织别名合并建议", "供应商同名候选不能自动合并", "审批待补充订单属于合规异常", "缺失项目关系需要人工补充并关联证据"],
+      "fact_ids": ["FACT-DEMO-007", "FACT-DEMO-013", "FACT-DEMO-014", "FACT-DEMO-017", "FACT-DEMO-018", "FACT-DEMO-019"]
+    },
+    {
+      "question_id": "DOC-DEMO-012",
+      "question": "扫描采购审批单中 PO-DEMO-2026-001 的申请单位、采购内容、金额和审批结论是什么？",
+      "expected_answer_points": ["申请单位为数字科技公司", "采购智慧流程中枢首批组件并包含 NexusOne", "申请金额为 360000 元", "集团采购管理部审批通过", "图片为演示合成扫描件"],
+      "fact_ids": ["FACT-DEMO-025"]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+schema_version: chuanshen.demo.processing/v1
+dataset: guolian-enterprise-demo
+disclaimer: 演示数据，不代表国联集团真实经营数据
+
+space:
+  code: guolian-enterprise-demo
+  processing_target: both
+
+routes:
+  direct_text:
+    extensions: [md, txt, rst, html, csv, json, jsonl, xml, yaml, yml, py]
+    use_ocr: false
+    preserve_structure: true
+  office:
+    extensions: [docx, pptx, xlsx]
+    preserve_tables: true
+    preserve_slides: true
+    preserve_sheets: true
+  scanned_document:
+    extensions: [pdf]
+    detect_text_layer: true
+    use_ocr_only_when_needed: true
+    languages: [chi_sim, eng]
+  image:
+    extensions: [png, jpg, jpeg, webp, tif, tiff]
+    ocr: true
+    vision_description: true
+  audio:
+    extensions: [wav, mp3, m4a, flac, ogg]
+    asr: true
+    timestamps: true
+  video:
+    extensions: [mp4, mov, mkv, webm]
+    extract_audio: true
+    asr: true
+    frame_strategy: fixed_interval
+    frame_interval_seconds: 5
+    max_frames: 20
+    frame_ocr: true
+    frame_vision: true
+
+governance:
+  automatic_summary: true
+  automatic_classification: true
+  duplicate_detection: true
+  version_conflict_detection: true
+  entity_normalization_suggestions: true
+  publish_low_confidence_ocr_facts: false
+
+security:
+  redact_sensitive_values_server_side: true
+  treat_document_content_as_untrusted: true
+  allow_raw_sql: false
+  log_secrets: false

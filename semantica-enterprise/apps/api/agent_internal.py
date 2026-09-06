@@ -35,6 +35,7 @@ from packages.platform.models import (
     CanonicalEntity,
     Chunk,
     Conversation,
+    ConversationMessage,
     Document,
     DocumentProfile,
     DocumentVersion,
@@ -62,6 +63,7 @@ from packages.platform.structured_query import (
     apply_activated_metric_contracts,
     semantic_catalog_for_planner,
 )
+from packages.platform.semantic_mapping import find_semantic_relationship_path
 from packages.platform.security import (
     create_agent_access_token,
     decode_agent_access_token,
@@ -72,27 +74,42 @@ from packages.semantica_adapter.extract import _effective_temperature
 
 
 router = APIRouter(prefix="/internal/agent", tags=["agent-internal"])
+AGENT_SEARCH_TEXT_LIMIT = 1200
 
 
 def _active(model):
     return model.deleted_at.is_(None)
 
 
-def _agent_citation_contract(result: dict[str, Any]) -> dict[str, Any]:
+def _agent_citation_contract(
+    result: dict[str, Any],
+    *,
+    first_citation_number: int = 1,
+) -> dict[str, Any]:
     """Attach immutable citation labels to ranked knowledge-tool results."""
     contracted = dict(result)
     contracted_items = []
-    for raw_item in result.get("items") or []:
+    for index, raw_item in enumerate(result.get("items") or []):
         item = dict(raw_item)
-        rank = int(item.get("rank") or 0)
-        item["citation_number"] = rank
-        item["citation_label"] = f"[{rank}]"
+        full_text = str(item.get("text") or "")
+        if len(full_text) > AGENT_SEARCH_TEXT_LIMIT:
+            item["text"] = full_text[:AGENT_SEARCH_TEXT_LIMIT].rstrip() + "…"
+            item["text_truncated"] = True
+            item["text_char_count"] = len(full_text)
+            item["full_text_tool"] = "knowledge_get_fragment"
+        else:
+            item["text_truncated"] = False
+        rank = int(item.get("rank") or index + 1)
+        citation_number = int(first_citation_number) + index
+        item["citation_number"] = citation_number
+        item["citation_label"] = f"[{citation_number}]"
         item["citation_title"] = item.get("title") or ""
         item["citation_rule"] = "引用本片段时必须原样使用 citation_label，不得重新编号"
         contracted_items.append(item)
     contracted["items"] = contracted_items
     contracted["citation_policy"] = {
         "immutable": True,
+        "allowed_citation_labels": [item["citation_label"] for item in contracted_items],
         "instruction": "引用编号是片段外键；只能复制 item.citation_label，不得按采用顺序重新编号",
     }
     return contracted
@@ -278,6 +295,22 @@ def agent_knowledge_search(
     requested = payload.space_ids or list(token_spaces)
     if not set(requested).issubset(token_spaces):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "工具请求超出凭据知识空间范围")
+    assistant = db.scalar(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == payload.conversation_id,
+            ConversationMessage.tenant_id == claims["tenant_id"],
+            ConversationMessage.user_id == claims["sub"],
+            ConversationMessage.role == "assistant",
+            ConversationMessage.status == "generating",
+            _active(ConversationMessage),
+        )
+        .order_by(ConversationMessage.sequence.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    if assistant is None:
+        raise HTTPException(409, "当前会话没有正在生成的回答")
     result = execute_hybrid_search(
         db,
         tenant_id=claims["tenant_id"],
@@ -292,8 +325,21 @@ def agent_knowledge_search(
         filters=payload.filters,
         audit_action="agent.knowledge.search",
     )
+    metadata = dict(assistant.message_metadata or {})
+    first_citation_number = max(
+        1,
+        int(metadata.get("next_document_citation_number") or 1),
+    )
+    contracted = _agent_citation_contract(
+        result,
+        first_citation_number=first_citation_number,
+    )
+    metadata["next_document_citation_number"] = (
+        first_citation_number + len(contracted.get("items") or [])
+    )
+    assistant.message_metadata = metadata
     db.commit()
-    return _agent_citation_contract(result)
+    return contracted
 
 
 @router.get("/knowledge/fragments/{chunk_id}")
@@ -706,6 +752,7 @@ def agent_structured_schema_search(
                 entity.get("id", ""), entity.get("label", ""), entity.get("description", ""),
                 *(item.get("label", "") for item in attributes),
                 *(item.get("label", "") for item in related),
+                *(item.get("description", "") for item in related),
                 source.name if source else "",
                 space.name if space else "",
             ]
@@ -737,6 +784,7 @@ def agent_structured_schema_search(
                     "business_definition": item.get("business_definition") or "",
                     "default_aggregate": item.get("default_aggregate"),
                     "required_filters": item.get("required_filters") or [],
+                    "required_relationships": item.get("required_relationships") or [],
                 } for item in attributes if item.get("is_measure")],
                 "score": round(float(score), 4),
             })
@@ -815,8 +863,9 @@ def agent_structured_get_object(
             },
             "rules": [
                 "只能引用本响应中的语义 ID",
-                "指标的 default_aggregate 和 required_filters 属于已激活业务口径，必须采用",
-                "required_filters 必须同时出现在 Plan filters 和 IR where；平台会在执行边界再次强制应用",
+                "指标的 default_aggregate、required_filters 和 required_relationships 属于已激活业务口径，必须采用",
+                "平台会在执行边界强制应用固定筛选和关联 EXISTS 口径，关联条件只能来自已激活语义映射",
+                "关系 required_filters 定义该关系的有效范围，由平台执行边界强制应用",
                 "比较表达式使用 kind=binary 和 SQL 白名单运算符",
                 "可选字段没有值时省略，不要传 null",
             ],
@@ -833,34 +882,12 @@ def agent_structured_relation_path(
     _require_conversation(claims, payload.conversation_id)
     _, version, _, _ = _agent_mapping_version(db, claims, payload.mapping_version_id)
     relationships = list((version.manifest or {}).get("relationships") or [])
-    queue: list[tuple[str, list[dict[str, Any]]]] = [(payload.from_entity_id, [])]
-    visited = {payload.from_entity_id}
-    found: list[dict[str, Any]] | None = None
-    while queue:
-        entity_id, path = queue.pop(0)
-        if entity_id == payload.to_entity_id:
-            found = path
-            break
-        if len(path) >= payload.max_depth:
-            continue
-        for relation in relationships:
-            if relation.get("from_entity_id") == entity_id:
-                other, direction = relation.get("to_entity_id"), "forward"
-            elif relation.get("to_entity_id") == entity_id:
-                other, direction = relation.get("from_entity_id"), "reverse"
-            else:
-                continue
-            if not other or other in visited:
-                continue
-            visited.add(other)
-            queue.append((other, [*path, {
-                "relationship_id": relation["id"],
-                "from_entity_id": entity_id,
-                "to_entity_id": other,
-                "direction": direction,
-                "cardinality": relation.get("cardinality", "unknown"),
-                "evidence": relation.get("evidence") or [],
-            }]))
+    found = find_semantic_relationship_path(
+        relationships,
+        payload.from_entity_id,
+        payload.to_entity_id,
+        max_depth=payload.max_depth,
+    )
     return {
         "found": found is not None,
         "from_entity_id": payload.from_entity_id,
@@ -930,6 +957,18 @@ def agent_structured_execute(
     user = db.get(User, claims["sub"])
     if user is None or not user.enabled or user.deleted_at is not None:
         raise HTTPException(403, "会话用户不可用")
+    assistant_message_id = db.scalar(
+        select(ConversationMessage.id).where(
+            ConversationMessage.conversation_id == payload.conversation_id,
+            ConversationMessage.tenant_id == user.tenant_id,
+            ConversationMessage.user_id == user.id,
+            ConversationMessage.role == "assistant",
+            ConversationMessage.status == "generating",
+            _active(ConversationMessage),
+        ).order_by(ConversationMessage.sequence.desc()).limit(1)
+    )
+    if not assistant_message_id:
+        raise HTTPException(409, "当前会话没有正在生成的回答")
     from apps.api.structured_data import execute_structured_query_api
 
     effective_plan, effective_ir = apply_activated_metric_contracts(
@@ -945,6 +984,7 @@ def agent_structured_execute(
             query_ir=effective_ir,
             max_rows=payload.max_rows,
             conversation_id=payload.conversation_id,
+            message_id=assistant_message_id,
         ),
         user=user,
         db=db,

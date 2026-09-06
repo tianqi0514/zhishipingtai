@@ -65,6 +65,15 @@ def ready():
     return {"status": "ready"}
 
 
+@app.get(f"{settings.api_prefix}/public-config", include_in_schema=False)
+def public_config():
+    """Expose deployment URLs only; never expose internal credentials or model settings."""
+    return {
+        "mcp_url": settings.mcp_public_url.strip() or None,
+        "agent_url": settings.agent_public_url.strip() or None,
+    }
+
+
 if static_dir.exists():
     app.mount("/assets", StaticFiles(directory=static_dir), name="assets")
 

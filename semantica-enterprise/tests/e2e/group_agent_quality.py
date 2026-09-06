@@ -75,7 +75,10 @@ def validate_references(platform: Platform, assistant: dict[str, Any]) -> None:
     assert cited <= available, (cited, available)
     data_cited = {
         int(value)
-        for value in re.findall(r"(?:【数据|\[数据)(\d{1,3})(?:】|\])", assistant["content"])
+        for value in re.findall(
+            r"(?:【\s*数据\s*|\[\s*数据\s*)(\d{1,3})\s*(?:】|\])",
+            assistant["content"],
+        )
     }
     data_available = {row["citation_number"] for row in assistant["structured_citations"]}
     assert data_cited <= data_available, (data_cited, data_available)

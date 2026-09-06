@@ -43,7 +43,20 @@ async function modelConfig(sessionId) {
 }
 
 function safeModelFingerprint(model) {
-  return JSON.stringify([model.provider, model.model_name, model.base_url, model.max_tokens, model.max_retries, model.temperature])
+  return JSON.stringify([
+    model.provider, model.model_name, model.base_url, model.max_tokens,
+    model.max_retries, model.temperature, modelContextWindow(model),
+  ])
+}
+
+function modelContextWindow(model) {
+  const configured = Number(
+    model?.parameters?.context_window
+    || model?.parameters?.contextWindow
+    || process.env.DSH_MODEL_CONTEXT_WINDOW
+    || 131072
+  )
+  return Number.isInteger(configured) && configured > 0 ? configured : 131072
 }
 
 async function harnessFor(sessionId) {
@@ -62,6 +75,7 @@ async function harnessFor(sessionId) {
     DSH_MODEL_MAX_TOKENS: String(model.max_tokens || 4096),
     DSH_MODEL_MAX_RETRIES: String(model.max_retries || 2),
     DSH_MODEL_TEMPERATURE: String(model.temperature ?? 0.2),
+    DSH_MODEL_CONTEXT_WINDOW: String(modelContextWindow(model)),
     DSH_TELEMETRY_DISABLED: '1',
   }
   const harness = new DeepSeekHarness({

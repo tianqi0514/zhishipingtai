@@ -1,8 +1,13 @@
 .git
 .env
+.cache
+.venv
+.demo-build
 data
+docs
 deploy/secrets
 __pycache__
 .pytest_cache
 tests
+uv.lock
 *.pyc

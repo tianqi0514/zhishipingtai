@@ -120,8 +120,15 @@ def resolve_model_for_scene(
             ModelConfig.deleted_at.is_(None),
         ).limit(1)
     )
-    warning = "模型路由未配置或目标不可用，已使用同类型默认模型" if policy else None
-    return ResolvedModel(fallback, "kind_default" if fallback else "unresolved", scene, warning)
+    if fallback is not None:
+        warning = "模型路由未配置或目标不可用，已使用同类型默认模型" if policy else None
+        return ResolvedModel(fallback, "kind_default", scene, warning)
+    warning = (
+        "模型路由未配置且没有可用的同类型默认模型"
+        if policy
+        else "未配置可用模型"
+    )
+    return ResolvedModel(None, "unresolved", scene, warning)
 
 
 def resolved_routes(db: Session, tenant_id: str) -> list[dict[str, Any]]:

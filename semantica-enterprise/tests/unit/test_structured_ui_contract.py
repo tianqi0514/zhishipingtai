@@ -49,6 +49,8 @@ def test_chat_renders_real_structured_events_and_data_citations() -> None:
     ):
         assert event_type in APP
     assert "data-structured-citation" in APP
+    assert "structuredCitationMentioned" in APP
+    assert "数据\\s*(\\d{1,3})" in APP
     assert "data-open-query-run" in APP
     assert "/structured-query/runs/" in APP
     assert ".inspector-evidence-card.structured" in STYLE

@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 from apps.api.routes import (
@@ -121,10 +121,33 @@ def test_readiness_vocabulary_and_templates_use_published_graph_facts() -> None:
         assert {item["name"] for item in vocabulary["predicates"]} == {"适用于", "管理"}
         assert readiness["ready"] is True
         assert readiness["evidence_coverage"] == 0
+        assert readiness["templates"] == templates
         assert any(item["code"] == "low_evidence_coverage" for item in readiness["warnings"])
         policy_template = next(item for item in templates if item["id"] == "policy_scope")
         assert policy_template["ready"] is True
         assert policy_template["missing_predicates"] == []
+
+
+def test_analysis_vocabulary_resolves_overlays_in_batches() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        tenant, _, space, *_ = _business_fixture(db)
+        statement_count = 0
+
+        def count_statement(*_args) -> None:
+            nonlocal statement_count
+            statement_count += 1
+
+        event.listen(engine, "before_cursor_execute", count_statement)
+        try:
+            vocabulary = analysis_vocabulary(db, tenant_id=tenant.id, space_id=space.id)
+        finally:
+            event.remove(engine, "before_cursor_execute", count_statement)
+
+        assert vocabulary["entity_count"] == 3
+        assert vocabulary["asserted_fact_count"] == 2
+        assert statement_count <= 6
 
 
 def test_match_preview_executes_semantica_and_diagnoses_missing_relationship() -> None:

@@ -64,7 +64,9 @@ test('structured execute schema is aligned with the strict platform Plan and IR 
   assert.match(sections[0].text, /重新调用 structured_schema_search/)
   assert.match(tools.find(item => item.name === 'knowledge_search').description, /citation_label/)
   assert.match(tools.find(item => item.name === 'structured_get_object').description, /required_filters/)
+  assert.match(tools.find(item => item.name === 'structured_get_object').description, /required_relationships/)
   assert.match(tool.description, /固定筛选同时写入 Plan filters 和 IR where/)
+  assert.match(tool.description, /关联 EXISTS/)
 })
 
 
@@ -115,6 +117,7 @@ test('numeric questions require structured execution, not prose search', () => {
   listeners.get('agent/turn-stopping')({ agent, turn: 4, signal: new AbortController().signal })
   assert.equal(steered.length, 1)
   assert.match(steered[0].content[0].text, /structured_execute_query/)
+  assert.match(steered[0].content[0].text, /structured_schema_search/)
 })
 
 
@@ -145,8 +148,26 @@ test('documentary follow-ups do not repeat an already completed metric query', (
   )
   assert.deepEqual(
     evidenceRequirements('销售额是多少，统计口径依据哪份制度？'),
-    ['knowledge_search', 'structured_execute_query'],
+    ['knowledge_search', 'structured_schema_search', 'structured_execute_query'],
   )
+})
+
+
+test('impact-chain questions require graph query and governed reasoning', () => {
+  const { listeners } = fixture()
+  const steered = []
+  const agent = {
+    session: { events: [
+      { type: 'user/message', data: { content: [{ type: 'text', text: '东方智造延期会影响哪些项目？请给出完整关系路径。' }], source: { kind: 'user' } } },
+      { type: 'tool/call', data: { turn: 6, callId: 'search-6', name: 'knowledge_search' } },
+      { type: 'tool/result', data: { callId: 'search-6', content: [] } },
+    ] },
+    steer(message) { steered.push(message) },
+  }
+  listeners.get('agent/turn-stopping')({ agent, turn: 6, signal: new AbortController().signal })
+  assert.equal(steered.length, 1)
+  assert.match(steered[0].content[0].text, /knowledge_graph_query/)
+  assert.match(steered[0].content[0].text, /knowledge_reason/)
 })
 
 

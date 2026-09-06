@@ -86,3 +86,25 @@ def test_explicit_unavailable_model_does_not_silently_fall_back() -> None:
         assert resolved.model is None
         assert resolved.source == "explicit"
         assert resolved.warning
+
+
+def test_unresolved_route_does_not_claim_that_a_default_model_was_used() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        tenant = Tenant(code="unresolved", name="缺少重排模型")
+        db.add(tenant); db.flush()
+        db.add(ModelRoutingPolicy(
+            tenant_id=tenant.id,
+            name="平台路由",
+            routes={"reranking": None},
+            enabled=True,
+            is_default=True,
+        )); db.flush()
+
+        resolved = resolve_model_for_scene(db, tenant.id, "reranking")
+
+        assert resolved.model is None
+        assert resolved.source == "unresolved"
+        assert resolved.warning == "模型路由未配置且没有可用的同类型默认模型"
+        assert "已使用" not in resolved.warning

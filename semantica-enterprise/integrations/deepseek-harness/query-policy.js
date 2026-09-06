@@ -22,6 +22,19 @@ const DOCUMENT_EVIDENCE_PATTERNS = [
   /(?:口径|依据|制度|规定|定义|说明|手册|合同|条款|政策|文档)/u,
 ]
 
+const GRAPH_PATH_PATTERNS = [
+  /(?:完整|关联|关系|影响|依赖|传导).*(?:路径|链路|项目|产品|系统|部门|组织)/u,
+  /(?:哪些项目|哪些产品|哪些系统|哪些责任部门|多跳|图谱)/u,
+  /(?:relationship|dependency|impact|graph).*(?:path|chain)/iu,
+]
+
+const RULE_REASONING_PATTERNS = [
+  /(?:风险|延期|故障|维护).*(?:影响|传导|波及)/u,
+  /(?:根据|按照).*(?:规则|已有事实).*(?:推导|判断|结论)/u,
+  /(?:规则推演|推导结论|风险传导)/u,
+  /(?:infer|reason|rule).*(?:impact|conclusion)/iu,
+]
+
 // Questions in this shape ask where a metric is defined, not for a live
 // metric value.  Keep these phrases separate from generic metric nouns such
 // as “销售额”, which may legitimately appear in a document-only question.
@@ -60,14 +73,30 @@ export function requiresStructuredQuery(input) {
 }
 
 
+export function requiresGraphQuery(input) {
+  const query = String(input || '').trim()
+  return Boolean(query) && GRAPH_PATH_PATTERNS.some(pattern => pattern.test(query))
+}
+
+
+export function requiresKnowledgeReason(input) {
+  const query = String(input || '').trim()
+  return Boolean(query) && RULE_REASONING_PATTERNS.some(pattern => pattern.test(query))
+}
+
+
 export function evidenceRequirements(input) {
   const query = String(input || '').trim()
   if (!requiresKnowledgeSearch(query)) return []
   const structured = requiresStructuredQuery(query)
   const document = !structured || DOCUMENT_EVIDENCE_PATTERNS.some(pattern => pattern.test(query))
+  const graph = requiresGraphQuery(query)
+  const reasoning = requiresKnowledgeReason(query)
   return [
     ...(document ? ['knowledge_search'] : []),
-    ...(structured ? ['structured_execute_query'] : []),
+    ...(graph ? ['knowledge_graph_query'] : []),
+    ...(reasoning ? ['knowledge_reason'] : []),
+    ...(structured ? ['structured_schema_search', 'structured_execute_query'] : []),
   ]
 }
 

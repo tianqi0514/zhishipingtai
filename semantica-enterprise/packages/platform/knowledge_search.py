@@ -466,6 +466,8 @@ def execute_hybrid_search(
                         allowed_space_ids=space_ids,
                         embedder=embedder,
                         limit=top_k * 3,
+                        timeout_seconds=settings.qdrant_search_timeout_seconds,
+                        max_attempts=settings.qdrant_search_max_attempts,
                     )
                 )
             except Exception as exc:

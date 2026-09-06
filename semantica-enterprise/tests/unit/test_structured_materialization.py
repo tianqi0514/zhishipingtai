@@ -24,7 +24,7 @@ from packages.platform.models import (
 from packages.platform.structured_materialization import materialize_database_mapping
 
 
-def _fixture() -> tuple[Session, Document, DocumentVersion]:
+def _fixture(*, customer_name: str = "国联客户") -> tuple[Session, Document, DocumentVersion]:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     db = Session(engine)
@@ -95,10 +95,10 @@ def _fixture() -> tuple[Session, Document, DocumentVersion]:
     element = ContentElement(
         id="element", tenant_id=tenant.id, space_id=space.id, document_id=document.id,
         version_id=version.id, element_id="stable-row", element_type="record", ordinal=1,
-        text="id: 1\nname: 国联客户", structural_path="public.customers[1]",
+        text=f"id: 1\nname: {customer_name}", structural_path="public.customers[1]",
         element_metadata={
             "source_id": source.id, "object_id": "public.customers",
-            "row_key": "row-one", "row": {"id": 1, "name": "国联客户"},
+            "row_key": "row-one", "row": {"id": 1, "name": customer_name},
         },
     )
     chunk = Chunk(
@@ -160,5 +160,18 @@ def test_new_snapshot_retires_rows_deleted_from_database() -> None:
         entity = db.scalar(select(CanonicalEntity))
         assert entity is not None
         assert entity.status == "superseded"
+    finally:
+        db.close()
+
+
+def test_database_materialization_preserves_authoritative_brand_spelling() -> None:
+    db, document, version = _fixture(customer_name="NexusOne")
+    try:
+        materialize_database_mapping(db, document=document, version=version)
+        db.commit()
+        entity = db.scalar(select(CanonicalEntity))
+        assert entity is not None
+        assert entity.canonical_name == "NexusOne"
+        assert entity.properties["semantica_normalized_name"] == "Nexusone"
     finally:
         db.close()

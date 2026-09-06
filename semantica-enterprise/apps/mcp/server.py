@@ -10,12 +10,26 @@ import httpx
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.fastmcp.utilities.func_metadata import ArgModelBase
+
+from apps.api.structured_schemas import SemanticQueryIR, SemanticQueryPlan
 
 
 API_BASE = os.getenv("PLATFORM_API", "http://api:8080/api/v1").rstrip("/")
 PORT = int(os.getenv("MCP_PORT", "8091"))
 REQUEST_TIMEOUT = float(os.getenv("MCP_REQUEST_TIMEOUT", "600"))
+MCP_ALLOWED_HOSTS = [
+    "mcp-server:8091", "localhost:8091", "127.0.0.1:8091",
+    *[item.strip() for item in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if item.strip()],
+]
 authorization_header: ContextVar[str | None] = ContextVar("authorization_header", default=None)
+
+# The MCP SDK argument wrapper otherwise ignores unknown top-level keys even
+# when nested Pydantic contracts use ``extra=forbid``.  Make every registered
+# public tool fail closed so a caller cannot smuggle SQL or credential-shaped
+# fields alongside an otherwise valid request.
+ArgModelBase.model_config["extra"] = "forbid"
+ArgModelBase.model_rebuild(force=True)
 
 mcp = FastMCP(
     "传神智库",
@@ -23,7 +37,7 @@ mcp = FastMCP(
     stateless_http=True,
     json_response=True,
     transport_security=TransportSecuritySettings(
-        allowed_hosts=["mcp-server:8091", "localhost:8091", "127.0.0.1:8091"]
+        allowed_hosts=MCP_ALLOWED_HOSTS
     ),
 )
 
@@ -63,6 +77,49 @@ async def _request(method: str, path: str, *, params=None, payload=None) -> Any:
     if response.status_code >= 400:
         raise ValueError(str(body.get("detail") or f"知识平台请求失败 ({response.status_code})"))
     return body
+
+
+async def _active_mapping_version(mapping_version_id: str) -> dict[str, Any]:
+    """Return one authorised active mapping version through the public API.
+
+    MCP deliberately does not read the platform database.  The list endpoint
+    already applies tenant and knowledge-space permissions, and this helper
+    only selects one active version from that authorised projection.
+    """
+    mappings = await _request("GET", "/semantic-mappings")
+    for mapping in mappings.get("items") or []:
+        active = mapping.get("active_version") or {}
+        if str(active.get("id") or "") == mapping_version_id:
+            return active
+    raise ValueError("语义映射版本不存在、未激活或当前用户无权访问")
+
+
+def _business_entity(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item.get(key)
+        for key in ("id", "ontology_term_id", "label", "description")
+    }
+
+
+def _business_attribute(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item.get(key)
+        for key in (
+            "id", "ontology_term_id", "entity_id", "label", "semantic_type",
+            "is_measure", "aliases", "business_definition", "default_aggregate",
+            "required_filters", "required_relationships", "confidence",
+        )
+    }
+
+
+def _business_relationship(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: item.get(key)
+        for key in (
+            "id", "ontology_term_id", "label", "description", "from_entity_id", "to_entity_id",
+            "cardinality", "required_filters", "confidence",
+        )
+    }
 
 
 @mcp.tool()
@@ -228,6 +285,150 @@ async def knowledge_get_document_profile(
             raise ValueError("文档没有可用版本")
         version_id = str(versions[0]["id"])
     return await _request("GET", f"/versions/{version_id}/profile")
+
+
+@mcp.tool()
+async def structured_schema_search(
+    query: str,
+    space_ids: list[str] | None = None,
+    source_ids: list[str] | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """在当前用户可读范围内查找已激活的结构化语义对象。"""
+    if not 1 <= limit <= 50:
+        raise ValueError("limit 必须在 1 到 50 之间")
+    mappings = await _request("GET", "/semantic-mappings")
+    allowed_spaces = set(space_ids or [])
+    allowed_sources = set(source_ids or [])
+    query_text = query.casefold().strip()
+    query_tokens = [item for item in query_text.split() if item]
+    items: list[dict[str, Any]] = []
+    for mapping in mappings.get("items") or []:
+        active = mapping.get("active_version") or {}
+        if active.get("status") != "active":
+            continue
+        if allowed_spaces and str(mapping.get("space_id")) not in allowed_spaces:
+            continue
+        if allowed_sources and str(mapping.get("source_id")) not in allowed_sources:
+            continue
+        manifest = active.get("manifest") or {}
+        attributes_by_entity: dict[str, list[dict[str, Any]]] = {}
+        for attribute in manifest.get("attributes") or []:
+            attributes_by_entity.setdefault(str(attribute.get("entity_id") or ""), []).append(attribute)
+        relationships = manifest.get("relationships") or []
+        for entity in manifest.get("entities") or []:
+            entity_id = str(entity.get("id") or "")
+            attributes = attributes_by_entity.get(entity_id, [])
+            related = [
+                item for item in relationships
+                if entity_id in {str(item.get("from_entity_id") or ""), str(item.get("to_entity_id") or "")}
+            ]
+            terms = [
+                entity_id,
+                str(entity.get("label") or ""),
+                str(entity.get("description") or ""),
+                *(str(item.get("label") or "") for item in attributes),
+                *(str(item.get("label") or "") for item in related),
+                str(mapping.get("name") or ""),
+            ]
+            searchable = " ".join(terms).casefold()
+            token_score = sum(item in searchable for item in query_tokens) / max(1, len(query_tokens))
+            phrase_score = 1.0 if query_text and query_text in searchable else 0.0
+            label_score = min(1.0, sum(
+                bool(term and len(term.strip()) >= 2 and term.casefold() in query_text)
+                for term in terms
+            ) / 2)
+            score = max(token_score, phrase_score, label_score)
+            if score <= 0:
+                continue
+            items.append({
+                "semantic_object_id": entity_id,
+                "label": entity.get("label"),
+                "description": entity.get("description"),
+                "attribute_ids": [item.get("id") for item in attributes],
+                "relationship_ids": [item.get("id") for item in related],
+                "mapping_version_id": active.get("id"),
+                "source_id": mapping.get("source_id"),
+                "space_id": mapping.get("space_id"),
+                "score": round(float(score), 4),
+            })
+    items.sort(key=lambda item: (item["score"], str(item.get("label") or "")), reverse=True)
+    selected = items[:limit]
+    return {
+        "query": query,
+        "semantic_objects": selected,
+        "mapping_versions": sorted({str(item["mapping_version_id"]) for item in selected}),
+        "warnings": [] if selected else ["未找到与问题匹配的已激活结构化语义对象"],
+    }
+
+
+@mcp.tool()
+async def structured_get_object(
+    semantic_object_id: str,
+    mapping_version_id: str,
+) -> dict[str, Any]:
+    """读取一个已激活映射中的业务对象、属性和关系定义。"""
+    version = await _active_mapping_version(mapping_version_id)
+    manifest = version.get("manifest") or {}
+    entity = next(
+        (item for item in manifest.get("entities") or [] if str(item.get("id") or "") == semantic_object_id),
+        None,
+    )
+    if entity is None:
+        raise ValueError("业务对象不存在或当前用户无权访问")
+    attributes = [
+        item for item in manifest.get("attributes") or []
+        if str(item.get("entity_id") or "") == semantic_object_id
+    ]
+    relationships = [
+        item for item in manifest.get("relationships") or []
+        if semantic_object_id in {
+            str(item.get("from_entity_id") or ""), str(item.get("to_entity_id") or "")
+        }
+    ]
+    return {
+        # The public MCP projection intentionally strips entity fragments,
+        # object/column bindings, join predicates and mapping evidence.  Only
+        # FastAPI's deterministic compiler is allowed to resolve those
+        # physical details while executing a validated semantic query.
+        "semantic_object": _business_entity(entity),
+        "attributes": [_business_attribute(item) for item in attributes],
+        "relationships": [_business_relationship(item) for item in relationships],
+        "relationship_paths": [{
+            "relationship_id": item.get("id"),
+            "direction": "outgoing" if str(item.get("from_entity_id") or "") == semantic_object_id else "incoming",
+            "other_entity_id": item.get("to_entity_id")
+            if str(item.get("from_entity_id") or "") == semantic_object_id else item.get("from_entity_id"),
+        } for item in relationships],
+        "mapping_version_id": version.get("id"),
+        "mapping_status": version.get("status"),
+        "schema_version_id": version.get("schema_version_id"),
+    }
+
+
+@mcp.tool()
+async def structured_execute_query(
+    semantic_query_plan: SemanticQueryPlan,
+    query_ir: SemanticQueryIR,
+    mapping_version_id: str,
+    max_rows: int = 100,
+) -> dict[str, Any]:
+    """校验并执行严格 Plan/IR；不接受原始 SQL 或物理数据库凭据。"""
+    if not 1 <= max_rows <= 1000:
+        raise ValueError("max_rows 必须在 1 到 1000 之间")
+    # Resolve the mapping first so an inactive, stale or unauthorised version
+    # is rejected before the execution request is made.
+    await _active_mapping_version(mapping_version_id)
+    return await _request(
+        "POST",
+        "/structured-query/execute",
+        payload={
+            "mapping_version_id": mapping_version_id,
+            "plan": semantic_query_plan.model_dump(mode="json"),
+            "query_ir": query_ir.model_dump(mode="json"),
+            "max_rows": max_rows,
+        },
+    )
 
 
 @mcp.tool()

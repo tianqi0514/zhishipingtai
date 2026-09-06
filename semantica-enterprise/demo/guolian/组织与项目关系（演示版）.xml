@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<knowledgeDataset id="guolian-enterprise-demo" disclaimer="演示数据，不代表国联集团真实经营数据">
+  <entities>
+    <entity id="ORG-DEMO-001" type="组织" name="国联集团" />
+    <entity id="ORG-DEMO-003" type="组织" name="数字科技公司">
+      <alias>国联数科</alias>
+      <alias>数科公司</alias>
+    </entity>
+    <entity id="DEPT-DEMO-002" type="部门" name="数字化管理部" />
+    <entity id="DEPT-DEMO-003" type="部门" name="风险管理部" />
+    <entity id="SUP-DEMO-001" type="供应商" name="东方智造" />
+    <entity id="PROD-DEMO-001" type="产品" name="NexusOne" />
+    <entity id="PRJ-DEMO-001" type="项目" name="智慧流程中枢项目" />
+    <entity id="RISK-DEMO-2026-001" type="风险事件" name="东方智造交付延期" />
+  </entities>
+  <relations>
+    <relation subject="国联集团" predicate="管理" object="数字科技公司" />
+    <relation subject="数字科技公司" predicate="负责" object="智慧流程中枢项目" />
+    <relation subject="东方智造" predicate="供应" object="NexusOne" />
+    <relation subject="NexusOne" predicate="用于" object="智慧流程中枢项目" />
+    <relation subject="东方智造" predicate="存在风险" object="东方智造交付延期" />
+    <relation subject="数字化管理部" predicate="协调" object="NexusOne替代方案" />
+    <relation subject="风险管理部" predicate="跟踪" object="东方智造交付延期" />
+  </relations>
+</knowledgeDataset>

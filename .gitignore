@@ -49,3 +49,10 @@ dist/
 test-results/
 playwright-report/
 artifacts/
+
+# Local Codex/demo build output and unrelated generated collateral
+/.codex-finalizer-receipts/
+/.demo-build/
+/marketing-materials/
+/semantica-enterprise/.demo-build/
+/semantica-enterprise/uv.lock

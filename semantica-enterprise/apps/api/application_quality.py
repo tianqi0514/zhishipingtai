@@ -448,6 +448,21 @@ def update_application_feedback(
     row = _must_tenant(db, ApplicationFeedback, row_id, admin.tenant_id, "应用反馈")
     _must_owned_application(db, row.application_id, admin)
     values = payload.model_dump(exclude_unset=True)
+    target_status = values.get("status")
+    if target_status in {"converted", "triaged"} and target_status != row.status:
+        raise HTTPException(
+            status_code=409,
+            detail="该反馈状态只能由转治理和治理处理流程更新",
+        )
+    if target_status == "resolved" and target_status != row.status:
+        knowledge_quality_issue = row.feedback_type in {
+            "incorrect", "incomplete", "outdated", "bad_citation", "permission",
+        }
+        if row.curation_case_id or knowledge_quality_issue:
+            raise HTTPException(
+                status_code=409,
+                detail="知识质量反馈必须完成治理并通过上线测试后才能解决",
+            )
     apply_patch(row, values, {"status", "comment"})
     audit(db, admin.tenant_id, admin.id, "application.feedback.update", "application_feedback", row.id, values)
     db.commit()

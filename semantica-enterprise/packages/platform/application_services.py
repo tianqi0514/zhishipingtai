@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import (
+    Application,
+    ApplicationCredential,
     ApplicationGrant,
+    ApplicationScenario,
     ApplicationScenarioVersion,
+    EvaluationRun,
+    KnowledgeProduct,
     KnowledgeProductAlias,
     KnowledgeProductRelease,
     KnowledgeProductReleaseItem,
@@ -17,6 +23,145 @@ from .models import (
 
 class ApplicationConfigurationError(ValueError):
     pass
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
+def _allowed_resource_ids(
+    db: Session,
+    *,
+    application_id: str,
+    resource_type: str,
+    permission: str,
+) -> set[str]:
+    rows = list(db.scalars(select(ApplicationGrant).where(
+        ApplicationGrant.application_id == application_id,
+        ApplicationGrant.resource_type == resource_type,
+        ApplicationGrant.permission == permission,
+        ApplicationGrant.deleted_at.is_(None),
+    )))
+    denied = {row.resource_id for row in rows if row.effect == "deny"}
+    return {row.resource_id for row in rows if row.effect == "allow"} - denied
+
+
+def application_delivery_readiness(
+    db: Session,
+    application: Application,
+) -> dict[str, Any]:
+    """Compute application readiness from the same linked resources runtime uses.
+
+    In particular, a scenario only counts when the application also has read
+    access to the exact knowledge product referenced by its current immutable
+    version.  This prevents unrelated grants from being combined into a false
+    100% readiness signal.
+    """
+
+    product_ids = _allowed_resource_ids(
+        db,
+        application_id=application.id,
+        resource_type="knowledge_product",
+        permission="read",
+    )
+    scenario_ids = _allowed_resource_ids(
+        db,
+        application_id=application.id,
+        resource_type="scenario",
+        permission="invoke",
+    )
+    active_products = {
+        row.id: row
+        for row in db.scalars(select(KnowledgeProduct).where(
+            KnowledgeProduct.id.in_(product_ids),
+            KnowledgeProduct.tenant_id == application.tenant_id,
+            KnowledgeProduct.enabled.is_(True),
+            KnowledgeProduct.status == "active",
+            KnowledgeProduct.deleted_at.is_(None),
+        ))
+    } if product_ids else {}
+    production_product_ids: set[str] = set()
+    for product_id in active_products:
+        alias = db.scalar(select(KnowledgeProductAlias).where(
+            KnowledgeProductAlias.product_id == product_id,
+            KnowledgeProductAlias.alias == "production",
+            KnowledgeProductAlias.deleted_at.is_(None),
+        ))
+        release = db.get(KnowledgeProductRelease, alias.product_release_id) if alias else None
+        if release and release.status == "published" and release.deleted_at is None:
+            production_product_ids.add(product_id)
+
+    active_scenarios = list(db.scalars(select(ApplicationScenario).where(
+        ApplicationScenario.id.in_(scenario_ids),
+        ApplicationScenario.tenant_id == application.tenant_id,
+        ApplicationScenario.status == "active",
+        ApplicationScenario.enabled.is_(True),
+        ApplicationScenario.deleted_at.is_(None),
+    ))) if scenario_ids else []
+    eligible_scenario_ids: list[str] = []
+    eligible_version_ids: list[str] = []
+    for scenario in active_scenarios:
+        version = db.get(ApplicationScenarioVersion, scenario.current_version_id) if scenario.current_version_id else None
+        if (
+            version is None
+            or version.deleted_at is not None
+            or version.tenant_id != application.tenant_id
+            or version.product_id not in product_ids
+        ):
+            continue
+        try:
+            resolve_scenario_product_release(db, version)
+        except ApplicationConfigurationError:
+            continue
+        eligible_scenario_ids.append(scenario.id)
+        eligible_version_ids.append(version.id)
+
+    passed_run_ids = list(db.scalars(select(EvaluationRun.id).where(
+        EvaluationRun.tenant_id == application.tenant_id,
+        EvaluationRun.scenario_version_id.in_(eligible_version_ids),
+        EvaluationRun.status == "succeeded",
+        EvaluationRun.gate_passed.is_(True),
+        EvaluationRun.deleted_at.is_(None),
+    ))) if eligible_version_ids else []
+    now = datetime.now(timezone.utc)
+    active_credential_ids = [
+        row.id
+        for row in db.scalars(select(ApplicationCredential).where(
+            ApplicationCredential.application_id == application.id,
+            ApplicationCredential.tenant_id == application.tenant_id,
+            ApplicationCredential.revoked_at.is_(None),
+            ApplicationCredential.deleted_at.is_(None),
+        ))
+        if _aware(row.expires_at) is None or _aware(row.expires_at) > now
+    ]
+
+    supply_ready = bool(production_product_ids)
+    scenario_ready = bool(eligible_scenario_ids)
+    test_ready = bool(passed_run_ids)
+    access_ready = bool(active_credential_ids and eligible_scenario_ids)
+    completed = sum((supply_ready, scenario_ready, test_ready, access_ready))
+    return {
+        "product_ids": sorted(product_ids),
+        "production_product_ids": sorted(production_product_ids),
+        "scenario_ids": sorted(scenario_ids),
+        "eligible_scenario_ids": eligible_scenario_ids,
+        "eligible_scenario_version_ids": eligible_version_ids,
+        "passed_run_ids": passed_run_ids,
+        "active_credential_ids": active_credential_ids,
+        "supply_ready": supply_ready,
+        "scenario_ready": scenario_ready,
+        "test_ready": test_ready,
+        "access_ready": access_ready,
+        "progress": completed * 25,
+        "ready": (
+            completed == 4
+            and application.status == "active"
+            and application.enabled
+            and application.deleted_at is None
+        ),
+    }
 
 
 def application_has_grant(
@@ -114,4 +259,3 @@ def evaluation_gate_passed(metrics: dict[str, Any], gate_config: dict[str, float
         if value is None or float(value) < float(threshold):
             return False
     return True
-

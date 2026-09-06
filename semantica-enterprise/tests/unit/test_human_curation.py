@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from packages.platform import models  # noqa: F401
@@ -14,12 +14,14 @@ from packages.platform.curation import (
     effective_fact,
     effective_profile,
     rollback_decision,
+    scan_document_duplicate_cases,
 )
 from packages.platform.database import Base
 from packages.platform.models import (
     CanonicalEntity,
     Chunk,
     ContentElement,
+    CurationCase,
     Document,
     DocumentProfile,
     DocumentVersion,
@@ -102,6 +104,101 @@ def test_profile_decision_is_overlay_and_can_be_rolled_back(monkeypatch) -> None
         restored = effective_profile(db, data["version"])
         assert restored["classification"] == "产品资料"
         assert restored["field_origins"]["classification"] == "automatic"
+
+
+def test_cross_document_duplicate_scan_is_deterministic_and_actionable() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        data = curation_fixture(db)
+        second_document = Document(
+            id="document-copy", tenant_id="tenant", space_id="space",
+            title="产品手册（邮件附件）", status="ready",
+        )
+        second_version = DocumentVersion(
+            id="version-copy", tenant_id="tenant", document_id=second_document.id,
+            version_number=1, filename="manual-copy.txt", content_type="text/plain",
+            size=20, sha256="a" * 64, object_key="fixture/manual-copy.txt", status="ready",
+        )
+        second_document.current_version_id = second_version.id
+        db.add_all([second_document, second_version])
+        db.flush()
+
+        first = scan_document_duplicate_cases(db, tenant_id="tenant", space_id="space")
+        second = scan_document_duplicate_cases(db, tenant_id="tenant", space_id="space")
+        case = db.scalar(select(CurationCase).where(CurationCase.case_type == "duplicate_document"))
+
+        assert first == {"created": 1, "exact": 1, "near": 0, "compared_documents": 2}
+        assert second["created"] == 0
+        assert case is not None
+        assert case.target_type == "document_pair"
+        assert case.evidence["match_type"] == "exact"
+        assert {case.evidence["left"]["document_id"], case.evidence["right"]["document_id"]} == {
+            data["document"].id, second_document.id,
+        }
+
+
+def test_incremental_duplicate_scan_only_creates_pairs_for_completed_document() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        curation_fixture(db)
+        second_document = Document(
+            id="document-copy", tenant_id="tenant", space_id="space",
+            title="产品手册副本", status="ready",
+        )
+        second_version = DocumentVersion(
+            id="version-copy", tenant_id="tenant", document_id=second_document.id,
+            version_number=1, filename="copy.txt", content_type="text/plain",
+            size=20, sha256="a" * 64, object_key="fixture/copy.txt", status="ready",
+        )
+        second_document.current_version_id = second_version.id
+        db.add_all([second_document, second_version])
+        db.flush()
+
+        result = scan_document_duplicate_cases(
+            db,
+            tenant_id="tenant",
+            space_id="space",
+            document_id=second_document.id,
+        )
+
+        assert result["created"] == 1
+        assert result["exact"] == 1
+
+
+def test_duplicate_candidate_becomes_stale_when_a_current_version_changes() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        curation_fixture(db)
+        second_document = Document(
+            id="document-copy", tenant_id="tenant", space_id="space",
+            title="产品手册副本", status="ready",
+        )
+        old_version = DocumentVersion(
+            id="version-copy", tenant_id="tenant", document_id=second_document.id,
+            version_number=1, filename="copy.txt", content_type="text/plain",
+            size=20, sha256="a" * 64, object_key="fixture/copy.txt", status="ready",
+        )
+        second_document.current_version_id = old_version.id
+        db.add_all([second_document, old_version])
+        db.flush()
+        scan_document_duplicate_cases(db, tenant_id="tenant", space_id="space")
+        case = db.scalar(select(CurationCase).where(CurationCase.case_type == "duplicate_document"))
+        assert case.status == "open"
+
+        replacement = DocumentVersion(
+            id="version-copy-2", tenant_id="tenant", document_id=second_document.id,
+            version_number=2, filename="copy-v2.txt", content_type="text/plain",
+            size=12, sha256="d" * 64, object_key="fixture/copy-v2.txt", status="ready",
+        )
+        second_document.current_version_id = replacement.id
+        db.add(replacement)
+        db.flush()
+        scan_document_duplicate_cases(db, tenant_id="tenant", space_id="space")
+
+        assert case.status == "stale"
 
 
 def test_content_chunk_entity_and_fact_use_effective_projection(monkeypatch) -> None:

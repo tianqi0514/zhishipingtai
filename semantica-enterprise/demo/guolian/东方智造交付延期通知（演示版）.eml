@@ -1,0 +1,37 @@
+From: demo-supplier@example.invalid
+To: demo-digital@example.invalid
+Cc: demo-risk@example.invalid
+Date: Sat, 20 Jun 2026 10:30:00 +0800
+Subject: =?UTF-8?B?W+a8lOekuuS9v+eUqF3kuJzmlrnmmbrpgKDkuqTku5jlu7bmnJ/pgJrnn6U=?=
+Message-ID: <risk-demo-20260620@example.invalid>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="chuanshen-demo-boundary-20260620"
+
+--chuanshen-demo-boundary-20260620
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+演示数据，不代表国联集团真实经营数据。
+
+数字科技公司项目组：
+
+东方智造供应的 NexusOne 关键组件预计延迟十个工作日交付，可能影响智慧流程中枢项目的集成测试里程碑。
+
+用于知识关系登记的明确事实：东方智造 存在风险 交付延期。
+
+请数字化管理部协调替代方案，请风险管理部登记并跟踪本次高风险事件。受影响对象详见附件。
+
+东方智造（演示供应商）
+
+--chuanshen-demo-boundary-20260620
+Content-Type: text/csv; charset="utf-8"; name="impacted_objects_demo.csv"
+Content-Transfer-Encoding: 8bit
+Content-Disposition: attachment; filename="impacted_objects_demo.csv"
+
+object_type,object_name,relationship,owner
+product,NexusOne,由东方智造供应,数字化管理部
+project,智慧流程中枢项目,使用NexusOne,数字科技公司
+department,数字化管理部,协调替代方案,数字科技公司
+department,风险管理部,跟踪交付延期,国联集团
+
+--chuanshen-demo-boundary-20260620--

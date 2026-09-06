@@ -28,6 +28,9 @@ def test_analysis_ui_starts_from_business_task_and_has_guided_flow() -> None:
     assert ".analysis-business-tabs" in stylesheet
     assert ".analysis-wizard" in stylesheet
     assert ".zero-diagnostics" in stylesheet
+    assert "#analysis-body:empty" in stylesheet
+    assert "state.viewAbort?.abort()" in javascript
+    assert "state.viewAbort=new AbortController()" in javascript
 
 
 def test_analysis_ui_uses_business_terms_and_preserves_expert_query() -> None:
@@ -41,3 +44,20 @@ def test_analysis_ui_uses_business_terms_and_preserves_expert_query() -> None:
     assert "普通查询" in javascript
     assert "SPARQL 编辑器" in javascript
     assert "run_readonly_sparql" not in javascript
+
+
+def test_visual_graph_query_reads_fields_by_their_rendered_name_selectors() -> None:
+    """The shared field helpers render ``name`` attributes, not element ids."""
+
+    javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
+
+    for selector in (
+        "$('[name=visual_subject]').value.trim()",
+        "$('[name=visual_predicate]').value",
+        "$('[name=visual_object_type]').value",
+        "$('[name=visual_inferred]').checked",
+    ):
+        assert selector in javascript
+    assert "$('#visual_subject').value" not in javascript
+    assert "$('#visual_predicate').value" not in javascript
+    assert "$('#visual_object_type').value" not in javascript

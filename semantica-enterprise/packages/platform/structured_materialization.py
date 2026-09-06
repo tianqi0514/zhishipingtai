@@ -71,8 +71,15 @@ def _semantic_entity(
     display_name = None
     if display_id:
         display_name = row.get(display_id.rsplit(".", 1)[-1])
-    display_name = str(display_name or f"{entity_mapping['label']} {row_key[:8]}")[:500]
-    canonical_name = EntityNormalizer().normalize_entity(display_name, entity_type=entity_mapping["label"])
+    display_name = str(display_name or f"{entity_mapping['label']} {row_key[:8]}").strip()[:500]
+    # The mapped display column is an authoritative business value.  Keep its
+    # spelling (notably product brands such as ``NexusOne``) as the graph label.
+    # Semantica normalization remains useful as provenance/search metadata, but
+    # must not silently change the capitalization of a database master record.
+    semantic_normalized_name = EntityNormalizer().normalize_entity(
+        display_name, entity_type=entity_mapping["label"],
+    )
+    canonical_name = display_name
     external_identity = f"db:{source.id}:{entity_mapping['id']}:{row_key}".casefold()[:500]
     entity = db.scalar(select(CanonicalEntity).where(
         CanonicalEntity.space_id == space_id,
@@ -90,6 +97,8 @@ def _semantic_entity(
         "mapping_set_id": mapping_set.id,
         "mapping_version_id": mapping.id,
     }
+    if semantic_normalized_name != canonical_name:
+        properties["semantica_normalized_name"] = semantic_normalized_name
     if entity is None:
         entity = CanonicalEntity(
             tenant_id=tenant_id,

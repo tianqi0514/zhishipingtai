@@ -11,6 +11,7 @@ TARGET_LABELS = {
     "entity": "知识实体",
     "fact": "知识关系",
     "entity_pair": "实体关联约束",
+    "document_pair": "重复文档组合",
     "quality_issue": "质量问题",
 }
 
@@ -65,6 +66,7 @@ SCOPE_LABELS = {
 CASE_TYPE_LABELS = {
     "quality_issue": "质量问题",
     "fact_conflict": "事实冲突",
+    "duplicate_document": "重复文档",
 }
 
 SEVERITY_LABELS = {"high": "高", "medium": "中", "low": "低"}
@@ -100,6 +102,8 @@ def curation_impacts(target_type: str, field_path: str | None = None) -> list[st
         return ["重新切片", "语义抽取", "知识图谱", "知识检索", "知识分析"]
     if target_type == "chunk":
         return ["全文检索", "向量检索", "问答引用"]
+    if target_type == "document_pair":
+        return ["文档资产", "全文检索", "向量检索", "知识图谱", "问答引用"]
     if target_type in {"entity", "fact", "entity_pair"}:
         return ["知识图谱", "知识分析", "图谱检索", "智能问答"]
     return ["治理记录"]
@@ -134,4 +138,3 @@ def summarize_fields(fields: Iterable[str]) -> str:
     if len(labels) <= 3:
         return "、".join(labels)
     return "、".join(labels[:3]) + f"等 {len(labels)} 项"
-

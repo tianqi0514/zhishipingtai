@@ -38,6 +38,7 @@ from packages.platform.models import (
     InferenceRun,
     Job,
     JobStep,
+    KnowledgeRelease,
     MediaAudioSegment,
     MediaFrame,
     MediaProcessingRun,
@@ -55,6 +56,7 @@ from packages.platform.curation import (
     invalidate_inference_for_space,
     upsert_conflict_cases,
     upsert_profile_cases,
+    scan_document_duplicate_cases,
 )
 from packages.platform.graph_release import publish_graph_snapshot
 from packages.platform.index_release import activate_knowledge_release, publish_index_snapshot
@@ -79,6 +81,7 @@ from packages.semantica_adapter.governance import govern_entities
 from packages.semantica_adapter.indexing import SearchIndexer, search_point_id
 from packages.semantica_adapter.normalize import normalize_and_split
 from packages.semantica_adapter.profile import analyze_profile_with_model, build_deterministic_profile
+from packages.semantica_adapter.resilience import classify_external_failure
 from packages.semantica_adapter.transcription import transcribe_media
 from packages.semantica_adapter.vision import describe_visual
 from packages.semantica_adapter.media_pipeline import MediaProcessingCancelled, process_media_file
@@ -1393,6 +1396,29 @@ def _default_policy(db, model, tenant_id: str):
     )
 
 
+def _restore_soft_deleted_entity(
+    row: CanonicalEntity,
+    *,
+    status: str,
+    canonical_name: str | None = None,
+    confidence: float | None = None,
+    scope_tokens: list[str] | None = None,
+) -> bool:
+    """Revive an entity compensated after a failed late publication step."""
+
+    if row.deleted_at is None:
+        return False
+    if canonical_name:
+        row.canonical_name = canonical_name[:500]
+    if confidence is not None:
+        row.confidence = max(float(row.confidence or 0), float(confidence))
+    if scope_tokens:
+        row.scope_tokens = list(scope_tokens)
+    row.status = status
+    row.deleted_at = None
+    return True
+
+
 def _canonical_for_name(
     db,
     *,
@@ -1416,10 +1442,10 @@ def _canonical_for_name(
         entity_type=entity_type,
     ) or db.scalar(
         select(CanonicalEntity).where(
+            CanonicalEntity.tenant_id == tenant_id,
             CanonicalEntity.space_id == space_id,
             CanonicalEntity.normalized_name == normalized_name,
             CanonicalEntity.entity_type == entity_type,
-            CanonicalEntity.deleted_at.is_(None),
         )
     )
     if row is None:
@@ -1435,7 +1461,115 @@ def _canonical_for_name(
         )
         db.add(row)
         db.flush()
+    else:
+        # A late publish failure may have compensated a newly-created entity
+        # by soft-deleting it.  The database identity constraint deliberately
+        # remains in place, so a retry must revive that same row rather than
+        # insert a duplicate that can never pass ``uq_space_entity``.
+        _restore_soft_deleted_entity(
+            row,
+            status=new_status,
+            canonical_name=canonical_name,
+            confidence=confidence,
+            scope_tokens=scope_tokens,
+        )
     return row
+
+
+FactIdentity = tuple[str, str, str, str, str, str]
+
+
+def _extracted_fact_identity(
+    *,
+    tenant_id: str,
+    space_id: str,
+    subject_entity_id: str,
+    predicate: str,
+    object_entity_id: str,
+    source_chunk_id: str,
+) -> FactIdentity:
+    """Return the exact persisted identity of an extracted relation fact."""
+
+    return (
+        tenant_id,
+        space_id,
+        subject_entity_id,
+        predicate,
+        object_entity_id,
+        source_chunk_id,
+    )
+
+
+def _upsert_extracted_fact(
+    db,
+    *,
+    tenant_id: str,
+    space_id: str,
+    subject_entity_id: str,
+    predicate: str,
+    object_entity_id: str,
+    source_chunk_id: str,
+    confidence: float,
+    scope_tokens: list[str] | None,
+    identity_map: dict[FactIdentity, Fact],
+) -> tuple[Fact, bool]:
+    """Idempotently stage one model-extracted relation as a governed fact.
+
+    ``SessionLocal`` deliberately has ``autoflush=False``.  A query therefore
+    cannot see a Fact added by an earlier duplicate relation in the same
+    governance batch.  ``identity_map`` is the transaction-local identity map
+    for the database's ``uq_fact_source`` key and prevents two pending INSERTs.
+
+    Existing rows keep their stable ID and source-chunk provenance.  Repeated
+    model assertions retain the strongest confidence, while current chunk
+    scope tokens replace stale projection metadata.  Integrity errors other
+    than this proactively handled identity are intentionally not caught here.
+    """
+
+    key = _extracted_fact_identity(
+        tenant_id=tenant_id,
+        space_id=space_id,
+        subject_entity_id=subject_entity_id,
+        predicate=predicate,
+        object_entity_id=object_entity_id,
+        source_chunk_id=source_chunk_id,
+    )
+    fact = identity_map.get(key)
+    created = False
+    if fact is None:
+        fact = db.scalar(
+            select(Fact)
+            .where(
+                Fact.tenant_id == tenant_id,
+                Fact.space_id == space_id,
+                Fact.subject_entity_id == subject_entity_id,
+                Fact.predicate == predicate,
+                Fact.object_entity_id == object_entity_id,
+                Fact.source_chunk_id == source_chunk_id,
+            )
+            .order_by(Fact.created_at.desc())
+            .limit(1)
+        )
+        if fact is None:
+            fact = Fact(
+                tenant_id=tenant_id,
+                space_id=space_id,
+                subject_entity_id=subject_entity_id,
+                predicate=predicate,
+                object_entity_id=object_entity_id,
+                source_chunk_id=source_chunk_id,
+                confidence=confidence,
+                scope_tokens=list(scope_tokens or []),
+            )
+            db.add(fact)
+            created = True
+        identity_map[key] = fact
+
+    fact.confidence = max(float(fact.confidence or 0), float(confidence))
+    fact.scope_tokens = list(scope_tokens or [])
+    fact.status = "published"
+    fact.deleted_at = None
+    return fact, created
 
 
 def _detect_and_resolve_conflicts(
@@ -1697,6 +1831,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         rollback_chunk_state: dict[str, dict[str, Any]] = {}
         rollback_fact_state: dict[str, dict[str, Any]] = {}
         rollback_entity_state: dict[str, dict[str, Any]] = {}
+        attempt_graph_release_id: str | None = None
         entity_state_fields = (
             "canonical_name", "normalized_name", "entity_type", "aliases", "properties",
             "confidence", "source_count", "scope_tokens", "status", "deleted_at",
@@ -2158,14 +2293,16 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         try:
                             output = future.result()
                         except Exception as exc:
-                            safe_message = str(exc).replace(api_key, "***")
+                            failure = classify_external_failure(exc, secrets=[api_key])
                             for source_chunk in batch.chunks:
                                 extraction_errors.append({
                                     "chunk_id": source_chunk.chunk_id,
                                     "chunk_ordinal": source_chunk.ordinal,
                                     "batch_ordinal": batch.ordinal,
-                                    "error_type": type(exc).__name__,
-                                    "message": safe_message[:500],
+                                    "error_type": failure.error_type,
+                                    "error_category": failure.category,
+                                    "retryable": failure.retryable,
+                                    "message": failure.message,
                                 })
                         else:
                             persist_extraction_output(batch, output)
@@ -2186,6 +2323,14 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "failed_chunks": len(extraction_errors),
                 "model_requests": model_request_count,
                 "successful_model_requests": successful_model_requests,
+                "request_timeout_seconds": extraction_timeout,
+                "transport_max_retries": extraction_retries,
+                "timeout_failed_chunks": sum(
+                    item.get("error_category") == "timeout" for item in extraction_errors
+                ),
+                "retryable_failed_chunks": sum(
+                    bool(item.get("retryable")) for item in extraction_errors
+                ),
                 "batch_target_chars": batch_target_chars,
                 "batch_max_chunks": batch_max_chunks,
                 "concurrency": extraction_concurrency,
@@ -2248,10 +2393,10 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     entity_type=item.entity_type,
                 ) or db.scalar(
                     select(CanonicalEntity).where(
+                        CanonicalEntity.tenant_id == version.tenant_id,
                         CanonicalEntity.space_id == document.space_id,
                         CanonicalEntity.normalized_name == item.normalized_name,
                         CanonicalEntity.entity_type == item.entity_type,
-                        CanonicalEntity.deleted_at.is_(None),
                     )
                 )
                 if entity is None:
@@ -2268,9 +2413,16 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     db.add(entity)
                     db.flush()
                 else:
+                    recovered_from_failed_publish = _restore_soft_deleted_entity(
+                        entity,
+                        status="staged",
+                        confidence=item.confidence,
+                    )
                     entity.aliases = sorted(set(entity.aliases or []) | set(item.aliases))
                     entity.confidence = max(entity.confidence, item.confidence)
-                    entity.source_count += 1
+                    # A retry of the same extraction is not a new source.
+                    if not recovered_from_failed_publish:
+                        entity.source_count += 1
                 for mention_id in item.mention_ids:
                     mention_entity[mention_id] = entity
             for decision in decisions:
@@ -2291,38 +2443,38 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 else []
             )
             published_facts = 0
+            extracted_fact_identity_map: dict[FactIdentity, Fact] = {}
+            published_fact_identities: set[FactIdentity] = set()
             for relation in relations:
                 if relation.confidence < governance_policy.publish_confidence:
                     relation.status = "rejected"
                     continue
                 subject = _canonical_for_name(db, tenant_id=version.tenant_id, space_id=document.space_id, name=relation.subject_name, confidence=relation.confidence, scope_tokens=relation.scope_tokens, new_status="staged")
                 obj = _canonical_for_name(db, tenant_id=version.tenant_id, space_id=document.space_id, name=relation.object_name, confidence=relation.confidence, scope_tokens=relation.scope_tokens, new_status="staged")
-                fact = db.scalar(select(Fact).where(
-                    Fact.space_id == document.space_id,
-                    Fact.subject_entity_id == subject.id,
-                    Fact.predicate == relation.predicate,
-                    Fact.object_entity_id == obj.id,
-                    Fact.source_chunk_id == relation.chunk_id,
-                ).order_by(Fact.created_at.desc()).limit(1))
-                if fact is None:
-                    fact = Fact(
-                        tenant_id=version.tenant_id,
-                        space_id=document.space_id,
-                        subject_entity_id=subject.id,
-                        predicate=relation.predicate,
-                        object_entity_id=obj.id,
-                        source_chunk_id=relation.chunk_id,
-                        confidence=relation.confidence,
-                        scope_tokens=relation.scope_tokens,
-                    )
-                    db.add(fact)
-                else:
-                    fact.confidence = relation.confidence
-                    fact.scope_tokens = relation.scope_tokens
-                    fact.status = "published"
-                    fact.deleted_at = None
+                identity = _extracted_fact_identity(
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    subject_entity_id=subject.id,
+                    predicate=relation.predicate,
+                    object_entity_id=obj.id,
+                    source_chunk_id=relation.chunk_id,
+                )
+                _upsert_extracted_fact(
+                    db,
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    subject_entity_id=subject.id,
+                    predicate=relation.predicate,
+                    object_entity_id=obj.id,
+                    source_chunk_id=relation.chunk_id,
+                    confidence=relation.confidence,
+                    scope_tokens=relation.scope_tokens,
+                    identity_map=extracted_fact_identity_map,
+                )
                 relation.status = "published"
-                published_facts += 1
+                if identity not in published_fact_identities:
+                    published_fact_identities.add(identity)
+                    published_facts += 1
             for mention in mentions:
                 mention.status = "published" if mention.mention_id in mention_entity else "rejected"
             db.commit()
@@ -2373,6 +2525,10 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         )
                     )
                     if row.id not in rollback_entity_state
+                    or (
+                        rollback_entity_state[row.id].get("deleted_at") is not None
+                        and row.deleted_at is None
+                    )
                 }
                 graph_release = publish_graph_snapshot(
                     db,
@@ -2382,6 +2538,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     include_pending_entity_ids=pending_entity_ids,
                 )
                 db.flush()
+                attempt_graph_release_id = graph_release.id
                 graph_number = graph_release.release_number
                 graph_detail = {
                     "release": graph_number,
@@ -2530,6 +2687,33 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 curation_batch.publish_error = job.error_message if extraction_errors else None
             db.commit()
             _step(db, job.id, "index_publish", 6, "succeeded", index_detail)
+            # Duplicate detection must run only after this document becomes the
+            # current ready version.  Keep it in a separate transaction so a
+            # governance detector problem can never roll back valid knowledge.
+            try:
+                duplicate_scan = scan_document_duplicate_cases(
+                    db,
+                    tenant_id=version.tenant_id,
+                    space_id=document.space_id,
+                    document_id=document.id,
+                )
+                db.commit()
+                job = db.get(Job, job.id)
+                job.result = {**(job.result or {}), "duplicate_scan": duplicate_scan}
+                db.commit()
+            except Exception as duplicate_exc:
+                db.rollback()
+                job = db.get(Job, job.id)
+                duplicate_warning = (
+                    f"重复文档扫描未完成：{type(duplicate_exc).__name__}"
+                )
+                prior_warnings = list((job.result or {}).get("warnings") or [])
+                job.result = {
+                    **(job.result or {}),
+                    "warnings": list(dict.fromkeys([*prior_warnings, duplicate_warning])),
+                    "duplicate_scan": {"status": "failed"},
+                }
+                db.commit()
             automatic_runs = (
                 _queue_automatic_inference(
                     db,
@@ -2547,13 +2731,44 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 db.commit()
             return job.result
         except Exception as exc:
-            message = f"{type(exc).__name__}: {exc}"
+            secrets = [
+                str(value)
+                for value in (locals().get("api_key"), locals().get("profile_secret"))
+                if value
+            ]
+            failure = classify_external_failure(exc, secrets=secrets, message_limit=2000)
+            message = f"{failure.error_type}: {failure.message}"
             db.rollback()
             job = db.get(Job, job_id)
             version = db.get(DocumentVersion, version_id)
             document = db.get(Document, version.document_id) if version else None
             if job is None:
                 return {"status": "failed", "error": message}
+            if attempt_graph_release_id:
+                attempted_graph = db.get(GraphRelease, attempt_graph_release_id)
+                activated = db.scalar(
+                    select(KnowledgeRelease.id).where(
+                        KnowledgeRelease.graph_release_id == attempt_graph_release_id,
+                        KnowledgeRelease.status == "published",
+                        KnowledgeRelease.deleted_at.is_(None),
+                    )
+                )
+                if attempted_graph is not None and activated is None:
+                    # ``graph_publish`` necessarily precedes vector publishing.
+                    # A later index failure must not leave this provisional
+                    # graph as the latest searchable release.  Keep the row for
+                    # audit, but remove it from active projections.
+                    attempted_graph.status = "failed"
+                    attempted_graph.deleted_at = now()
+                    attempted_graph.validation_report = {
+                        **(attempted_graph.validation_report or {}),
+                        "activation_status": "failed",
+                        "downstream_failure": {
+                            "category": failure.category,
+                            "error_type": failure.error_type,
+                            "retryable": failure.retryable,
+                        },
+                    }
             if version:
                 current_chunks = list(db.scalars(select(Chunk).where(Chunk.version_id == version.id)))
                 current_chunk_ids = [row.id for row in current_chunks]

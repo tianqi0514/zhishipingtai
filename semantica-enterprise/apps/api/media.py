@@ -291,11 +291,23 @@ def validate_media_policy(
         if model is None and not configured_id:
             scene = "speech_recognition" if kind == "asr" else "vision_understanding"
             model = resolve_model_for_scene(db, user.tenant_id, scene).model
-        valid = bool(model and model.tenant_id == user.tenant_id and model.enabled and model.deleted_at is None and model.model_kind == kind)
+        configured = bool(
+            model and model.tenant_id == user.tenant_id and model.enabled
+            and model.deleted_at is None and model.model_kind == kind
+        )
+        valid = bool(configured and model.last_test_status == "success")
+        if valid:
+            message = f"将使用已测试模型：{model.name}"
+        elif configured and model.last_test_status == "failed":
+            message = f"模型连接测试失败：{model.name}"
+        elif configured:
+            message = f"模型尚未完成连接测试：{model.name}"
+        else:
+            message = f"未配置可用的{'语音识别' if kind == 'asr' else '视觉'}模型"
         checks.append({
             "name": section,
             "status": "ready" if valid else "not_configured",
-            "message": f"将使用模型：{model.name}" if valid else f"未配置可用的{'语音识别' if kind == 'asr' else '视觉'}模型",
+            "message": message,
             "model_config_id": model.id if valid else None,
         })
     if config["vision"]["enabled"] and config["vision"]["execution"] == "cloud" and not config["cloud_processing_allowed"]:

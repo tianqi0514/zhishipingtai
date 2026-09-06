@@ -4,6 +4,8 @@ import test from 'node:test'
 import {
   currentUserQuery,
   evidenceRequirements,
+  requiresGraphQuery,
+  requiresKnowledgeReason,
   requiresKnowledgeSearch,
   requiresStructuredQuery,
 } from '../query-policy.js'
@@ -21,10 +23,13 @@ test('allows conversational questions without weakening knowledge retrieval', ()
 test('requires deterministic structured evidence for numeric questions', () => {
   assert.equal(requiresStructuredQuery('2026 年 NexusOne 的销售总额是多少？'), true)
   assert.equal(requiresStructuredQuery('NexusOne 产品手册写了什么？'), false)
-  assert.deepEqual(evidenceRequirements('NexusOne 的销售额是多少？'), ['structured_execute_query'])
+  assert.deepEqual(
+    evidenceRequirements('NexusOne 的销售额是多少？'),
+    ['structured_schema_search', 'structured_execute_query'],
+  )
   assert.deepEqual(
     evidenceRequirements('今年销售额是多少，统计口径依据哪份制度？'),
-    ['knowledge_search', 'structured_execute_query'],
+    ['knowledge_search', 'structured_schema_search', 'structured_execute_query'],
   )
   assert.equal(requiresStructuredQuery('销售额统计口径依据哪份制度？'), false)
   assert.equal(requiresStructuredQuery('销售额的定义是什么？'), false)
@@ -34,6 +39,18 @@ test('requires deterministic structured evidence for numeric questions', () => {
     ['knowledge_search'],
   )
   assert.deepEqual(evidenceRequirements('你好'), [])
+})
+
+
+test('requires graph and Semantica reasoning for explainable impact chains', () => {
+  const question = '东方智造交付延期会影响哪些项目和责任部门？请说明完整关系路径。'
+  assert.equal(requiresGraphQuery(question), true)
+  assert.equal(requiresKnowledgeReason(question), true)
+  assert.deepEqual(evidenceRequirements(question), [
+    'knowledge_search', 'knowledge_graph_query', 'knowledge_reason',
+  ])
+  assert.equal(requiresGraphQuery('采购制度适用于哪些单位？'), false)
+  assert.equal(requiresKnowledgeReason('采购制度适用于哪些单位？'), false)
 })
 
 

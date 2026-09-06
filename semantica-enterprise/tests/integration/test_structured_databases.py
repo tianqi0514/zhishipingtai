@@ -723,7 +723,11 @@ def test_real_numeric_query_matrix(dialect: str) -> None:
             "select": [{"alias": "risk_count", "expression": _aggregate("count", _attr("risk-id", "r"))}],
         },
     )
-    assert rows == [{"risk_count": 3}]
+    # The isolated fixture deliberately carries both the original three sales
+    # benchmark risks and three Guolian procurement-demo risks.  This count is
+    # therefore six; keeping the combined rows also exercises ID ranges from
+    # both fixture families instead of silently ignoring the demo additions.
+    assert rows == [{"risk_count": 6}]
 
     rows = _execute_case(
         source, schema, mapping,

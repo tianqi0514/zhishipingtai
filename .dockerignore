@@ -10,3 +10,9 @@ deepseek-harness/node_modules/
 deepseek-harness/**/node_modules/
 deepseek-harness/.cache/
 deepseek-harness/coverage/
+.codex-finalizer-receipts/
+.demo-build/
+marketing-materials/
+semantica-enterprise/.demo-build/
+semantica-enterprise/uv.lock
+**/.DS_Store

@@ -49,7 +49,7 @@ DeepSeek Harness 只通过内部知识工具 API 访问平台，不直接连接�
 | `semantica-deploy/` | Semantica CPU 基础镜像和原始 Explorer 的独立 Compose | `0.6.6` |
 | `scripts/` | 一键部署、健康检查和测试入口 | 随平台版本 |
 
-上游源码以普通目录完整纳入本仓库，不依赖 Git Submodule。Semantica Explorer 的锁文件在该基础提交上升级了两个存在高危公告的传递依赖；修复后 `npm audit` 为 0 个已知漏洞，生产前端已重新构建通过。依赖由 `pyproject.toml`、`requirements-ci.txt`、`package-lock.json` 和 `pnpm-lock.yaml` 等清单声明或锁定；模型缓存、Docker 镜像、运行数据和真实密钥不会提交到 Git。
+上游源码以普通目录完整纳入本仓库，不依赖 Git Submodule。Semantica Explorer 的锁文件在该基础提交上升级了两个存在高危公告的传递依赖；修复后 `npm audit` 为 0 个已知漏洞，生产前端已重新构建通过。依赖由 `pyproject.toml`、`requirements-ci.txt`、`package-lock.json`、`pnpm-lock.yaml` 以及 Linux x86_64/Python 3.13 生产约束文件 `semantica-enterprise/constraints/production-py313-linux-x86_64.txt` 声明或锁定；按用户交付要求不提交 `uv.lock`。模型缓存、Docker 镜像、运行数据和真实密钥不会提交到 Git。
 
 ## 服务器要求
 
@@ -58,7 +58,8 @@ DeepSeek Harness 只通过内部知识工具 API 访问平台，不直接连接�
 - Docker Engine 24 或更高版本。
 - Docker Compose v2（使用 `docker compose` 命令）。
 - 8 核 CPU、16 GB 内存、40 GB 以上可用磁盘。
-- 可访问 Docker Hub、PyPI、npm 和 PyTorch CPU Wheel 源。
+- 首次构建可访问 Docker Hub、PyPI、npm 和 PyTorch CPU Wheel 源。
+- 首次启用本地 BGE/SenseVoice 时可访问 Hugging Face 或 ModelScope；隔离网环境需要由运维人员事先导入已审核的模型缓存。
 - 本机安装 `bash`、`curl`、`openssl`、`python3` 和 `git`。
 
 首次构建会下载 Python、Node、Java 中间件镜像和模型相关 Python 依赖，耗时取决于服务器网络。平台容器默认使用 CPU 版 PyTorch，不要求 NVIDIA GPU。
@@ -77,8 +78,8 @@ cd zhishipingtai
 不要把真实密钥写进仓库或命令脚本。首次部署时，通过当前终端的环境变量传入：
 
 ```bash
-export BOOTSTRAP_ADMIN_PASSWORD='替换为强管理员密码'
-export KIMI_API_KEY='替换为实际 Kimi API Key'
+# 仅展示允许的字符格式；执行前必须替换为密码库生成的独立强密码
+export BOOTSTRAP_ADMIN_PASSWORD='REPLACE_WITH_URL_SAFE_ADMIN_SECRET'
 ```
 
 可选变量：
@@ -86,9 +87,10 @@ export KIMI_API_KEY='替换为实际 Kimi API Key'
 ```bash
 export BOOTSTRAP_ADMIN_USERNAME='admin'
 export MINIO_ROOT_USER='semantica'
+export KIMI_API_KEY='可选的 Kimi API Key'
 ```
 
-部署脚本会以权限 `600` 创建 `semantica-enterprise/.env`、`deploy/secrets/kimi_api_key` 和内部 Agent 服务密钥。应用密钥、MinIO、PostgreSQL、RabbitMQ 密码会在首次部署时随机生成。脚本不会打印任何密钥。
+部署脚本会创建 `semantica-enterprise/.env`、`deploy/secrets/kimi_api_key` 和内部 Agent 服务密钥。应用密钥、MinIO、PostgreSQL、RabbitMQ 密码会在首次部署时随机生成。未提供 Kimi Key 时会创建空的本地 Secret 挂载，平台仍可启动；启动后在“配置中心 → 模型配置”添加、测试并设为默认模型。脚本不会打印任何密钥。
 
 ### 3. 构建并启动
 
@@ -100,9 +102,9 @@ export MINIO_ROOT_USER='semantica'
 
 1. 检查 Docker 与主机依赖。
 2. 初始化仅存于服务器本地的配置和 Secret 文件。
-3. 从本仓库 `semantica/` 源码构建 CPU 基础镜像。
-4. 构建传神智库、OpenSearch 中文分析器和 Harness Runtime。
-5. 启动全部 12 个服务并等待健康检查通过。
+3. 通过 `Dockerfile.production` 直接从本仓库内置的 Semantica 与平台源码构建 CPU 生产镜像。
+4. 构建 OpenSearch 中文分析器、SenseVoice ASR 和 Harness Runtime。
+5. 使用 `compose.yaml + compose.production.yaml` 启动 13 个必需服务，并等待健康检查通过。
 
 部署完成后访问：
 
@@ -141,11 +143,45 @@ git pull --ff-only
 ./scripts/deploy.sh
 ```
 
+如果现有 `.env` 缺少初始化持久化 PostgreSQL 或 RabbitMQ 时使用的原密码，脚本会安全阻断而不会填入开发默认值。请先从安全备份恢复原凭据；不要通过删除 Volume 或随意更换密码处理升级。
+
 如确认相关镜像已经构建、只需恢复服务，可使用：
 
 ```bash
 SKIP_BUILD=1 ./scripts/deploy.sh
 ```
+
+根部署脚本默认使用生产覆盖，不会把 Compose 中的开发默认密码带入服务器。仅本机日常开发时，才直接在 `semantica-enterprise/` 下执行基础 `docker compose up -d`。
+
+## 国联演示环境
+
+国联演示库是两个独立的无持久测试数据库，只有显式启用才会启动。首次准备时：
+
+```bash
+export GUOLIAN_DEMO_ENABLED=1
+./scripts/deploy.sh
+
+cd semantica-enterprise
+export GUOLIAN_DEMO_ADMIN_PASSWORD='REPLACE_WITH_DEMO_ADMIN_SECRET'
+export GUOLIAN_DEMO_USER_PASSWORD='REPLACE_WITH_DEMO_USER_SECRET'
+export GUOLIAN_DEMO_DATABASE_PASSWORD="$(sed -n 's/^GUOLIAN_DEMO_DATABASE_PASSWORD=//p' .env)"
+# 全新平台尚无在线千问配置时，临时从安全渠道注入
+export GUOLIAN_DEMO_QWEN_API_KEY='REPLACE_WITH_DASHSCOPE_API_KEY'
+docker compose exec -T -e GUOLIAN_DEMO_ADMIN_PASSWORD -e GUOLIAN_DEMO_USER_PASSWORD \
+  -e GUOLIAN_DEMO_DATABASE_PASSWORD \
+  -e GUOLIAN_DEMO_QWEN_API_KEY \
+  -e GUOLIAN_DEMO_API_URL=http://api:8080/api/v1 \
+  api python scripts/demo/prepare_guolian_demo.py
+scripts/demo/preflight_guolian_demo.sh
+unset GUOLIAN_DEMO_QWEN_API_KEY
+```
+
+该模式通过 `compose.yaml + compose.production.yaml + compose.guolian-demo.yaml`
+和 `demo` profile 启动 16 个服务（13 个必需服务、2 个演示数据库、1 个协议数据源 Fixture）。
+
+关闭演示 overlay 时执行 `GUOLIAN_DEMO_ENABLED=1 semantica-enterprise/scripts/deploy_server.sh demo-stop`。命令移除三个可重建的演示容器、不删除平台命名 Volume，并以普通生产配置重建 API/Worker 以撤销演示私网白名单；两个演示数据库使用 `tmpfs`，下次启用时由仓库内确定性 SQL 重建。根部署脚本在未启用演示模式时也会清理同项目遗留的演示容器，避免健康检查漏检孤儿服务。
+
+不要在正式业务环境启用该 overlay。完整演示资料、预检条件和重置边界见 [国联演示预检指南](semantica-enterprise/docs/demo/DEMO_PREFLIGHT_GUIDE.md)。
 
 ## 验证
 
@@ -174,7 +210,7 @@ docker compose -f compose.yaml -f compose.structured-test.yaml up -d --build
 - 以上文件均被根目录 `.gitignore` 排除；前端和日志不得回显密钥。
 - 模型配置支持 LLM、Embedding、Reranker、Vision 和 ASR。除默认 LLM 外，未配置的模型能力会明确降级，不会伪造处理结果。
 
-如果暂时不使用 Kimi，可以在首次部署后通过“配置中心 → 模型配置”添加其他 OpenAI 兼容模型，再设置为默认模型。基础部署仍要求 Secret 文件存在，内容可以随后安全替换并重启 API、Worker 和 Agent Runtime。
+如果暂时不使用 Kimi，可以在首次部署后通过“配置中心 → 模型配置”添加其他 OpenAI 兼容模型，再设置为默认模型。文件型 Secret 挂载仍会存在，但空 Key 不会被报成“模型连接成功”。
 
 ## 数据持久化与升级
 

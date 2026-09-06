@@ -51,5 +51,32 @@
                 name: !!js process.env.DSH_MODEL_NAME
                 contextWindow: !!js Number(process.env.DSH_MODEL_CONTEXT_WINDOW || 131072)
                 maxTokens: !!js Number(process.env.DSH_MODEL_MAX_TOKENS || 4096)
+    # sdk-minimal deliberately omits long-session compaction.  Knowledge
+    # conversations carry sizeable structured tool results, so mount the
+    # upstream Harness meter/pruner/compaction seam explicitly.  The durable
+    # session log remains append-only; replacements only alter model context.
+    - id: token-meter-knowledge
+      name: '@deepseek-ai/dsh-token-meter'
+    - id: compaction-knowledge
+      name: cordis:group
+      group: true
+      isolate:
+        compaction: true
+        toolResultPruner: true
+      config:
+        - id: tool-result-pruner-knowledge
+          name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+          config:
+            thresholdChars: 8192
+            headChars: 4096
+            tailChars: 1024
+        - id: compaction-basic-knowledge
+          name: '@deepseek-ai/dsh-compaction-basic'
+          config:
+            thresholdRatio: 0.65
+            retainRatio: 0.12
+            maxTokens: 2048
+            compactionRetries: 2
+            maxOverflowRetries: 2
     - id: chuanshen-knowledge-tools
       name: '/opt/deepseek-harness/packages/integration/chuanshen-knowledge/index.js'

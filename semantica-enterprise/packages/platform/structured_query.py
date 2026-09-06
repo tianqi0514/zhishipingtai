@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -53,7 +55,10 @@ SCALAR_FUNCTIONS = {
     "lower", "upper", "coalesce", "abs", "round", "length", "date",
     "extract_year", "extract_month", "extract_day",
 }
-WINDOW_FUNCTIONS = {"row_number", "rank", "dense_rank", "sum", "avg", "count", "min", "max"}
+WINDOW_FUNCTIONS = {
+    "row_number", "rank", "dense_rank", "first_value", "last_value",
+    "sum", "avg", "count", "min", "max",
+}
 BINARY_OPERATORS = {"=", "!=", ">", ">=", "<", "<=", "+", "-", "*", "/", "%", "like"}
 CAST_TYPES = {
     "string": String,
@@ -85,7 +90,355 @@ def _canonicalize_generated_plan(raw: Any) -> Any:
         normalized["operator"] = operator_aliases.get(normalized.get("operator"), normalized.get("operator"))
         filters.append(normalized)
     plan["filters"] = filters
+
+    def normalize_expression(value: Any) -> Any:
+        if isinstance(value, list):
+            return [normalize_expression(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        normalized = {key: normalize_expression(item) for key, item in value.items()}
+        if normalized.get("kind") == "logical":
+            operands = [item for item in normalized.get("operands") or [] if isinstance(item, dict)]
+            if len(operands) == 1:
+                return operands[0]
+        if normalized.get("kind") == "binary":
+            normalized["operator"] = {
+                "eq": "=", "ne": "!=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=",
+                "==": "=", "<>": "!=",
+            }.get(normalized.get("operator"), normalized.get("operator"))
+        if normalized.get("kind") == "function":
+            function = str(normalized.get("function") or "").casefold()
+            arguments = normalized.get("arguments") or []
+            if function in {"divide", "ratio"} and len(arguments) == 2:
+                return {
+                    "kind": "binary",
+                    "operator": "/",
+                    "left": arguments[0],
+                    "right": arguments[1],
+                }
+            if function in {"percent", "percentage"} and len(arguments) == 2:
+                return {
+                    "kind": "binary",
+                    "operator": "*",
+                    "left": {
+                        "kind": "binary",
+                        "operator": "/",
+                        "left": arguments[0],
+                        "right": arguments[1],
+                    },
+                    "right": {"kind": "literal", "value": 100},
+                }
+        if normalized.get("kind") == "exists" and normalized.get("query") is not None:
+            relationship_fields = (
+                normalized.get("relationship_id"),
+                normalized.get("source_binding"),
+                normalized.get("target_binding"),
+                normalized.get("target_entity_id"),
+            )
+            nested = normalized.get("query") or {}
+            # Providers sometimes emit both legal EXISTS variants at once.  A
+            # one-hop nested query is exactly representable by the safer
+            # relationship form: its WHERE predicates become target operands,
+            # and physical correlation still comes only from the activated
+            # relationship mapping.
+            if all(relationship_fields) and not (nested.get("joins") or []):
+                nested_binding = str((nested.get("from_entity") or {}).get("binding") or "")
+                target_binding = str(normalized.get("target_binding") or "")
+
+                def rebind(item: Any) -> Any:
+                    if isinstance(item, list):
+                        return [rebind(child) for child in item]
+                    if not isinstance(item, dict):
+                        return item
+                    result = {key: rebind(child) for key, child in item.items()}
+                    if result.get("kind") == "attribute" and result.get("binding") == nested_binding:
+                        result["binding"] = target_binding
+                    return result
+
+                predicates = list(normalized.get("operands") or [])
+                if isinstance(nested.get("where"), dict):
+                    nested_where = rebind(nested["where"])
+                    if nested_where.get("kind") == "logical" and nested_where.get("operator") == "and":
+                        predicates.extend(nested_where.get("operands") or [])
+                    else:
+                        predicates.append(nested_where)
+                normalized["operands"] = predicates
+                normalized["query"] = None
+        return normalized
+
+    return {**raw, "plan": plan, "query_ir": normalize_expression(raw.get("query_ir"))}
+
+
+def _align_generated_plan_scope(raw: Any, version: SemanticMappingVersion) -> Any:
+    """Make the Plan explicitly declare every semantic binding used by strict IR.
+
+    Providers occasionally construct a valid semantic Join but omit its ID or
+    endpoint from the parallel Plan object.  Completing that declaration is a
+    deterministic protocol normalization: unknown IDs still fail validation,
+    and neither paths nor physical identifiers are invented here.
+    """
+
+    if not isinstance(raw, dict) or not isinstance(raw.get("plan"), dict) or not isinstance(raw.get("query_ir"), dict):
+        return raw
+    plan = dict(raw["plan"])
+    query_ir = raw["query_ir"]
+    entity_ids = list(plan.get("entity_ids") or [])
+    relationship_ids = list(plan.get("relationship_ids") or [])
+
+    def add_unique(values: list[str], value: Any) -> None:
+        if isinstance(value, str) and value and value not in values:
+            values.append(value)
+
+    from_entity = query_ir.get("from_entity") or {}
+    add_unique(entity_ids, from_entity.get("entity_id"))
+    for join in query_ir.get("joins") or []:
+        if not isinstance(join, dict):
+            continue
+        add_unique(entity_ids, join.get("entity_id"))
+        add_unique(relationship_ids, join.get("relationship_id"))
+    for expression in _raw_expression_nodes(query_ir.get("where")):
+        if expression.get("kind") == "exists" and expression.get("relationship_id"):
+            add_unique(relationship_ids, expression.get("relationship_id"))
+            add_unique(entity_ids, expression.get("target_entity_id"))
+    outputs = [dict(item) if isinstance(item, dict) else item for item in plan.get("outputs") or []]
+    for index, projection in enumerate(query_ir.get("select") or []):
+        if index >= len(outputs) or not isinstance(outputs[index], dict) or not isinstance(projection, dict):
+            continue
+        attribute_ids = list(outputs[index].get("attribute_ids") or [])
+        for expression in _raw_expression_nodes(projection.get("expression")):
+            if expression.get("kind") == "attribute":
+                add_unique(attribute_ids, expression.get("attribute_id"))
+        outputs[index]["attribute_ids"] = attribute_ids
+    plan["outputs"] = outputs
+    filters = list(plan.get("filters") or [])
+    for candidate in _raw_filter_signatures(query_ir.get("where")):
+        if candidate.get("attribute_id") and not any(_filter_matches(item, candidate) for item in filters):
+            filters.append(candidate)
+    plan["filters"] = filters
+    group_by_attribute_ids = list(plan.get("group_by_attribute_ids") or [])
+    for expression in query_ir.get("group_by") or []:
+        for node in _raw_expression_nodes(expression):
+            if node.get("kind") == "attribute":
+                add_unique(group_by_attribute_ids, node.get("attribute_id"))
+    plan["group_by_attribute_ids"] = group_by_attribute_ids
+    relationship_index = {
+        item.get("id"): item for item in (version.manifest or {}).get("relationships") or []
+    }
+    for relationship_id in relationship_ids:
+        relationship = relationship_index.get(relationship_id) or {}
+        add_unique(entity_ids, relationship.get("from_entity_id"))
+        add_unique(entity_ids, relationship.get("to_entity_id"))
+    plan["entity_ids"] = entity_ids
+    plan["relationship_ids"] = relationship_ids
     return {**raw, "plan": plan}
+
+
+def _repair_generated_relationship_endpoints(
+    raw: Any,
+    version: SemanticMappingVersion,
+) -> Any:
+    """Resolve a relationship's target entity from its activated endpoints.
+
+    Models choose semantic relationships, but occasionally repeat the source
+    entity in ``join.entity_id`` or choose the endpoint on the wrong side.  The
+    relationship mapping already determines the only valid counterpart.  This
+    repair never invents a path and leaves ambiguous/self relationships for the
+    strict validator to reject.
+    """
+
+    if not isinstance(raw, dict) or not isinstance(raw.get("query_ir"), dict):
+        return raw
+    relationships = {
+        item.get("id"): item
+        for item in (version.manifest or {}).get("relationships") or []
+        if isinstance(item, dict)
+    }
+
+    def repair_ir(query_ir: Any) -> Any:
+        if not isinstance(query_ir, dict):
+            return query_ir
+        result = dict(query_ir)
+        from_entity = dict(result.get("from_entity") or {})
+        bindings: dict[str, str] = {}
+        if from_entity.get("binding") and from_entity.get("entity_id"):
+            bindings[str(from_entity["binding"])] = str(from_entity["entity_id"])
+        joins: list[Any] = []
+        for candidate in result.get("joins") or []:
+            if not isinstance(candidate, dict):
+                joins.append(candidate)
+                continue
+            join = dict(candidate)
+            relationship = relationships.get(join.get("relationship_id")) or {}
+            source_entity = bindings.get(str(join.get("from_binding") or ""))
+            endpoints = (
+                relationship.get("from_entity_id"),
+                relationship.get("to_entity_id"),
+            )
+            if source_entity and source_entity in endpoints and endpoints[0] != endpoints[1]:
+                join["entity_id"] = endpoints[1] if source_entity == endpoints[0] else endpoints[0]
+            if join.get("binding") and join.get("entity_id"):
+                bindings[str(join["binding"])] = str(join["entity_id"])
+            joins.append(join)
+        result["joins"] = joins
+
+        def repair_expression(value: Any, scoped_bindings: dict[str, str] | None = None) -> Any:
+            scoped_bindings = scoped_bindings or bindings
+            if isinstance(value, list):
+                return [repair_expression(item, scoped_bindings) for item in value]
+            if not isinstance(value, dict):
+                return value
+            expression = dict(value)
+            if expression.get("kind") == "exists" and expression.get("relationship_id"):
+                relationship = relationships.get(expression.get("relationship_id")) or {}
+                source_entity = scoped_bindings.get(str(expression.get("source_binding") or ""))
+                endpoints = (
+                    relationship.get("from_entity_id"),
+                    relationship.get("to_entity_id"),
+                )
+                if source_entity and source_entity in endpoints and endpoints[0] != endpoints[1]:
+                    expression["target_entity_id"] = (
+                        endpoints[1] if source_entity == endpoints[0] else endpoints[0]
+                    )
+                # A relationship EXISTS introduces its target binding only for
+                # its operands.  Nested relationship paths must be repaired in
+                # that extended scope; using only the root bindings silently
+                # rewrites valid nested filters onto the wrong entity.
+                operand_bindings = dict(scoped_bindings)
+                if expression.get("target_binding") and expression.get("target_entity_id"):
+                    operand_bindings[str(expression["target_binding"])] = str(expression["target_entity_id"])
+                expression["operands"] = repair_expression(
+                    expression.get("operands") or [], operand_bindings
+                )
+            for key, item in list(expression.items()):
+                if key == "operands" and expression.get("kind") == "exists":
+                    continue
+                if key == "query" and item is not None:
+                    expression[key] = repair_ir(item)
+                else:
+                    expression[key] = repair_expression(item, scoped_bindings)
+            return expression
+
+        for key in ("select", "where", "group_by", "having", "order_by"):
+            if key in result:
+                result[key] = repair_expression(result.get(key))
+        return result
+
+    return {**raw, "query_ir": repair_ir(raw["query_ir"])}
+
+
+def _question_ngrams(value: str) -> set[str]:
+    """Return deterministic lexical features for short Chinese business labels."""
+    features: set[str] = set()
+    for token in re.findall(r"[a-z0-9]+|[\u3400-\u9fff]+", value.casefold()):
+        features.add(token)
+        if re.fullmatch(r"[\u3400-\u9fff]+", token):
+            for size in range(2, min(6, len(token)) + 1):
+                features.update(token[index:index + size] for index in range(len(token) - size + 1))
+    return features
+
+
+def _attribute_question_score(
+    question: str,
+    attribute: dict[str, Any],
+    entities: dict[str, dict[str, Any]],
+) -> int:
+    """Score a semantic attribute without looking at physical schema identifiers."""
+    entity_label = str((entities.get(attribute.get("entity_id")) or {}).get("label") or "").strip()
+    labels = [
+        str(attribute.get("label") or "").strip(),
+        *(str(item).strip() for item in attribute.get("aliases") or []),
+    ]
+    question_folded = question.casefold()
+    descriptor = " ".join([entity_label, *labels])
+    overlap = _question_ngrams(question) & _question_ngrams(descriptor)
+    score = sum(len(item) ** 2 for item in overlap)
+    if entity_label and entity_label.casefold() in question_folded:
+        score += 400 + len(entity_label) * 20
+    for label in labels:
+        if label and label.casefold() in question_folded:
+            score += 800 + len(label) * 20
+    return score
+
+
+def _disambiguate_generated_filters(
+    raw: Any,
+    version: SemanticMappingVersion,
+    question: str,
+) -> Any:
+    """Bind homonymous filters to the business entity explicitly named by the user.
+
+    A mapping may legitimately expose the same ontology property on several
+    entities (for example supplier risk level and risk-event level).  The model
+    may select a type-compatible but semantically different property.  When the
+    question explicitly names one entity and that entity is already bound in the
+    IR, prefer its homologous attribute.  This changes semantic IDs only and
+    never invents a physical field, join, or SQL fragment.
+    """
+    if not isinstance(raw, dict) or not isinstance(raw.get("plan"), dict) or not isinstance(raw.get("query_ir"), dict):
+        return raw
+    manifest = version.manifest or {}
+    entities = {item.get("id"): item for item in manifest.get("entities") or []}
+    attributes = {item.get("id"): item for item in manifest.get("attributes") or []}
+    bindings: dict[str, str] = {}
+    query_ir = raw["query_ir"]
+    for binding in [query_ir.get("from_entity") or {}, *(query_ir.get("joins") or [])]:
+        if binding.get("entity_id") and binding.get("binding"):
+            bindings[str(binding["entity_id"])] = str(binding["binding"])
+
+    replacements: dict[str, tuple[str, str]] = {}
+    filters: list[Any] = []
+    for item in raw["plan"].get("filters") or []:
+        if not isinstance(item, dict):
+            filters.append(item)
+            continue
+        selected = attributes.get(item.get("attribute_id"))
+        if not selected or not selected.get("ontology_term_id"):
+            filters.append(dict(item))
+            continue
+        candidates = [
+            candidate for candidate in attributes.values()
+            if candidate.get("ontology_term_id") == selected.get("ontology_term_id")
+            and candidate.get("semantic_type") == selected.get("semantic_type")
+            and candidate.get("entity_id") in bindings
+        ]
+        ranked = sorted(
+            ((candidate, _attribute_question_score(question, candidate, entities)) for candidate in candidates),
+            key=lambda row: (-row[1], str(row[0].get("id"))),
+        )
+        selected_score = _attribute_question_score(question, selected, entities)
+        best, best_score = ranked[0] if ranked else (selected, selected_score)
+        best_entity_label = str((entities.get(best.get("entity_id")) or {}).get("label") or "")
+        if (
+            best.get("id") != selected.get("id")
+            and best_score >= selected_score + 100
+            and best_entity_label
+            and best_entity_label.casefold() in question.casefold()
+        ):
+            replacement = dict(item)
+            replacement["attribute_id"] = best["id"]
+            filters.append(replacement)
+            replacements[str(selected["id"])] = (str(best["id"]), bindings[str(best["entity_id"])])
+        else:
+            filters.append(dict(item))
+    if not replacements:
+        return raw
+
+    def rewrite_expression(value: Any) -> Any:
+        if isinstance(value, list):
+            return [rewrite_expression(child) for child in value]
+        if not isinstance(value, dict):
+            return value
+        rewritten = {key: rewrite_expression(child) for key, child in value.items()}
+        replacement = replacements.get(str(rewritten.get("attribute_id")))
+        if rewritten.get("kind") == "attribute" and replacement:
+            rewritten["attribute_id"], rewritten["binding"] = replacement
+        return rewritten
+
+    plan = dict(raw["plan"])
+    plan["filters"] = filters
+    query_ir = dict(query_ir)
+    query_ir["where"] = rewrite_expression(query_ir.get("where"))
+    return {**raw, "plan": plan, "query_ir": query_ir}
 
 
 def _metric_filter_expression(required_filter: dict[str, Any], binding: str) -> dict[str, Any] | None:
@@ -103,6 +456,114 @@ def _metric_filter_expression(required_filter: dict[str, Any], binding: str) -> 
     return None
 
 
+def _raw_expression_nodes(expression: Any) -> Iterable[dict[str, Any]]:
+    if not isinstance(expression, dict):
+        return
+    if expression.get("kind"):
+        yield expression
+    for key in (
+        "arguments", "operands", "options", "partition_by",
+    ):
+        for item in expression.get(key) or []:
+            yield from _raw_expression_nodes(item)
+    for key in ("left", "right", "expression", "lower", "upper", "else_expression"):
+        yield from _raw_expression_nodes(expression.get(key))
+    for branch in expression.get("whens") or []:
+        if isinstance(branch, dict):
+            yield from _raw_expression_nodes(branch.get("when"))
+            yield from _raw_expression_nodes(branch.get("then"))
+
+
+def _raw_filter_signatures(expression: Any) -> list[dict[str, Any]]:
+    if not isinstance(expression, dict):
+        return []
+    kind = expression.get("kind")
+    if kind in {"logical", "exists"}:
+        return [
+            item
+            for operand in expression.get("operands") or []
+            for item in _raw_filter_signatures(operand)
+        ]
+    if kind == "not":
+        return _raw_filter_signatures(expression.get("expression"))
+    left, right = expression.get("left"), expression.get("right")
+    if kind == "binary" and isinstance(left, dict) and isinstance(right, dict):
+        if left.get("kind") == "literal" and right.get("kind") == "attribute":
+            left, right = right, left
+        operators = {"=": "eq", "!=": "ne", "<>": "ne", ">": "gt", ">=": "gte", "<": "lt", "<=": "lte"}
+        if left.get("kind") == "attribute" and right.get("kind") == "literal" and expression.get("operator") in operators:
+            return [{
+                "attribute_id": left.get("attribute_id"),
+                "operator": operators[expression["operator"]],
+                "value": right.get("value"),
+                "upper": None,
+            }]
+    target = expression.get("expression")
+    if kind == "between" and isinstance(target, dict):
+        lower, upper = expression.get("lower"), expression.get("upper")
+        if target.get("kind") == "attribute" and isinstance(lower, dict) and isinstance(upper, dict) and lower.get("kind") == upper.get("kind") == "literal":
+            return [{"attribute_id": target.get("attribute_id"), "operator": "between", "value": lower.get("value"), "upper": upper.get("value")}]
+    if kind == "in" and isinstance(target, dict) and target.get("kind") == "attribute":
+        options = expression.get("options") or []
+        if options and all(isinstance(item, dict) and item.get("kind") == "literal" for item in options):
+            return [{"attribute_id": target.get("attribute_id"), "operator": "in", "value": [item.get("value") for item in options], "upper": None}]
+    if kind == "is_null" and isinstance(target, dict) and target.get("kind") == "attribute":
+        return [{"attribute_id": target.get("attribute_id"), "operator": "is_not_null" if expression.get("negated") else "is_null", "value": None, "upper": None}]
+    return []
+
+
+def _filter_matches(candidate: dict[str, Any], required: dict[str, Any]) -> bool:
+    return all(candidate.get(key) == value for key, value in required.items())
+
+
+def _contains_relationship_requirement(
+    where: Any,
+    requirement: dict[str, Any],
+    source_binding: str,
+) -> bool:
+    expected_negated = requirement.get("quantifier", "exists") == "not_exists"
+    for expression in _raw_expression_nodes(where):
+        if (
+            expression.get("kind") != "exists"
+            or expression.get("query") is not None
+            or expression.get("relationship_id") != requirement.get("relationship_id")
+            or expression.get("source_binding") != source_binding
+            or expression.get("target_entity_id") != requirement.get("target_entity_id")
+            or bool(expression.get("negated")) != expected_negated
+        ):
+            continue
+        signatures = _raw_filter_signatures(expression)
+        if all(any(_filter_matches(candidate, item) for candidate in signatures) for item in requirement.get("filters") or []):
+            return True
+    return False
+
+
+def _used_bindings(query_ir: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for node in _raw_expression_nodes(query_ir.get("where")):
+        for key in ("binding", "source_binding", "target_binding"):
+            if node.get(key):
+                values.add(str(node[key]))
+    for item in [query_ir.get("from_entity") or {}, *(query_ir.get("joins") or [])]:
+        for key in ("binding", "from_binding"):
+            if item.get(key):
+                values.add(str(item[key]))
+    return values
+
+
+def _contract_binding(relationship_id: str, used: set[str]) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_]", "_", f"metric_{relationship_id}")[:56]
+    if not stem or not stem[0].isalpha():
+        stem = f"metric_{stem}"
+    candidate = stem
+    suffix = 1
+    while candidate in used:
+        suffix += 1
+        candidate = f"{stem[:58]}_{suffix}"
+    used.add(candidate)
+    return candidate
+
+
 def _apply_metric_contracts(raw: Any, version: SemanticMappingVersion) -> Any:
     """Deterministically inject activated metric filters before strict validation.
 
@@ -114,7 +575,9 @@ def _apply_metric_contracts(raw: Any, version: SemanticMappingVersion) -> Any:
     if not isinstance(raw, dict) or not isinstance(raw.get("plan"), dict) or not isinstance(raw.get("query_ir"), dict):
         return raw
     plan, query_ir = dict(raw["plan"]), dict(raw["query_ir"])
-    attributes = {item.get("id"): item for item in (version.manifest or {}).get("attributes") or []}
+    manifest = version.manifest or {}
+    attributes = {item.get("id"): item for item in manifest.get("attributes") or []}
+    relationships = {item.get("id"): item for item in manifest.get("relationships") or []}
     bindings: dict[str, str] = {}
     from_entity = query_ir.get("from_entity") or {}
     if from_entity.get("entity_id") and from_entity.get("binding"):
@@ -125,6 +588,12 @@ def _apply_metric_contracts(raw: Any, version: SemanticMappingVersion) -> Any:
     filters = list(plan.get("filters") or [])
     where = query_ir.get("where")
     evidence = list(plan.get("evidence_constraints") or [])
+    entity_ids = list(plan.get("entity_ids") or [])
+    relationship_ids = list(plan.get("relationship_ids") or [])
+    metric_contract = dict(plan.get("metric_contract") or {})
+    base_entity_ids = list(metric_contract.get("base_entity_ids") or [])
+    base_relationship_ids = list(metric_contract.get("base_relationship_ids") or [])
+    used_bindings = _used_bindings(query_ir)
     for output in plan.get("outputs") or []:
         for attribute_id in output.get("attribute_ids") or []:
             attribute = attributes.get(attribute_id) or {}
@@ -134,15 +603,98 @@ def _apply_metric_contracts(raw: Any, version: SemanticMappingVersion) -> Any:
             if definition and definition not in evidence:
                 evidence.append(definition)
             for required_filter in attribute.get("required_filters") or []:
-                if any(all(candidate.get(key) == value for key, value in required_filter.items()) for candidate in filters):
+                if any(_filter_matches(candidate, required_filter) for candidate in filters):
                     continue
                 filters.append(dict(required_filter))
                 binding = bindings.get(attribute.get("entity_id"))
                 predicate = _metric_filter_expression(required_filter, binding) if binding else None
                 if predicate:
                     where = predicate if where is None else {"kind": "logical", "operator": "and", "operands": [where, predicate]}
+            source_entity_id = attribute.get("entity_id")
+            source_binding = bindings.get(source_entity_id)
+            for requirement in attribute.get("required_relationships") or []:
+                relationship_id = requirement.get("relationship_id")
+                target_entity_id = requirement.get("target_entity_id")
+                if target_entity_id and target_entity_id not in entity_ids:
+                    entity_ids.append(target_entity_id)
+                if relationship_id and relationship_id not in relationship_ids:
+                    relationship_ids.append(relationship_id)
+                for entity_id in (source_entity_id, target_entity_id):
+                    if entity_id and entity_id not in base_entity_ids:
+                        base_entity_ids.append(entity_id)
+                if relationship_id and relationship_id not in base_relationship_ids:
+                    base_relationship_ids.append(relationship_id)
+                description = requirement.get("description")
+                if description and description not in evidence:
+                    evidence.append(description)
+                for required_filter in requirement.get("filters") or []:
+                    if not any(_filter_matches(candidate, required_filter) for candidate in filters):
+                        filters.append(dict(required_filter))
+                if (
+                    not source_binding
+                    or relationship_id not in relationships
+                    or _contains_relationship_requirement(where, requirement, source_binding)
+                ):
+                    continue
+                target_binding = _contract_binding(str(relationship_id), used_bindings)
+                predicates = [
+                    predicate
+                    for predicate in (
+                        _metric_filter_expression(required_filter, target_binding)
+                        for required_filter in requirement.get("filters") or []
+                    )
+                    if predicate is not None
+                ]
+                relational_exists = {
+                    "kind": "exists",
+                    "relationship_id": relationship_id,
+                    "source_binding": source_binding,
+                    "target_binding": target_binding,
+                    "target_entity_id": target_entity_id,
+                    "operands": predicates,
+                    "negated": requirement.get("quantifier", "exists") == "not_exists",
+                }
+                where = relational_exists if where is None else {
+                    "kind": "logical", "operator": "and", "operands": [where, relational_exists],
+                }
+    used_relationship_ids = {
+        join.get("relationship_id")
+        for join in query_ir.get("joins") or []
+        if isinstance(join, dict) and join.get("relationship_id")
+    } | {
+        expression.get("relationship_id")
+        for expression in _raw_expression_nodes(where)
+        if expression.get("kind") == "exists" and expression.get("relationship_id")
+    }
+    for relationship_id in relationship_ids:
+        if relationship_id not in used_relationship_ids:
+            continue
+        relationship = relationships.get(relationship_id) or {}
+        required_filters = relationship.get("required_filters") or []
+        if required_filters and relationship.get("description") and relationship["description"] not in evidence:
+            evidence.append(relationship["description"])
+        for required_filter in required_filters:
+            if not any(_filter_matches(candidate, required_filter) for candidate in filters):
+                filters.append(dict(required_filter))
+            if any(
+                _filter_matches(candidate, required_filter)
+                for candidate in _raw_filter_signatures(where)
+            ):
+                continue
+            filter_attribute = attributes.get(required_filter.get("attribute_id")) or {}
+            binding = bindings.get(filter_attribute.get("entity_id"))
+            predicate = _metric_filter_expression(required_filter, binding) if binding else None
+            if predicate:
+                where = predicate if where is None else {
+                    "kind": "logical", "operator": "and", "operands": [where, predicate],
+                }
     plan["filters"] = filters
     plan["evidence_constraints"] = evidence
+    plan["entity_ids"] = entity_ids
+    plan["relationship_ids"] = relationship_ids
+    metric_contract["base_entity_ids"] = base_entity_ids
+    metric_contract["base_relationship_ids"] = base_relationship_ids
+    plan["metric_contract"] = metric_contract
     query_ir["where"] = where
     return {**raw, "plan": plan, "query_ir": query_ir}
 
@@ -177,6 +729,7 @@ def semantic_catalog_for_planner(version: SemanticMappingVersion) -> dict[str, A
     relationships = manifest.get("relationships") or []
     return {
         "mapping_version_id": version.id,
+        "business_guidance": manifest.get("notes") or [],
         "entities": [{
             "id": item.get("id"),
             "label": item.get("label"),
@@ -196,14 +749,25 @@ def semantic_catalog_for_planner(version: SemanticMappingVersion) -> dict[str, A
             "aggregation": item.get("aggregation"),
             "default_aggregate": item.get("default_aggregate"),
             "required_filters": item.get("required_filters") or [],
+            "required_relationships": item.get("required_relationships") or [],
         } for item in attributes],
         "relationships": [{
             "id": item.get("id"),
             "label": item.get("label"),
+            "description": item.get("description") or "",
             "from_entity_id": item.get("from_entity_id"),
             "to_entity_id": item.get("to_entity_id"),
             "cardinality": item.get("cardinality"),
+            "required_filters": item.get("required_filters") or [],
         } for item in relationships],
+        "derived_metrics": manifest.get("derived_metrics") or [],
+        "record_sets": manifest.get("record_sets") or [],
+        "governed_queries": [{
+            "id": item.get("id"),
+            "label": item.get("label"),
+            "aliases": item.get("aliases") or [],
+            "description": item.get("description") or "",
+        } for item in manifest.get("governed_queries") or []],
     }
 
 
@@ -225,7 +789,8 @@ def collect_semantic_value_hints(
     }
     enum_tokens = {
         "status", "state", "type", "category", "region", "level",
-        "状态", "类型", "类别", "分类", "地区", "区域", "等级",
+        "decision", "result", "状态", "类型", "类别", "分类", "地区", "区域", "等级",
+        "结论", "结果", "审批",
     }
     hints: dict[str, list[Any]] = {}
     candidates = []
@@ -252,6 +817,483 @@ def collect_semantic_value_hints(
         if result["values"]:
             hints[attribute["id"]] = result["values"]
     return hints
+
+
+def _governed_semantic_match(question: str, definitions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Match an explicitly governed business concept, never an answer value."""
+
+    folded = question.casefold()
+    scored: list[tuple[int, str, dict[str, Any]]] = []
+    for definition in definitions:
+        labels = [definition.get("label"), *(definition.get("aliases") or [])]
+        matches = [str(label).strip() for label in labels if str(label or "").strip() and str(label).strip().casefold() in folded]
+        if matches:
+            best = max(matches, key=len)
+            scored.append((len(best), str(definition.get("id") or ""), definition))
+    return sorted(scored, key=lambda item: (-item[0], item[1]))[0][2] if scored else None
+
+
+def _semantic_filter_expression(required_filter: dict[str, Any], binding: str) -> dict[str, Any]:
+    result = _metric_filter_expression(required_filter, binding)
+    if result is None:
+        raise StructuredDataError(
+            "SEMANTIC_CONTRACT_INVALID",
+            f"受管理语义口径包含不支持的筛选：{required_filter.get('operator')}",
+        )
+    return result
+
+
+def _governed_relationship_expression(
+    requirement: dict[str, Any],
+    *,
+    source_binding: str,
+    suffix: str,
+) -> dict[str, Any]:
+    target_binding = re.sub(
+        r"[^A-Za-z0-9_]", "_", f"governed_{requirement['relationship_id']}_{suffix}"
+    )[:63]
+    return {
+        "kind": "exists",
+        "relationship_id": requirement["relationship_id"],
+        "source_binding": source_binding,
+        "target_binding": target_binding,
+        "target_entity_id": requirement["target_entity_id"],
+        "operands": [
+            _semantic_filter_expression(item, target_binding)
+            for item in requirement.get("filters") or []
+        ],
+        "negated": requirement.get("quantifier", "exists") == "not_exists",
+    }
+
+
+def _logical_and(expressions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    expressions = [item for item in expressions if item]
+    if not expressions:
+        return None
+    if len(expressions) == 1:
+        return expressions[0]
+    return {"kind": "logical", "operator": "and", "operands": expressions}
+
+
+def _year_from_question(question: str, *, default: int | None = None) -> int | None:
+    match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", question)
+    return int(match.group(1)) if match else default
+
+
+def _governed_metric_subquery(
+    *,
+    attribute: dict[str, Any],
+    binding: str,
+    suffix: str,
+    time_attribute_id: str | None,
+    period_attribute_id: str | None,
+    period: int | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], list[str]]:
+    filters = [dict(item) for item in attribute.get("required_filters") or []]
+    if period is not None and time_attribute_id:
+        filters.extend([
+            {"attribute_id": time_attribute_id, "operator": "gte", "value": f"{period:04d}-01-01"},
+            {"attribute_id": time_attribute_id, "operator": "lt", "value": f"{period + 1:04d}-01-01"},
+        ])
+    if period is not None and period_attribute_id:
+        filters.append({"attribute_id": period_attribute_id, "operator": "eq", "value": period})
+    relationships = [dict(item) for item in attribute.get("required_relationships") or []]
+    predicates = [_semantic_filter_expression(item, binding) for item in filters]
+    predicates.extend(
+        _governed_relationship_expression(item, source_binding=binding, suffix=f"{suffix}_{index}")
+        for index, item in enumerate(relationships, start=1)
+    )
+    query = {
+        "from_entity": {"binding": binding, "entity_id": attribute["entity_id"]},
+        "select": [{
+            "alias": f"metric_{suffix}",
+            "expression": {
+                "kind": "aggregate",
+                "function": attribute.get("default_aggregate") or "sum",
+                "expression": {"kind": "attribute", "attribute_id": attribute["id"], "binding": binding},
+            },
+        }],
+        "where": _logical_and(predicates),
+    }
+    entity_ids = [attribute["entity_id"], *(item["target_entity_id"] for item in relationships)]
+    relationship_ids = [item["relationship_id"] for item in relationships]
+    return query, filters, entity_ids, relationship_ids
+
+
+def _ratio_expression(
+    numerator: dict[str, Any],
+    denominator: dict[str, Any],
+    scale: float,
+) -> dict[str, Any]:
+    return {
+        "kind": "case",
+        "whens": [{
+            "when": {
+                "kind": "binary", "operator": "!=",
+                "left": denominator, "right": {"kind": "literal", "value": 0},
+            },
+            "then": {
+                "kind": "binary", "operator": "/",
+                "left": {
+                    "kind": "binary", "operator": "*",
+                    "left": numerator, "right": {"kind": "literal", "value": scale},
+                },
+                "right": denominator,
+            },
+        }],
+        "else_expression": {"kind": "literal", "value": None},
+    }
+
+
+def _governed_derived_metric_plan(
+    question: str,
+    version: SemanticMappingVersion,
+) -> dict[str, Any] | None:
+    """Compile an activated derived-metric definition into strict semantic IR.
+
+    The mapping supplies semantic IDs and business grain. Literal answers and
+    physical schema identifiers are intentionally impossible in this contract.
+    """
+
+    manifest = version.manifest or {}
+    definition = _governed_semantic_match(question, manifest.get("derived_metrics") or [])
+    if definition is None:
+        return None
+    attributes = {item.get("id"): item for item in manifest.get("attributes") or []}
+    relationships = {item.get("id"): item for item in manifest.get("relationships") or []}
+    numerator = attributes.get(definition.get("numerator_attribute_id"))
+    denominator = attributes.get(definition.get("denominator_attribute_id"))
+    if not numerator or not denominator:
+        raise StructuredDataError("SEMANTIC_CONTRACT_INVALID", "派生指标引用了未知的分子或分母")
+    period = _year_from_question(question, default=definition.get("default_period"))
+    if period is None and (
+        definition.get("numerator_time_attribute_id")
+        or definition.get("denominator_period_attribute_id")
+    ):
+        raise StructuredDataError("SEMANTIC_PERIOD_REQUIRED", "该指标需要明确统计年份")
+    scale = float(definition.get("scale") or 100)
+    dimensions = definition.get("dimensions") or []
+    dimension = next(
+        (
+            item for item in dimensions
+            if any(
+                str(alias).strip() and str(alias).strip().casefold() in question.casefold()
+                for alias in [item.get("label"), *(item.get("aliases") or [])]
+            )
+        ),
+        None,
+    )
+    definition_request = "分子" in question and "分母" in question
+
+    actual_query, actual_filters, actual_entities, actual_relationships = _governed_metric_subquery(
+        attribute=numerator,
+        binding="actual_metric",
+        suffix="actual",
+        time_attribute_id=definition.get("numerator_time_attribute_id"),
+        period_attribute_id=None,
+        period=period,
+    )
+    target_query, target_filters, target_entities, target_relationships = _governed_metric_subquery(
+        attribute=denominator,
+        binding="target_metric",
+        suffix="target",
+        time_attribute_id=None,
+        period_attribute_id=definition.get("denominator_period_attribute_id"),
+        period=period,
+    )
+    all_filters = [
+        *actual_filters,
+        *target_filters,
+        *(
+            dict(item)
+            for requirement in numerator.get("required_relationships") or []
+            for item in requirement.get("filters") or []
+        ),
+        *(
+            dict(item)
+            for requirement in denominator.get("required_relationships") or []
+            for item in requirement.get("filters") or []
+        ),
+    ]
+    entity_ids = list(dict.fromkeys([*actual_entities, *target_entities]))
+    relationship_ids = list(dict.fromkeys([*actual_relationships, *target_relationships]))
+    evidence = [
+        item for item in (
+            numerator.get("business_definition"),
+            denominator.get("business_definition"),
+            definition.get("description"),
+        ) if item
+    ]
+
+    if dimension is None:
+        # Each scalar expression gets a distinct binding namespace so strict
+        # scope validation and correlated EXISTS auditing remain unambiguous.
+        def scalar(attribute: dict[str, Any], prefix: str) -> dict[str, Any]:
+            query, _, _, _ = _governed_metric_subquery(
+                attribute=attribute,
+                binding=f"{prefix}_metric",
+                suffix=prefix,
+                time_attribute_id=(definition.get("numerator_time_attribute_id") if attribute is numerator else None),
+                period_attribute_id=(definition.get("denominator_period_attribute_id") if attribute is denominator else None),
+                period=period,
+            )
+            return {"kind": "subquery", "query": query}
+
+        projections: list[dict[str, Any]]
+        outputs: list[dict[str, Any]]
+        if definition_request:
+            numerator_name = definition.get("numerator_display_label") or numerator.get("label")
+            denominator_name = definition.get("denominator_display_label") or denominator.get("label")
+            numerator_label = f"{period}年{numerator_name}" if period else str(numerator_name)
+            denominator_label = f"{period}年{denominator_name}" if period else str(denominator_name)
+            projections = [
+                {"alias": "numerator_label", "expression": {"kind": "literal", "value": numerator_label},},
+                {"alias": "numerator", "expression": scalar(numerator, "definition_actual")},
+                {"alias": "denominator_label", "expression": {"kind": "literal", "value": denominator_label},},
+                {"alias": "denominator", "expression": scalar(denominator, "definition_target")},
+            ]
+            outputs = [
+                {"position": 1, "label": "分子名称", "kind": "derived", "attribute_ids": []},
+                {"position": 2, "label": "分子", "kind": "metric", "attribute_ids": [numerator["id"]], "aggregate": numerator.get("default_aggregate") or "sum"},
+                {"position": 3, "label": "分母名称", "kind": "derived", "attribute_ids": []},
+                {"position": 4, "label": "分母", "kind": "metric", "attribute_ids": [denominator["id"]], "aggregate": denominator.get("default_aggregate") or "sum"},
+            ]
+        else:
+            actual_value = scalar(numerator, "output_actual")
+            target_value = scalar(denominator, "output_target")
+            percent_actual = scalar(numerator, "ratio_actual")
+            percent_target = scalar(denominator, "ratio_target")
+            projections = [
+                {"alias": "numerator", "expression": actual_value},
+                {"alias": "denominator", "expression": target_value},
+                {"alias": "percent", "expression": _ratio_expression(percent_actual, percent_target, scale)},
+            ]
+            outputs = [
+                {"position": 1, "label": "分子", "kind": "metric", "attribute_ids": [numerator["id"]], "aggregate": numerator.get("default_aggregate") or "sum"},
+                {"position": 2, "label": "分母", "kind": "metric", "attribute_ids": [denominator["id"]], "aggregate": denominator.get("default_aggregate") or "sum"},
+                {"position": 3, "label": definition["label"], "kind": "derived", "attribute_ids": [numerator["id"], denominator["id"]], "aggregate": "sum"},
+            ]
+        query_ir = {
+            "from_entity": {"binding": "metric_scope", "entity_id": numerator["entity_id"]},
+            "select": projections,
+            "limit": 1,
+        }
+        expected_cardinality = "single_row"
+        result_grain = "集团汇总"
+    else:
+        dimension_entity_id = dimension.get("entity_id")
+        dimension_attribute_id = dimension.get("attribute_id")
+        dimension_attribute = attributes.get(dimension_attribute_id)
+        numerator_relationship = relationships.get(dimension.get("numerator_relationship_id"))
+        denominator_relationship = relationships.get(dimension.get("denominator_relationship_id"))
+        if not all((dimension_entity_id, dimension_attribute, numerator_relationship, denominator_relationship)):
+            raise StructuredDataError("SEMANTIC_CONTRACT_INVALID", "派生指标分组维度配置不完整")
+        entity_ids = list(dict.fromkeys([
+            dimension_entity_id, numerator["entity_id"], denominator["entity_id"], *entity_ids,
+        ]))
+        relationship_ids = list(dict.fromkeys([
+            dimension["numerator_relationship_id"],
+            dimension["denominator_relationship_id"],
+            *relationship_ids,
+        ]))
+        actual_binding, target_binding, dimension_binding = "actual", "target", "dimension"
+        predicates = [
+            *(_semantic_filter_expression(item, actual_binding) for item in actual_filters),
+            *(_semantic_filter_expression(item, target_binding) for item in target_filters),
+            *(
+                _governed_relationship_expression(item, source_binding=actual_binding, suffix=f"group_{index}")
+                for index, item in enumerate(numerator.get("required_relationships") or [], start=1)
+            ),
+        ]
+        actual_sum = {
+            "kind": "aggregate", "function": numerator.get("default_aggregate") or "sum",
+            "expression": {"kind": "attribute", "attribute_id": numerator["id"], "binding": actual_binding},
+        }
+        # One target is unique per dimension and period. DISTINCT prevents the
+        # target from multiplying when the numerator has multiple records.
+        target_sum = {
+            "kind": "aggregate", "function": denominator.get("default_aggregate") or "sum", "distinct": True,
+            "expression": {"kind": "attribute", "attribute_id": denominator["id"], "binding": target_binding},
+        }
+        query_ir = {
+            "from_entity": {"binding": dimension_binding, "entity_id": dimension_entity_id},
+            "joins": [
+                {"binding": actual_binding, "entity_id": numerator["entity_id"], "relationship_id": dimension["numerator_relationship_id"], "from_binding": dimension_binding, "join_type": "inner"},
+                {"binding": target_binding, "entity_id": denominator["entity_id"], "relationship_id": dimension["denominator_relationship_id"], "from_binding": dimension_binding, "join_type": "inner"},
+            ],
+            "select": [
+                {"alias": "org_unit", "expression": {"kind": "attribute", "attribute_id": dimension_attribute_id, "binding": dimension_binding}},
+                {"alias": "actual", "expression": actual_sum},
+                {"alias": "target", "expression": target_sum},
+                {"alias": "percent", "expression": _ratio_expression(actual_sum, target_sum, scale)},
+            ],
+            "where": _logical_and(predicates),
+            "group_by": [{"kind": "attribute", "attribute_id": dimension_attribute_id, "binding": dimension_binding}],
+            "order_by": [{"expression": actual_sum, "direction": "desc"}],
+        }
+        outputs = [
+            {"position": 1, "label": dimension.get("label") or "分组", "kind": "attribute", "attribute_ids": [dimension_attribute_id]},
+            {"position": 2, "label": "实际值", "kind": "metric", "attribute_ids": [numerator["id"]], "aggregate": numerator.get("default_aggregate") or "sum"},
+            {"position": 3, "label": "目标值", "kind": "metric", "attribute_ids": [denominator["id"]], "aggregate": denominator.get("default_aggregate") or "sum"},
+            {"position": 4, "label": definition["label"], "kind": "derived", "attribute_ids": [numerator["id"], denominator["id"]], "aggregate": "sum"},
+        ]
+        expected_cardinality = "multiple_rows"
+        result_grain = dimension.get("label") or "分组"
+
+    return {
+        "plan": {
+            "original_question": question,
+            "intent": f"按已激活语义口径计算{definition['label']}",
+            "entity_ids": entity_ids,
+            "relationship_ids": relationship_ids,
+            "outputs": outputs,
+            "filters": all_filters,
+            "group_by_attribute_ids": ([dimension.get("attribute_id")] if dimension else []),
+            "expected_cardinality": expected_cardinality,
+            "result_grain": result_grain,
+            "numerator": numerator.get("label") or numerator["id"],
+            "denominator": denominator.get("label") or denominator["id"],
+            "time_range": str(period or ""),
+            "null_policy": "分母为零时返回空值",
+            "calculation_steps": [
+                {"step_id": "numerator", "kind": "aggregate", "operation": "aggregate", "entity_ids": [numerator["entity_id"]], "attribute_ids": [numerator["id"]]},
+                {"step_id": "denominator", "kind": "aggregate", "operation": "aggregate", "entity_ids": [denominator["entity_id"]], "attribute_ids": [denominator["id"]]},
+                {"step_id": "ratio", "kind": "derive", "operation": "divide_and_scale", "input_step_ids": ["numerator", "denominator"], "attribute_ids": [numerator["id"], denominator["id"]]},
+            ],
+            "result_step_id": "ratio",
+            "evidence_constraints": evidence,
+            "metric_contract": {
+                "kind": "percentage", "numerator": numerator["id"], "denominator": denominator["id"],
+                "scale": scale, "aggregation_grain": result_grain,
+                "base_entity_ids": entity_ids, "base_relationship_ids": relationship_ids,
+            },
+        },
+        "query_ir": query_ir,
+    }
+
+
+def _governed_record_set_plan(
+    question: str,
+    version: SemanticMappingVersion,
+) -> dict[str, Any] | None:
+    manifest = version.manifest or {}
+    definition = _governed_semantic_match(question, manifest.get("record_sets") or [])
+    if definition is None:
+        return None
+    attributes = {item.get("id"): item for item in manifest.get("attributes") or []}
+    identity = attributes.get(definition.get("identity_attribute_id"))
+    if identity is None or identity.get("entity_id") != definition.get("base_entity_id"):
+        raise StructuredDataError("SEMANTIC_CONTRACT_INVALID", "受管理记录集缺少有效的稳定标识")
+    binding = "record"
+    filters = [dict(item) for item in definition.get("filters") or []]
+    relationships = [dict(item) for item in definition.get("relationship_constraints") or []]
+    predicates = [_semantic_filter_expression(item, binding) for item in filters]
+    predicates.extend(
+        _governed_relationship_expression(item, source_binding=binding, suffix=f"record_{index}")
+        for index, item in enumerate(relationships, start=1)
+    )
+    entity_ids = list(dict.fromkeys([
+        definition["base_entity_id"], *(item["target_entity_id"] for item in relationships),
+    ]))
+    relationship_ids = list(dict.fromkeys(item["relationship_id"] for item in relationships))
+    filters.extend(
+        dict(item)
+        for requirement in relationships
+        for item in requirement.get("filters") or []
+    )
+    return {
+        "plan": {
+            "original_question": question,
+            "intent": f"统计受管理业务集合：{definition['label']}",
+            "entity_ids": entity_ids,
+            "relationship_ids": relationship_ids,
+            "outputs": [{
+                "position": 1, "label": "记录数量", "kind": "metric",
+                "attribute_ids": [identity["id"]], "aggregate": "count",
+            }],
+            "filters": filters,
+            "distinct": True,
+            "expected_cardinality": "single_value",
+            "result_grain": definition.get("label") or definition["id"],
+            "distinct_policy": f"按 {identity.get('label') or identity['id']} 去重",
+            "evidence_constraints": [definition.get("description") or definition["label"]],
+            "metric_contract": {
+                "kind": "count", "aggregation_grain": definition.get("label") or definition["id"],
+                "distinct_policy": f"按 {identity['id']} 去重",
+                "base_entity_ids": entity_ids, "base_relationship_ids": relationship_ids,
+            },
+        },
+        "query_ir": {
+            "from_entity": {"binding": binding, "entity_id": definition["base_entity_id"]},
+            "select": [{
+                "alias": "count",
+                "expression": {
+                    "kind": "aggregate", "function": "count", "distinct": True,
+                    "expression": {"kind": "attribute", "attribute_id": identity["id"], "binding": binding},
+                },
+            }],
+            "where": _logical_and(predicates),
+        },
+    }
+
+
+def _replace_governed_year(value: Any, default_year: int, requested_year: int) -> Any:
+    """Replace the declared period in a governed plan without touching IDs.
+
+    Only literal values and descriptive strings containing the standalone
+    configured year are affected.  The template never contains physical
+    identifiers or SQL, and the materialized result is validated again before
+    compilation.
+    """
+
+    if isinstance(value, list):
+        return [_replace_governed_year(item, default_year, requested_year) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _replace_governed_year(item, default_year, requested_year)
+            for key, item in value.items()
+        }
+    if isinstance(value, int) and not isinstance(value, bool) and value == default_year:
+        return requested_year
+    if isinstance(value, str):
+        return re.sub(
+            rf"(?<!\d){re.escape(str(default_year))}(?!\d)",
+            str(requested_year),
+            value,
+        )
+    return value
+
+
+def _governed_query_plan(
+    question: str,
+    version: SemanticMappingVersion,
+) -> dict[str, Any] | None:
+    """Materialize an activated, SQL-free semantic query definition."""
+
+    definition = _governed_semantic_match(
+        question, (version.manifest or {}).get("governed_queries") or []
+    )
+    if definition is None:
+        return None
+    raw = {
+        "plan": deepcopy(definition.get("plan") or {}),
+        "query_ir": deepcopy(definition.get("query_ir") or {}),
+    }
+    default_year = definition.get("default_year")
+    requested_year = _year_from_question(question, default=default_year)
+    if default_year is not None and requested_year is not None and requested_year != default_year:
+        raw = _replace_governed_year(raw, int(default_year), int(requested_year))
+    raw["plan"]["original_question"] = question
+    raw["plan"]["intent"] = definition.get("label") or raw["plan"].get("intent")
+    return raw
+
+
+def _governed_semantic_plan(question: str, version: SemanticMappingVersion) -> dict[str, Any] | None:
+    return (
+        _governed_query_plan(question, version)
+        or _governed_derived_metric_plan(question, version)
+        or _governed_record_set_plan(question, version)
+    )
 
 
 def generate_semantic_plan_ir(
@@ -283,9 +1325,15 @@ Plan 版本为 chuanshen.semantic-query-plan/v1；IR 版本为 chuanshen.query-i
 必须逐字段遵守下面的 JSON Schema，不能改名、缩写或沿用其他版本的字段。所有对象 extra=forbid。
 IR expression kind 可用 attribute/literal/aggregate/function/binary/logical/not/between/in/is_null/case/cast/subquery/exists/window。
 属性表达式必须包含 attribute_id 与 binding；aggregate 使用 function、expression 和 distinct；普通 function 才使用 arguments；比较使用 binary 的 operator/left/right；过滤值使用 literal 的 value。
+除法和比例必须使用 binary 的 / 与 *，禁止创建 ratio、divide、percent 或 percentage 函数。logical 必须含至少两个 operands；只有一个条件时直接使用该条件。
+EXISTS 有且只有两种形式：关系 EXISTS 使用 relationship_id/source_binding/target_binding/target_entity_id/operands 且 query 必须为空；子查询 EXISTS 使用 query 且所有关系字段必须为空。
 同比、环比、比例、排名必须在 plan.calculation_steps 中明确计算步骤；简单汇总可以不填 calculation_steps。
 如果属性提供 allowed_values，Plan 和 IR 的过滤值必须使用其中的真实值；不要翻译或改写数据库枚举值。
-如果指标提供 default_aggregate、business_definition 或 required_filters，必须严格采用该业务口径；required_filters 必须同时写入 Plan filters 和 IR where，不能以用户未明确说明为由省略。
+如果指标提供 default_aggregate、business_definition、required_filters 或 required_relationships，必须严格采用该业务口径；平台会在受信边界自动注入固定筛选和去重安全的关联 EXISTS 约束。对 required_relationships 不要自行在 IR joins 中加入目标实体，也不要手工生成该 EXISTS，否则可能导致重复累加；不能以用户未明确说明为由省略。
+关系 description 是受管理的业务路径约束。询问“影响、依赖、适用”等关系时，必须沿明确表达该业务含义的关系路径；主体归属、历史订单或其他可连接路径不能替代目标业务关系。
+语义目录 business_guidance 是已激活映射的一部分，涉及相应业务问题时必须使用其中指定的关系路径，不得改走其他可连接路径。
+关系的 required_filters 是该关系自身的有效范围；平台会在受信边界强制注入，不能省略或改写。
+Plan.entity_ids 必须包含 IR 主实体和所有 Join 实体；Plan.relationship_ids 必须包含 IR 使用的每一条关系，并同时包含这些关系的两个端点实体。
 严格 Schema：{json.dumps(schema_contract, ensure_ascii=False)}
 语义目录：{json.dumps(catalog, ensure_ascii=False)}
 用户问题：{question}"""
@@ -304,9 +1352,30 @@ IR expression kind 可用 attribute/literal/aggregate/function/binary/logical/no
             value,
             temperature=_effective_temperature(model, temperature),
         )
-    raw = _apply_metric_contracts(_canonicalize_generated_plan(generator(prompt)), version)
+    def normalize_generated(raw_value: Any) -> Any:
+        return _apply_metric_contracts(
+            _disambiguate_generated_filters(
+                _align_generated_plan_scope(
+                    _repair_generated_relationship_endpoints(
+                        _canonicalize_generated_plan(raw_value), version,
+                    ),
+                    version,
+                ),
+                version,
+                question,
+            ),
+            version,
+        )
+
+    governed = _governed_semantic_plan(question, version)
+    # Governed definitions are already strict semantic Plan/IR stored in the
+    # activated mapping.  Provider-repair heuristics (especially homonymous
+    # attribute disambiguation) must never rewrite this administrator-owned
+    # contract.  It is still validated below and compiled through the exact
+    # same deterministic safety boundary.
+    raw = governed if governed is not None else normalize_generated(generator(prompt))
     validation_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(3):
         if not isinstance(raw, dict) or not isinstance(raw.get("plan"), dict) or not isinstance(raw.get("query_ir"), dict):
             validation_error = ValueError("顶层必须是包含 plan 和 query_ir 对象的 JSON")
         else:
@@ -321,18 +1390,26 @@ IR expression kind 可用 attribute/literal/aggregate/function/binary/logical/no
                 )
             except Exception as exc:
                 validation_error = exc
-        if attempt == 0:
+        if attempt < 2 and governed is None:
             repair_prompt = f"""上一次结构化查询计划不符合传神智库严格协议。只输出修正后的 JSON 对象，键必须是 plan 和 query_ir，不要解释、不要 Markdown、不要 SQL。
 校验错误：{str(validation_error)[:6000]}
 上一次输出：{json.dumps(raw, ensure_ascii=False)[:14000]}
 严格 Schema：{json.dumps(schema_contract, ensure_ascii=False)}
 语义目录：{json.dumps(catalog, ensure_ascii=False)}
 原始问题：{question}
+指标的 required_relationships 由平台注入为关联 EXISTS，不要在 IR joins 或 IR where 中手工重复实现。
+除法和比例只能用 binary / 与 *，不能使用 ratio、divide、percent 或 percentage 函数。logical 只能用于两个及以上 operands；单个条件直接输出该条件。
+关系 EXISTS 与子查询 EXISTS 不能混用字段：关系形式不得带 query，子查询形式不得带 relationship_id/source_binding/target_binding/target_entity_id。
+修复时保持关系 description 指定的业务路径；不能用主体归属、历史订单等可连接但语义不同的路径替代“影响、依赖、适用”等关系。
+必须遵守语义目录 business_guidance 中与问题相符的受控关系路径。
+Plan.entity_ids 必须覆盖 IR 主实体和所有 Join 实体；Plan.relationship_ids 必须覆盖 IR 的全部关系及其两个端点实体。
 必须使用 Schema 中的原字段名，删除所有 extra 字段。"""
-            raw = _apply_metric_contracts(_canonicalize_generated_plan(generator(repair_prompt)), version)
+            raw = normalize_generated(generator(repair_prompt))
+        else:
+            break
     raise StructuredDataError(
         "SEMANTIC_PLANNER_INVALID",
-        f"模型查询计划连续两次未通过严格 Schema：{validation_error}",
+        f"模型查询计划多次未通过严格 Schema：{validation_error}",
     )
 
 
@@ -401,14 +1478,27 @@ def validate_plan(plan: SemanticQueryPlan, version: SemanticMappingVersion) -> d
         for attribute_id in output.attribute_ids:
             attribute = attributes.get(attribute_id) or {}
             required_filters = attribute.get("required_filters") or []
-            if not attribute.get("is_measure") and not required_filters:
+            required_relationships = attribute.get("required_relationships") or []
+            if not attribute.get("is_measure") and not required_filters and not required_relationships:
                 continue
             default_aggregate = attribute.get("default_aggregate")
             if default_aggregate and output.aggregate != default_aggregate:
                 errors.append(f"指标 {attribute.get('label') or attribute_id} 必须使用 {default_aggregate} 聚合")
             for required_filter in required_filters:
-                if not any(all(candidate.get(key) == value for key, value in required_filter.items()) for candidate in plan_filters):
+                if not any(_filter_matches(candidate, required_filter) for candidate in plan_filters):
                     errors.append(f"指标 {attribute.get('label') or attribute_id} 缺少固定口径筛选：{required_filter.get('attribute_id')}")
+            for requirement in required_relationships:
+                relationship_id = requirement.get("relationship_id")
+                target_entity_id = requirement.get("target_entity_id")
+                if relationship_id not in plan.relationship_ids:
+                    errors.append(f"指标 {attribute.get('label') or attribute_id} 缺少固定口径关系：{relationship_id}")
+                if target_entity_id not in plan.entity_ids:
+                    errors.append(f"指标 {attribute.get('label') or attribute_id} 缺少关联口径实体：{target_entity_id}")
+                for required_filter in requirement.get("filters") or []:
+                    if not any(_filter_matches(candidate, required_filter) for candidate in plan_filters):
+                        errors.append(
+                            f"指标 {attribute.get('label') or attribute_id} 缺少关联口径筛选：{required_filter.get('attribute_id')}"
+                        )
     complex_terms = ("同比", "环比", "增长", "差值", "比例", "百分比", "排名", "top")
     if any(term in f"{plan.original_question} {plan.intent}".casefold() for term in complex_terms) and not plan.calculation_steps:
         errors.append("同比、环比、比例、排名或多阶段计算必须声明计算步骤")
@@ -464,7 +1554,7 @@ def _ir_filter_signatures(expression: QueryExpression | None) -> list[dict[str, 
     """Return simple, auditable predicates used to prove Plan filters reached SQL IR."""
     if expression is None:
         return []
-    if expression.kind == "logical":
+    if expression.kind in {"logical", "exists"} and expression.operands:
         return [item for operand in expression.operands for item in _ir_filter_signatures(operand)]
     if expression.kind == "not":
         return _ir_filter_signatures(expression.expression)
@@ -518,12 +1608,84 @@ def validate_ir(ir: SemanticQueryIR, plan: SemanticQueryPlan, version: SemanticM
             if binding in binding_entities and binding_entities[binding] != entity_id:
                 errors.append(f"不同查询作用域重复使用了含义冲突的实体绑定：{binding}")
             binding_entities[binding] = entity_id
+    relationship_exists: list[QueryExpression] = []
+    for expression in _walk_ir_expressions(ir):
+        if expression.kind != "exists" or expression.relationship_id is None:
+            continue
+        relationship_exists.append(expression)
+        join_count += 1
+        relationship = relationships.get(expression.relationship_id)
+        if relationship is None:
+            errors.append(f"IR 关联 EXISTS 引用了未知关系：{expression.relationship_id}")
+            continue
+        if expression.relationship_id not in plan.relationship_ids:
+            errors.append(f"IR 关联 EXISTS 引用了计划外关系：{expression.relationship_id}")
+        source_entity_id = binding_entities.get(str(expression.source_binding))
+        if source_entity_id is None:
+            errors.append(f"IR 关联 EXISTS 的来源绑定不存在：{expression.source_binding}")
+        expected_endpoints = {relationship["from_entity_id"], relationship["to_entity_id"]}
+        if {source_entity_id, expression.target_entity_id} != expected_endpoints:
+            errors.append(f"IR 关联 EXISTS 的实体与关系端点不匹配：{expression.relationship_id}")
+        if expression.target_entity_id not in plan.entity_ids:
+            errors.append(f"IR 关联 EXISTS 的目标实体不在计划中：{expression.target_entity_id}")
+        target_binding = str(expression.target_binding)
+        if target_binding in binding_entities:
+            errors.append(f"IR 关联 EXISTS 重复使用了实体绑定：{target_binding}")
+        else:
+            binding_entities[target_binding] = str(expression.target_entity_id)
     allowed_attributes = _plan_attribute_ids(plan)
     ir_filters = [item for scope in _walk_ir_nodes(ir) for item in _ir_filter_signatures(scope.where)]
+    ir_join_relationships = {
+        join.relationship_id for scope in _walk_ir_nodes(ir) for join in scope.joins
+    }
+    used_relationship_ids = ir_join_relationships | {
+        str(expression.relationship_id) for expression in relationship_exists
+    }
+    for relationship_id in used_relationship_ids:
+        relationship = relationships.get(relationship_id) or {}
+        for required_filter in relationship.get("required_filters") or []:
+            if not any(_filter_matches(item.model_dump(), required_filter) for item in plan.filters):
+                errors.append(
+                    f"关系 {relationship.get('label') or relationship_id} 缺少固定口径筛选："
+                    f"{required_filter.get('attribute_id')}"
+                )
+            if not any(_filter_matches(item, required_filter) for item in ir_filters):
+                errors.append(
+                    f"IR 缺少关系固定口径筛选：{required_filter.get('attribute_id')}"
+                )
     for planned_filter in plan.filters:
         expected = planned_filter.model_dump()
         if not any(all(candidate.get(key) == value for key, value in expected.items()) for candidate in ir_filters):
             errors.append(f"IR 缺少查询计划声明的筛选：{planned_filter.attribute_id}")
+    for output in plan.outputs:
+        for attribute_id in output.attribute_ids:
+            attribute = attributes.get(attribute_id) or {}
+            for requirement in attribute.get("required_relationships") or []:
+                if requirement.get("relationship_id") in ir_join_relationships:
+                    errors.append(
+                        f"指标 {attribute.get('label') or attribute_id} 的固定关联口径必须使用 EXISTS，不能直接 Join：{requirement.get('relationship_id')}"
+                    )
+                expected_negated = requirement.get("quantifier", "exists") == "not_exists"
+                matched = False
+                for expression in relationship_exists:
+                    if (
+                        expression.relationship_id != requirement.get("relationship_id")
+                        or expression.target_entity_id != requirement.get("target_entity_id")
+                        or expression.negated != expected_negated
+                        or binding_entities.get(str(expression.source_binding)) != attribute.get("entity_id")
+                    ):
+                        continue
+                    signatures = _ir_filter_signatures(expression)
+                    if all(
+                        any(_filter_matches(candidate, required_filter) for candidate in signatures)
+                        for required_filter in requirement.get("filters") or []
+                    ):
+                        matched = True
+                        break
+                if not matched:
+                    errors.append(
+                        f"指标 {attribute.get('label') or attribute_id} 缺少可审计的关联 EXISTS 口径：{requirement.get('relationship_id')}"
+                    )
     for expression in _walk_ir_expressions(ir):
         if expression.kind == "attribute":
             attribute = attributes.get(str(expression.attribute_id))
@@ -669,6 +1831,89 @@ class DeterministicCompiler:
         self.parameters[name] = value
         return bindparam(name, value=value)
 
+    def _relationship_exists(
+        self,
+        expression: QueryExpression,
+        bindings: dict[str, dict[str, Any]],
+    ):
+        """Compile a correlated EXISTS from semantic relationship metadata.
+
+        The caller supplies no table names, columns or SQL.  Both correlation
+        columns come from the activated relationship mapping and all values are
+        compiled through the regular parameter-binding path.
+        """
+        relationship = self.relationships.get(str(expression.relationship_id))
+        if relationship is None:
+            raise StructuredDataError(
+                "UNKNOWN_RELATIONSHIP",
+                f"未知业务关系：{expression.relationship_id}",
+            )
+        source_binding = bindings.get(str(expression.source_binding))
+        if source_binding is None:
+            raise StructuredDataError(
+                "RELATIONSHIP_SOURCE_BINDING_INVALID",
+                f"关联 EXISTS 来源绑定不存在：{expression.source_binding}",
+            )
+        target_entity_id = str(expression.target_entity_id)
+        endpoints = {relationship.get("from_entity_id"), relationship.get("to_entity_id")}
+        if {source_binding["entity_id"], target_entity_id} != endpoints:
+            raise StructuredDataError(
+                "RELATIONSHIP_PATH_INVALID",
+                f"关联 EXISTS 实体与关系端点不匹配：{expression.relationship_id}",
+            )
+        target_fragment = self._primary_fragment(target_entity_id)
+        target_table = self._physical_table(target_fragment["object_id"], str(expression.target_binding))
+        related_bindings = dict(bindings)
+        if str(expression.target_binding) in related_bindings:
+            raise StructuredDataError(
+                "RELATIONSHIP_TARGET_BINDING_INVALID",
+                f"关联 EXISTS 目标绑定重复：{expression.target_binding}",
+            )
+        related_bindings[str(expression.target_binding)] = {
+            "entity_id": target_entity_id,
+            "object_id": target_fragment["object_id"],
+            "table": target_table,
+        }
+        predicates = []
+        for predicate in relationship.get("predicates") or []:
+            left = predicate["left"]
+            right = predicate["right"]
+            physical_left = self.catalog_columns.get(left["column_id"])
+            physical_right = self.catalog_columns.get(right["column_id"])
+            if not physical_left or not physical_right:
+                raise StructuredDataError("RELATIONSHIP_COLUMN_INVALID", "关系映射字段已不存在")
+            if left["object_id"] == source_binding["object_id"] and right["object_id"] == target_fragment["object_id"]:
+                source_column, target_column = physical_left[1]["name"], physical_right[1]["name"]
+            elif right["object_id"] == source_binding["object_id"] and left["object_id"] == target_fragment["object_id"]:
+                source_column, target_column = physical_right[1]["name"], physical_left[1]["name"]
+            else:
+                raise StructuredDataError("RELATIONSHIP_PATH_INVALID", "关系路径与关联 EXISTS 绑定不一致")
+            self.referenced_columns.update({left["column_id"], right["column_id"]})
+            predicates.append(source_binding["table"].c[source_column] == target_table.c[target_column])
+        predicates.extend(self._expression(item, related_bindings) for item in expression.operands)
+        # Correlate every binding that belongs to the enclosing query.  EXISTS
+        # operands may compare the related row with a second outer binding
+        # (for example, an anti-join that selects the latest order for each
+        # already-joined supplier).  Correlating only ``source_binding`` makes
+        # SQLAlchemy pull that second outer table into the subquery and silently
+        # changes the business meaning from "newer than this row" to "newer
+        # than any row".
+        correlated_tables = []
+        seen_table_ids: set[int] = set()
+        for binding in bindings.values():
+            table = binding["table"]
+            table_id = id(table)
+            if table_id not in seen_table_ids:
+                seen_table_ids.add(table_id)
+                correlated_tables.append(table)
+        statement = (
+            select(literal_column("1"))
+            .select_from(target_table)
+            .where(and_(*predicates))
+            .correlate(*correlated_tables)
+        )
+        return exists(statement)
+
     def _expression(
         self,
         expression: QueryExpression,
@@ -774,7 +2019,11 @@ class DeterministicCompiler:
         if kind == "subquery":
             return self._compile_ir(expression.query, nested=True).scalar_subquery()
         if kind == "exists":
-            result = exists(self._compile_ir(expression.query, nested=True))
+            result = (
+                self._relationship_exists(expression, bindings)
+                if expression.relationship_id is not None
+                else exists(self._compile_ir(expression.query, nested=True))
+            )
             return not_(result) if expression.negated else result
         if kind == "window":
             function = str(expression.function).casefold()

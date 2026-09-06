@@ -1,0 +1,49 @@
+services:
+  guolian-demo-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${GUOLIAN_DEMO_POSTGRES_DATABASE:-guolian_demo}
+      POSTGRES_USER: ${GUOLIAN_DEMO_POSTGRES_USER:-guolian_demo}
+      POSTGRES_PASSWORD: ${GUOLIAN_DEMO_DATABASE_PASSWORD:?set GUOLIAN_DEMO_DATABASE_PASSWORD}
+    volumes:
+      - ./demo/guolian/db/postgresql.sql:/docker-entrypoint-initdb.d/001-guolian-demo.sql:ro
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${GUOLIAN_DEMO_POSTGRES_PUBLISHED_PORT:-55433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  guolian-demo-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${GUOLIAN_DEMO_MYSQL_DATABASE:-guolian_demo}
+      MYSQL_USER: ${GUOLIAN_DEMO_MYSQL_USER:-guolian_demo}
+      MYSQL_PASSWORD: ${GUOLIAN_DEMO_DATABASE_PASSWORD:?set GUOLIAN_DEMO_DATABASE_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${GUOLIAN_DEMO_MYSQL_ROOT_PASSWORD:?set GUOLIAN_DEMO_MYSQL_ROOT_PASSWORD}
+    command: ["mysqld", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - ./demo/guolian/db/mysql.sql:/docker-entrypoint-initdb.d/001-guolian-demo.sql:ro
+    tmpfs:
+      - /var/lib/mysql
+    ports:
+      - "${INTERNAL_BIND_ADDRESS:-127.0.0.1}:${GUOLIAN_DEMO_MYSQL_PUBLISHED_PORT:-53307}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 15s
+    restart: unless-stopped
+
+  api:
+    environment:
+      SOURCE_PRIVATE_HOST_ALLOWLIST: source-fixture,minio,guolian-demo-postgres,guolian-demo-mysql
+
+  worker:
+    environment:
+      SOURCE_PRIVATE_HOST_ALLOWLIST: source-fixture,minio,guolian-demo-postgres,guolian-demo-mysql

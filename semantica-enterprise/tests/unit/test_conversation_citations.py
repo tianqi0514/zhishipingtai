@@ -9,9 +9,11 @@ from apps.api.conversations import (
     _conversation_payload,
     _inherit_referenced_citations,
     _project_event,
+    _repair_unverifiable_citations,
     _reconcile_stale_turn,
     _validate_structured_citations,
 )
+from apps.api.structured_data import _next_structured_citation_number
 from packages.platform import models  # noqa: F401
 from packages.platform.database import Base
 from packages.platform.models import (
@@ -42,7 +44,7 @@ def test_structured_data_citation_requires_real_query_citation() -> None:
             sequence=2,
             role="assistant",
             status="completed",
-            content="实时销售额为 100 万元【数据1】，另一个结论[数据2]。",
+            content="实时销售额为 100 万元【数据 1】，另一个结论[ 数据 2 ]。",
         )
         db.add_all([conversation, assistant])
         db.flush()
@@ -57,6 +59,94 @@ def test_structured_data_citation_requires_real_query_citation() -> None:
         db.flush()
 
         assert _validate_structured_citations(db, assistant.id) == [2]
+
+
+def test_structured_data_citations_are_numbered_per_answer_message() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000098",
+            harness_session_id="session-structured-citation-sequence",
+            tenant_id="tenant",
+            user_id="user",
+            title="structured citation sequence",
+        )
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000098",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="generating",
+            content="",
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+        assert _next_structured_citation_number(db, assistant.id) == 1
+        db.add(StructuredQueryCitation(
+            tenant_id="tenant",
+            query_run_id="30000000-0000-0000-0000-000000000098",
+            message_id=assistant.id,
+            citation_number=1,
+            label="经营库 · 第一项指标",
+            summary={},
+        ))
+        db.flush()
+        assert _next_structured_citation_number(db, assistant.id) == 2
+
+
+def test_citation_guard_removes_unknown_document_reference_and_repairs_unambiguous_data_reference() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000097",
+            harness_session_id="session-citation-guard",
+            tenant_id="tenant",
+            user_id="user",
+            title="citation guard",
+        )
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000097",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="completed",
+            content="有依据[1][11]，结构化结果【数据 2】。",
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+        db.add_all([
+            Citation(
+                conversation_id=conversation.id,
+                message_id=assistant.id,
+                citation_number=1,
+                chunk_id="00000000-0000-0000-0000-000000000097",
+                rank=1,
+                snapshot={"title": "真实来源"},
+            ),
+            StructuredQueryCitation(
+                tenant_id="tenant",
+                query_run_id="30000000-0000-0000-0000-000000000097",
+                message_id=assistant.id,
+                citation_number=1,
+                label="经营库 · 指标",
+                summary={},
+            ),
+        ])
+        db.flush()
+
+        repaired = _repair_unverifiable_citations(db, assistant.id)
+
+        assert repaired is not None
+        assert assistant.content == "有依据[1]，结构化结果【数据 1】。"
+        assert repaired["removed_document_references"] == [11]
+        assert repaired["repaired_data_references"] == [2]
+        assert _validate_structured_citations(db, assistant.id) == []
 
 
 def test_followup_citation_is_inherited_from_latest_verified_message() -> None:

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from packages.semantica_adapter.provenance import track_curation_decision
@@ -25,6 +28,7 @@ from .models import (
     DocumentProfile,
     DocumentVersion,
     Fact,
+    GovernancePolicy,
     InferenceEvidence,
     InferredFact,
     User,
@@ -38,11 +42,11 @@ PROFILE_EDITABLE_FIELDS = {
 ENTITY_EDITABLE_FIELDS = {"canonical_name", "entity_type", "aliases", "properties", "confidence", "status"}
 FACT_EDITABLE_FIELDS = {
     "subject_entity_id", "predicate", "object_entity_id", "object_value",
-    "confidence", "status", "valid_from", "valid_to",
+    "source_chunk_id", "confidence", "status", "valid_from", "valid_to",
 }
 SUPPORTED_TARGETS = {
     "document_profile", "content_element", "chunk", "entity", "fact",
-    "entity_pair", "quality_issue",
+    "entity_pair", "document_pair", "quality_issue",
 }
 SUPPORTED_OPERATIONS = {
     "accept", "override", "reject", "suppress", "restore", "merge", "split",
@@ -216,6 +220,44 @@ def validate_decision(target_type: str, operation: str, field_path: str, value: 
         raise ValueError("实体组合仅支持合并、拆分或合并约束")
 
 
+def validate_fact_source_chunk(
+    db: Session,
+    *,
+    tenant_id: str,
+    space_id: str,
+    source_chunk_id: Any,
+) -> Chunk:
+    """Reject evidence overlays that escape the current published document."""
+
+    chunk_id = str(source_chunk_id or "").strip()
+    chunk = db.get(Chunk, chunk_id) if chunk_id else None
+    if (
+        chunk is None
+        or chunk.tenant_id != tenant_id
+        or chunk.space_id != space_id
+        or chunk.deleted_at is not None
+        or chunk.status != "published"
+    ):
+        raise ValueError("证据片段必须是当前知识空间内已发布的片段")
+    document = db.get(Document, chunk.document_id)
+    version = db.get(DocumentVersion, chunk.version_id)
+    if (
+        document is None
+        or document.tenant_id != tenant_id
+        or document.space_id != space_id
+        or document.deleted_at is not None
+        or document.status != "ready"
+        or document.current_version_id != chunk.version_id
+        or version is None
+        or version.tenant_id != tenant_id
+        or version.document_id != document.id
+        or version.deleted_at is not None
+        or version.status != "ready"
+    ):
+        raise ValueError("证据片段不是文档当前版本")
+    return chunk
+
+
 def create_decision(
     db: Session,
     *,
@@ -234,6 +276,15 @@ def create_decision(
     batch_id: str | None = None,
 ) -> tuple[CurationDecision, CurationBatch, TargetContext]:
     validate_decision(target_type, operation, field_path, value)
+    if target_type == "fact" and field_path == "source_chunk_id":
+        if not str(reason_note or "").strip():
+            raise ValueError("修正证据片段必须填写治理原因")
+        validate_fact_source_chunk(
+            db,
+            tenant_id=user.tenant_id,
+            space_id=space_id,
+            source_chunk_id=value,
+        )
     if scope not in {"version_only", "document_future", "space"}:
         raise ValueError("治理作用范围不合法")
     context = resolve_target(
@@ -559,40 +610,70 @@ def effective_chunk_text(
 
 
 def effective_entity(db: Session, row: CanonicalEntity) -> dict[str, Any]:
-    values = {
-        "canonical_name": row.canonical_name,
-        "entity_type": row.entity_type,
-        "aliases": row.aliases or [],
-        "properties": row.properties or {},
-        "confidence": row.confidence,
-        "status": row.status,
-    }
-    mapping = overlays_for_targets(
-        db, tenant_id=row.tenant_id, space_id=row.space_id,
-        target_type="entity", target_ids=[row.id],
-    )
-    origins = {field: "automatic" for field in values}
-    for field in values:
-        entry = mapping.get((row.id, field))
-        if entry and _decision_applies(entry[1], None):
-            values[field] = entry[0].effective_value
-            origins[field] = "manual"
-    return {**values, "field_origins": origins}
+    return effective_entities(db, [row])[row.id]
+
+
+def effective_entities(db: Session, rows: list[CanonicalEntity]) -> dict[str, dict[str, Any]]:
+    """Resolve entity overlays in batches instead of issuing one query per entity."""
+    output: dict[str, dict[str, Any]] = {}
+    grouped: dict[tuple[str, str], list[CanonicalEntity]] = {}
+    for row in rows:
+        grouped.setdefault((row.tenant_id, row.space_id), []).append(row)
+    for (tenant_id, space_id), group in grouped.items():
+        mapping = overlays_for_targets(
+            db,
+            tenant_id=tenant_id,
+            space_id=space_id,
+            target_type="entity",
+            target_ids=[row.id for row in group],
+        )
+        for row in group:
+            values = {
+                "canonical_name": row.canonical_name,
+                "entity_type": row.entity_type,
+                "aliases": row.aliases or [],
+                "properties": row.properties or {},
+                "confidence": row.confidence,
+                "status": row.status,
+            }
+            origins = {field: "automatic" for field in values}
+            for field in values:
+                entry = mapping.get((row.id, field))
+                if entry and _decision_applies(entry[1], None):
+                    values[field] = entry[0].effective_value
+                    origins[field] = "manual"
+            output[row.id] = {**values, "field_origins": origins}
+    return output
 
 
 def effective_fact(db: Session, row: Fact) -> dict[str, Any]:
-    values = {field: getattr(row, field) for field in FACT_EDITABLE_FIELDS}
-    mapping = overlays_for_targets(
-        db, tenant_id=row.tenant_id, space_id=row.space_id,
-        target_type="fact", target_ids=[row.id],
-    )
-    origins = {field: "automatic" for field in values}
-    for field in values:
-        entry = mapping.get((row.id, field))
-        if entry and _decision_applies(entry[1], None):
-            values[field] = entry[0].effective_value
-            origins[field] = "manual"
-    return {**values, "field_origins": origins}
+    return effective_facts(db, [row])[row.id]
+
+
+def effective_facts(db: Session, rows: list[Fact]) -> dict[str, dict[str, Any]]:
+    """Resolve fact overlays in batches instead of issuing one query per fact."""
+    output: dict[str, dict[str, Any]] = {}
+    grouped: dict[tuple[str, str], list[Fact]] = {}
+    for row in rows:
+        grouped.setdefault((row.tenant_id, row.space_id), []).append(row)
+    for (tenant_id, space_id), group in grouped.items():
+        mapping = overlays_for_targets(
+            db,
+            tenant_id=tenant_id,
+            space_id=space_id,
+            target_type="fact",
+            target_ids=[row.id for row in group],
+        )
+        for row in group:
+            values = {field: getattr(row, field) for field in FACT_EDITABLE_FIELDS}
+            origins = {field: "automatic" for field in values}
+            for field in values:
+                entry = mapping.get((row.id, field))
+                if entry and _decision_applies(entry[1], None):
+                    values[field] = entry[0].effective_value
+                    origins[field] = "manual"
+            output[row.id] = {**values, "field_origins": origins}
+    return output
 
 
 def entity_pair_constraints(db: Session, tenant_id: str, space_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -673,6 +754,179 @@ def upsert_profile_cases(db: Session, profile: DocumentProfile) -> int:
         ))
         count += 1
     return count
+
+
+def _duplicate_comparison_text(db: Session, version_id: str, *, limit: int = 60_000) -> str:
+    rows = db.scalars(
+        select(ContentElement).where(
+            ContentElement.version_id == version_id,
+            ContentElement.deleted_at.is_(None),
+        ).order_by(ContentElement.ordinal)
+    )
+    raw = "\n".join(str(row.text or "") for row in rows)
+    normalized = unicodedata.normalize("NFKC", raw).casefold()
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = re.sub(r"[^\w\u3400-\u9fff]", "", normalized)
+    return normalized[:limit]
+
+
+def _document_similarity(left: str, right: str) -> float:
+    """Deterministic character-shingle similarity for cross-document triage."""
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    width = 5
+    left_tokens = {left[index:index + width] for index in range(max(1, len(left) - width + 1))}
+    right_tokens = {right[index:index + width] for index in range(max(1, len(right) - width + 1))}
+    union = left_tokens | right_tokens
+    return len(left_tokens & right_tokens) / len(union) if union else 0.0
+
+
+def scan_document_duplicate_cases(
+    db: Session,
+    *,
+    tenant_id: str,
+    space_id: str,
+    document_id: str | None = None,
+) -> dict[str, int]:
+    """Create actionable exact/near duplicate cases for current document versions.
+
+    The detector is intentionally deterministic.  It never merges documents
+    automatically; Semantica-produced content stays immutable until a user
+    chooses to keep both sources or suppress one duplicate through overlays.
+    """
+    documents = list(db.scalars(
+        select(Document).where(
+            Document.tenant_id == tenant_id,
+            Document.space_id == space_id,
+            Document.status == "ready",
+            Document.current_version_id.is_not(None),
+            Document.deleted_at.is_(None),
+        ).order_by(Document.created_at, Document.id)
+    ))
+    if document_id and all(document.id != document_id for document in documents):
+        return {"created": 0, "exact": 0, "near": 0, "compared_documents": 0}
+    policy = db.scalar(
+        select(GovernancePolicy).where(
+            GovernancePolicy.tenant_id == tenant_id,
+            GovernancePolicy.enabled.is_(True),
+            GovernancePolicy.deleted_at.is_(None),
+        ).order_by(GovernancePolicy.is_default.desc(), GovernancePolicy.updated_at.desc()).limit(1)
+    )
+    threshold = float((policy.config or {}).get("cross_document_similarity_threshold", 0.92)) if policy else 0.92
+    threshold = max(0.75, min(0.99, threshold))
+    versions = {
+        document.id: db.get(DocumentVersion, document.current_version_id)
+        for document in documents
+    }
+    # Open candidates tied to an old current version are no longer actionable.
+    # Keep them for audit while removing them from the active work queue.
+    for stale_case in db.scalars(select(CurationCase).where(
+        CurationCase.tenant_id == tenant_id,
+        CurationCase.space_id == space_id,
+        CurationCase.case_type == "duplicate_document",
+        CurationCase.status == "open",
+        CurationCase.deleted_at.is_(None),
+    )):
+        evidence = stale_case.evidence or {}
+        references = [evidence.get("left") or {}, evidence.get("right") or {}]
+        if any(
+            (document := db.get(Document, reference.get("document_id"))) is None
+            or document.deleted_at is not None
+            or document.current_version_id != reference.get("version_id")
+            for reference in references
+        ):
+            stale_case.status = "stale"
+
+    texts: dict[str, str] = {}
+    created = exact = near = 0
+    for left_index, left in enumerate(documents):
+        left_version = versions.get(left.id)
+        if left_version is None or left_version.status != "ready" or left_version.deleted_at is not None:
+            continue
+        for right in documents[left_index + 1:]:
+            if document_id and document_id not in {left.id, right.id}:
+                continue
+            right_version = versions.get(right.id)
+            if right_version is None or right_version.status != "ready" or right_version.deleted_at is not None:
+                continue
+            match_type = "exact" if left_version.sha256 == right_version.sha256 else ""
+            similarity = 1.0 if match_type else 0.0
+            if not match_type:
+                left_text = texts.setdefault(left_version.id, _duplicate_comparison_text(db, left_version.id))
+                right_text = texts.setdefault(right_version.id, _duplicate_comparison_text(db, right_version.id))
+                if min(len(left_text), len(right_text)) < 200:
+                    continue
+                length_ratio = min(len(left_text), len(right_text)) / max(len(left_text), len(right_text))
+                if length_ratio < 0.65:
+                    continue
+                similarity = _document_similarity(left_text, right_text)
+                if similarity < threshold:
+                    continue
+                match_type = "near"
+            pair = sorted((left.id, right.id))
+            fingerprint = stable_fingerprint({
+                "case": "duplicate_document",
+                "documents": pair,
+                "versions": sorted((left_version.id, right_version.id)),
+                "hashes": sorted((left_version.sha256, right_version.sha256)),
+                "match_type": match_type,
+            })
+            existing = db.scalar(select(CurationCase).where(
+                CurationCase.tenant_id == tenant_id,
+                CurationCase.fingerprint == fingerprint,
+            ))
+            if existing:
+                continue
+            try:
+                with db.begin_nested():
+                    db.add(CurationCase(
+                        tenant_id=tenant_id,
+                        space_id=space_id,
+                        document_id=left.id,
+                        version_id=left_version.id,
+                        target_type="document_pair",
+                        target_id=f"{left.id}:{right.id}",
+                        case_type="duplicate_document",
+                        severity="medium",
+                        title=f"疑似重复文档 · {left.title} / {right.title}"[:500],
+                        reason=(
+                            "两个当前版本的文件内容完全一致，请确认保留两个来源还是合并知识供给。"
+                            if match_type == "exact"
+                            else f"两个当前版本正文相似度为 {similarity:.1%}，请比较来源后决定是否合并。"
+                        ),
+                        evidence={
+                            "match_type": match_type,
+                            "similarity": round(similarity, 6),
+                            "threshold": threshold,
+                            "left": {
+                                "document_id": left.id,
+                                "version_id": left_version.id,
+                                "title": left.title,
+                                "filename": left_version.filename,
+                                "source_id": left.source_id,
+                            },
+                            "right": {
+                                "document_id": right.id,
+                                "version_id": right_version.id,
+                                "title": right.title,
+                                "filename": right_version.filename,
+                                "source_id": right.source_id,
+                            },
+                        },
+                        fingerprint=fingerprint,
+                    ))
+                    db.flush()
+            except IntegrityError:
+                # Another document completion or manual scan created the same
+                # immutable pair first.  The candidate already exists, so the
+                # current scan remains successful and idempotent.
+                continue
+            created += 1
+            exact += match_type == "exact"
+            near += match_type == "near"
+    return {"created": created, "exact": exact, "near": near, "compared_documents": len(documents)}
 
 
 def upsert_conflict_cases(db: Session, tenant_id: str, space_id: str) -> int:

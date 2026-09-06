@@ -82,7 +82,15 @@ def test_mapping_validation_accepts_existing_ontology_and_schema() -> None:
     try:
         report = validate_mapping_manifest(db, mapping_set, version)
         assert report["ok"] is True
-        assert report["counts"] == {"entities": 1, "attributes": 1, "relationships": 0, "fragments": 1}
+        assert report["counts"] == {
+            "entities": 1,
+            "attributes": 1,
+            "relationships": 0,
+            "fragments": 1,
+            "derived_metrics": 0,
+            "record_sets": 0,
+            "governed_queries": 0,
+        }
     finally:
         db.close()
 

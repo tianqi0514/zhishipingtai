@@ -175,6 +175,32 @@ def require_application_scope(scope: str) -> Callable:
 _PERMISSION_RANK = {"read": 1, "write": 2, "manage": 3}
 
 
+def get_effective_space_permission(db: Session, user: User, space_id: str) -> str | None:
+    """Return the user's highest effective permission for a knowledge space.
+
+    ``admin`` and ``owner`` are deliberately kept distinct from grant levels so
+    clients can explain why an action is available.  Grant evaluation delegates
+    to :func:`has_space_permission`, preserving the existing explicit-deny and
+    organisation-hierarchy semantics in one place.
+    """
+    space = db.get(KnowledgeSpace, space_id)
+    if space is None or space.deleted_at is not None or space.tenant_id != user.tenant_id:
+        return None
+    if user.is_admin:
+        return "admin"
+    if space.owner_id == user.id:
+        return "owner"
+    # A lower-level explicit deny also makes the space itself invisible.  Do
+    # this check first so a broader allow (for example via a role) is never
+    # projected to the client for a space that ``list_spaces`` must hide.
+    if not has_space_permission(db, user, space_id, "read"):
+        return None
+    for permission in ("manage", "write"):
+        if has_space_permission(db, user, space_id, permission):
+            return permission
+    return "read"
+
+
 def has_space_permission(db: Session, user: User, space_id: str, required: str) -> bool:
     space = db.get(KnowledgeSpace, space_id)
     if space is None or space.deleted_at is not None or space.tenant_id != user.tenant_id:

@@ -556,22 +556,36 @@ def _project_event(
                 duration_ms=payload.get("duration_ms"),
             )
         )
-        db.execute(delete(Citation).where(Citation.message_id == assistant_id))
         for item in result.get("items") or []:
             chunk_id = item.get("chunk_id")
             if not chunk_id:
                 continue
-            db.add(
-                Citation(
-                    conversation_id=conversation_id,
-                    message_id=assistant_id,
-                    query_run_id=query_id,
-                    citation_number=int(item.get("rank") or 0),
-                    chunk_id=chunk_id,
-                    rank=int(item.get("rank") or 0),
-                    snapshot=item,
+            citation_number = int(
+                item.get("citation_number") or item.get("rank") or 0
+            )
+            existing = db.scalar(
+                select(Citation).where(
+                    Citation.message_id == assistant_id,
+                    Citation.citation_number == citation_number,
                 )
             )
+            if existing is None:
+                db.add(
+                    Citation(
+                        conversation_id=conversation_id,
+                        message_id=assistant_id,
+                        query_run_id=query_id,
+                        citation_number=citation_number,
+                        chunk_id=chunk_id,
+                        rank=int(item.get("rank") or citation_number),
+                        snapshot=item,
+                    )
+                )
+            else:
+                existing.query_run_id = query_id
+                existing.chunk_id = chunk_id
+                existing.rank = int(item.get("rank") or citation_number)
+                existing.snapshot = item
     elif event_type == "structured_query_finished":
         query_run_id = payload.get("query_run_id")
         run = db.get(StructuredQueryRun, query_run_id) if query_run_id else None
@@ -640,7 +654,10 @@ def _validate_structured_citations(db: Session, assistant_id: str) -> list[int]:
         return []
     mentioned = {
         int(value)
-        for value in re.findall(r"(?:【数据|\[数据)(\d{1,3})(?:】|\])", assistant.content)
+        for value in re.findall(
+            r"(?:【\s*数据\s*|\[\s*数据\s*)(\d{1,3})\s*(?:】|\])",
+            assistant.content,
+        )
     }
     valid = set(
         db.scalars(
@@ -650,6 +667,61 @@ def _validate_structured_citations(db: Session, assistant_id: str) -> list[int]:
         )
     )
     return sorted(mentioned - valid)
+
+
+def _repair_unverifiable_citations(
+    db: Session,
+    assistant_id: str,
+) -> dict[str, Any] | None:
+    """Remove or safely remap references that have no persisted evidence.
+
+    Citation validation is a platform trust boundary, not a model instruction.
+    The model may occasionally type a number outside the tool contract.  The
+    final stored and streamed answer must never expose such a number as a
+    clickable source.  A data reference can be remapped only when this answer
+    has exactly one real data citation; ambiguous references are removed.
+    """
+    assistant = db.get(ConversationMessage, assistant_id)
+    if assistant is None:
+        return None
+    invalid_documents = _validate_citations(db, assistant_id)
+    invalid_data = _validate_structured_citations(db, assistant_id)
+    if not invalid_documents and not invalid_data:
+        return None
+
+    repaired = str(assistant.content or "")
+    for citation_number in invalid_documents:
+        repaired = re.sub(
+            rf"\[\s*{citation_number}\s*\]",
+            "",
+            repaired,
+        )
+
+    valid_data = set(
+        db.scalars(
+            select(StructuredQueryCitation.citation_number).where(
+                StructuredQueryCitation.message_id == assistant_id
+            )
+        )
+    )
+    data_replacement = f"【数据 {next(iter(valid_data))}】" if len(valid_data) == 1 else ""
+    for citation_number in invalid_data:
+        repaired = re.sub(
+            rf"(?:【\s*数据\s*|\[\s*数据\s*){citation_number}\s*(?:】|\])",
+            data_replacement,
+            repaired,
+        )
+
+    if repaired == assistant.content:
+        return None
+    assistant.content = repaired
+    return {
+        "content": repaired,
+        "reason": "citation_validation",
+        "removed_document_references": invalid_documents,
+        "repaired_data_references": invalid_data,
+        "message": "引用守门已修正无法核验的编号，最终回答仅保留真实来源",
+    }
 
 
 async def _stream_turn(
@@ -707,17 +779,23 @@ async def _stream_turn(
         if not terminal:
             raise RuntimeError("Agent Runtime 流提前结束")
         with SessionLocal() as db:
-            invalid = _validate_citations(db, assistant_id)
-            invalid_data = _validate_structured_citations(db, assistant_id)
-            if invalid or invalid_data:
-                payload = {
-                    "message": "回答包含无法核验的引用编号",
-                    "invalid_citations": invalid,
-                    "invalid_data_citations": invalid_data,
+            repaired = _repair_unverifiable_citations(db, assistant_id)
+            if repaired:
+                _project_event(db, conversation_id, assistant_id, "answer_replaced", repaired)
+                warning = {
+                    "message": repaired["message"],
+                    "reason": repaired["reason"],
+                    "removed_document_reference_count": len(
+                        repaired["removed_document_references"]
+                    ),
+                    "repaired_data_reference_count": len(
+                        repaired["repaired_data_references"]
+                    ),
                 }
-                _project_event(db, conversation_id, assistant_id, "warning", payload)
+                _project_event(db, conversation_id, assistant_id, "warning", warning)
                 db.commit()
-                yield _sse("warning", payload)
+                yield _sse("answer_replaced", repaired)
+                yield _sse("warning", warning)
     except Exception as exc:
         payload = {"code": "AGENT_GATEWAY_ERROR", "message": str(exc)[:500]}
         cancelled = False

@@ -249,14 +249,107 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
-def _json_payload(source_name: str, data: Any, metadata: dict[str, Any]) -> IngestedPayload:
+def _json_payload(
+    source_name: str,
+    data: Any,
+    metadata: dict[str, Any],
+    *,
+    sort_keys: bool = False,
+) -> IngestedPayload:
     return IngestedPayload(
-        body=json.dumps(data, ensure_ascii=False, indent=2, default=_json_default).encode("utf-8"),
+        body=json.dumps(
+            data,
+            ensure_ascii=False,
+            indent=2,
+            default=_json_default,
+            sort_keys=sort_keys,
+        ).encode("utf-8"),
         filename=_safe_source_filename(source_name, ".json"),
         content_type="application/json",
         title=source_name,
         metadata=metadata,
     )
+
+
+def _stable_git_snapshot(result: dict[str, Any], repo_path: Path) -> dict[str, Any]:
+    """Remove clone-local values while preserving Semantica's repository analysis.
+
+    ``RepoIngestor`` intentionally returns absolute paths and checkout mtimes for
+    interactive analysis.  A source snapshot has a different contract: its
+    digest must change only when repository content or stable Git metadata
+    changes.  Fresh clones use a new temporary directory and current filesystem
+    mtimes, so those fields must not participate in source versioning.
+    """
+
+    snapshot = dict(result)
+    repository_root = repo_path.resolve() if repo_path.is_dir() else None
+    code_files: list[dict[str, Any]] = []
+    for raw_file in result.get("code_files") or []:
+        item = dict(raw_file)
+        raw_path = Path(str(item.get("path") or item.get("name") or "item"))
+        relative_path: str
+        if not raw_path.is_absolute():
+            relative_path = _safe_relative_name(raw_path.as_posix())
+        elif repository_root is not None:
+            try:
+                relative_path = raw_path.resolve().relative_to(repository_root).as_posix()
+            except (OSError, ValueError):
+                relative_path = _safe_relative_name(item.get("name") or raw_path.name)
+        else:
+            relative_path = _safe_relative_name(item.get("name") or raw_path.name)
+        item["path"] = relative_path
+        file_metadata = dict(item.get("metadata") or {})
+        file_metadata.pop("modified", None)
+        item["metadata"] = file_metadata
+        code_files.append(item)
+    snapshot["code_files"] = sorted(
+        code_files,
+        key=lambda item: (
+            str(item.get("path") or ""),
+            str(item.get("name") or ""),
+            str(item.get("language") or ""),
+        ),
+    )
+
+    commits: list[dict[str, Any]] = []
+    for raw_commit in result.get("commits") or []:
+        commit = dict(raw_commit)
+        commit["files_changed"] = sorted(str(value) for value in commit.get("files_changed") or [])
+        commits.append(commit)
+    snapshot["commits"] = sorted(
+        commits,
+        key=lambda item: (
+            str(_json_default(item.get("date"))),
+            str(item.get("hash") or ""),
+        ),
+        reverse=True,
+    )
+
+    # Semantica's repository-wide metrics currently walk ``.git`` as well as
+    # the working tree. Fresh shallow clones can have different internal log
+    # and index line counts even for the same commit. Recompute the same public
+    # metrics from the already-filtered content files instead.
+    lines_by_language: dict[str, int] = {}
+    files_by_language: dict[str, int] = {}
+    total_lines = 0
+    for item in snapshot["code_files"]:
+        language = str(item.get("language") or "unknown")
+        line_count = int(item.get("lines") or 0)
+        total_lines += line_count
+        lines_by_language[language] = lines_by_language.get(language, 0) + line_count
+        files_by_language[language] = files_by_language.get(language, 0) + 1
+    snapshot["metrics"] = {
+        "total_lines": total_lines,
+        "total_files": len(snapshot["code_files"]),
+        "lines_by_language": lines_by_language,
+        "files_by_language": files_by_language,
+    }
+
+    repository_info = dict(snapshot.get("repository_info") or {})
+    repository_info["branches"] = sorted(str(value) for value in repository_info.get("branches") or [])
+    repository_info["tags"] = sorted(str(value) for value in repository_info.get("tags") or [])
+    snapshot["repository_info"] = repository_info
+    return snapshot
 
 
 def _ingest_google_drive_http(
@@ -465,11 +558,23 @@ def ingest_source(
             timeout=int(config.get("timeout", 30)),
             allow_private_ips=_private_host_allowed(host),
         ).crawl_sitemap(url, **crawl_options)
-        payload = [
-            {"url": page.url, "title": page.title, "text": page.text, "fetched_at": page.fetched_at}
-            for page in pages
-        ]
-        return _json_payload(source_name, payload, {"page_count": len(pages)})
+        # ``fetched_at`` is operational telemetry, not source content.  Keeping
+        # it in the persisted body forced a new document version on every
+        # otherwise-identical crawl.  URL ordering is normalized as sitemap
+        # generators do not guarantee stable entry ordering.
+        payload = sorted(
+            (
+                {"url": page.url, "title": page.title, "text": page.text}
+                for page in pages
+            ),
+            key=lambda page: str(page["url"]),
+        )
+        return _json_payload(
+            source_name,
+            payload,
+            {"page_count": len(pages)},
+            sort_keys=True,
+        )
 
     if source_type == "git":
         from semantica.ingest.repo_ingestor import RepoIngestor
@@ -486,53 +591,63 @@ def ingest_source(
         if config.get("branch"):
             options["branch"] = str(config["branch"])
         ingestor = RepoIngestor()
-        if _private_host_allowed(httpx.URL(url).host or ""):
-            # The pinned Semantica repository ingestor has no explicit private
-            # host allowlist hook. The platform has already resolved and
-            # allowlisted the target, so isolate this version-specific bridge
-            # under a lock and restore the original validator immediately.
-            with _REPO_PRIVATE_VALIDATION_LOCK:
-                original_validator = RepoIngestor._validate_repo_host
-                RepoIngestor._validate_repo_host = staticmethod(lambda _host: None)
-                try:
-                    result = ingestor.ingest_repository(url, **options)
-                finally:
-                    RepoIngestor._validate_repo_host = staticmethod(original_validator)
-        else:
-            result = ingestor.ingest_repository(url, **options)
-        repo_path = Path(str(result.pop("temp_path", "")))
-        media_files: list[tuple[str, bytes]] = []
-        if repo_path.is_dir():
-            attributes = repo_path / ".gitattributes"
-            uses_lfs = attributes.is_file() and "filter=lfs" in attributes.read_text(
-                encoding="utf-8", errors="ignore"
-            )
-            if uses_lfs:
-                if not shutil.which("git-lfs"):
-                    raise ValueError("仓库使用 Git LFS，但运行环境未安装 git-lfs")
-                pulled = subprocess.run(
-                    ["git", "lfs", "pull"], cwd=repo_path, capture_output=True,
-                    text=True, timeout=int(config.get("lfs_timeout") or 600), check=False,
+        try:
+            if _private_host_allowed(httpx.URL(url).host or ""):
+                # The pinned Semantica repository ingestor has no explicit private
+                # host allowlist hook. The platform has already resolved and
+                # allowlisted the target, so isolate this version-specific bridge
+                # under a lock and restore the original validator immediately.
+                with _REPO_PRIVATE_VALIDATION_LOCK:
+                    original_validator = RepoIngestor._validate_repo_host
+                    RepoIngestor._validate_repo_host = staticmethod(lambda _host: None)
+                    try:
+                        result = ingestor.ingest_repository(url, **options)
+                    finally:
+                        RepoIngestor._validate_repo_host = staticmethod(original_validator)
+            else:
+                result = ingestor.ingest_repository(url, **options)
+            repo_path = Path(str(result.pop("temp_path", "")))
+            media_files: list[tuple[str, bytes]] = []
+            if repo_path.is_dir():
+                attributes = repo_path / ".gitattributes"
+                uses_lfs = attributes.is_file() and "filter=lfs" in attributes.read_text(
+                    encoding="utf-8", errors="ignore"
                 )
-                if pulled.returncode:
-                    raise ValueError(f"Git LFS 文件拉取失败：{(pulled.stderr or '未知错误')[-500:]}")
-            for candidate in sorted(repo_path.rglob("*")):
-                if not candidate.is_file() or ".git" in candidate.relative_to(repo_path).parts:
-                    continue
-                relative = candidate.relative_to(repo_path).as_posix()
-                content_type = mimetypes.guess_type(relative)[0] or "application/octet-stream"
-                from packages.platform.media import media_type_for
-                if media_type_for(relative, content_type):
-                    media_files.append((relative, candidate.read_bytes()))
-        metadata = {
-            "file_count": len(result.get("code_files") or []),
-            "commit_count": len(result.get("commits") or []),
-            "media_file_count": len(media_files),
-        }
-        if media_files:
-            manifest = json.dumps(result, ensure_ascii=False, indent=2, default=_json_default).encode("utf-8")
-            return _archive_payload(source_name, [("repository.json", manifest), *media_files], metadata)
-        return _json_payload(source_name, result, metadata)
+                if uses_lfs:
+                    if not shutil.which("git-lfs"):
+                        raise ValueError("仓库使用 Git LFS，但运行环境未安装 git-lfs")
+                    pulled = subprocess.run(
+                        ["git", "lfs", "pull"], cwd=repo_path, capture_output=True,
+                        text=True, timeout=int(config.get("lfs_timeout") or 600), check=False,
+                    )
+                    if pulled.returncode:
+                        raise ValueError(f"Git LFS 文件拉取失败：{(pulled.stderr or '未知错误')[-500:]}")
+                for candidate in sorted(repo_path.rglob("*")):
+                    if not candidate.is_file() or ".git" in candidate.relative_to(repo_path).parts:
+                        continue
+                    relative = candidate.relative_to(repo_path).as_posix()
+                    content_type = mimetypes.guess_type(relative)[0] or "application/octet-stream"
+                    from packages.platform.media import media_type_for
+                    if media_type_for(relative, content_type):
+                        media_files.append((relative, candidate.read_bytes()))
+            result = _stable_git_snapshot(result, repo_path)
+            metadata = {
+                "file_count": len(result.get("code_files") or []),
+                "commit_count": len(result.get("commits") or []),
+                "media_file_count": len(media_files),
+            }
+            if media_files:
+                manifest = json.dumps(
+                    result,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=_json_default,
+                    sort_keys=True,
+                ).encode("utf-8")
+                return _archive_payload(source_name, [("repository.json", manifest), *media_files], metadata)
+            return _json_payload(source_name, result, metadata, sort_keys=True)
+        finally:
+            ingestor.cleanup()
 
     if source_type == "database":
         from semantica.ingest.db_ingestor import DBIngestor

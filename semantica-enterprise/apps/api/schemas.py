@@ -27,8 +27,11 @@ def _validate_source_config(value: dict[str, Any]) -> dict[str, Any]:
     if "url" in value:
         url = str(value.get("url") or "").strip()
         parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("数据源 URL 必须是有效的 HTTP 或 HTTPS 地址")
+        # Git supports its native read-only transport in addition to HTTP(S).
+        # The model-level validator below limits these extra schemes to the
+        # Git connector; all other URL connectors remain HTTP(S)-only.
+        if parsed.scheme not in {"http", "https", "git"} or not parsed.hostname:
+            raise ValueError("数据源 URL 必须是有效的 HTTP、HTTPS 或 Git 地址")
         if parsed.username or parsed.password:
             raise ValueError("URL 中不能包含账号或密码，请使用独立的访问密钥字段")
         value["url"] = url
@@ -117,6 +120,15 @@ def _validate_source_type_config(source_type: str, config: dict[str, Any]) -> No
         raise ValueError("该数据源必须配置 URL")
     if source_type == "web" and "method" in config:
         raise ValueError("网页数据源不能配置 REST 请求方法")
+    if config.get("url"):
+        scheme = urlsplit(str(config["url"])).scheme.casefold()
+        allowed_schemes = {"http", "https", "git"} if source_type == "git" else {"http", "https"}
+        if scheme not in allowed_schemes:
+            raise ValueError(
+                "Git 数据源仅支持 HTTP、HTTPS 或 Git 地址"
+                if source_type == "git"
+                else "该数据源仅支持 HTTP 或 HTTPS 地址"
+            )
     if source_type == "database":
         required = ["dialect", "host", "database", "username"]
         missing = [key for key in required if not str(config.get(key) or "").strip()]
@@ -596,6 +608,11 @@ class CurationCaseUpdate(BaseModel):
         return self
 
 
+class DuplicateDocumentResolution(BaseModel):
+    action: Literal["keep_both", "merge_into_left", "merge_into_right"]
+    reason_note: str = Field(min_length=1, max_length=2000)
+
+
 class CurationProfileUpdate(BaseModel):
     space_id: str
     changes: dict[str, Any]
@@ -714,6 +731,7 @@ class KnowledgeFactUpdate(BaseModel):
     predicate: str | None = Field(default=None, min_length=1, max_length=200)
     object_entity_id: str | None = None
     object_value: str | None = None
+    source_chunk_id: str | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
     status: str | None = Field(default=None, min_length=1, max_length=32)
     valid_from: datetime | None = None
