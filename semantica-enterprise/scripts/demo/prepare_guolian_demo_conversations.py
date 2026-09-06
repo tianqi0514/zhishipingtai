@@ -23,6 +23,17 @@ import httpx
 SPACE_CODE = "guolian-enterprise-demo"
 TERMINAL_EVENTS = {"turn_completed", "turn_failed", "turn_cancelled"}
 GRAPH_TOOLS = {"knowledge_graph_query", "knowledge_reason"}
+GRAPH_COMPARISON_QUESTIONS = (
+    (
+        "从东方智造出发，沿当前有效知识中已经登记的关系，能够到达哪些产品、项目和责任部门？"
+        "请逐跳列出“对象—关系—对象”和每一步来源；如果本轮无法核验关系范围，请明确说明，"
+        "不要根据相似文档自行补齐路径。"
+    ),
+    (
+        "沿上面的关系路径，当前还能到达其他项目吗？请明确说明这是经过关系范围核验得到的结果，"
+        "还是仅仅没有检索到相似文档。"
+    ),
+)
 
 
 class DemoConversationError(RuntimeError):
@@ -43,20 +54,16 @@ SPECS = (
     ConversationSpec(
         title="演示01｜不使用图谱",
         use_graph=False,
-        questions=(
-            "东方智造的交付延期会影响哪些项目和责任部门？请说明完整关系路径和来源依据。",
-        ),
+        questions=GRAPH_COMPARISON_QUESTIONS,
         required_tools=frozenset({"knowledge_search"}),
         citation_mode="document",
     ),
     ConversationSpec(
         title="演示02｜使用图谱增强",
         use_graph=True,
-        questions=(
-            "东方智造的交付延期会影响哪些项目和责任部门？请说明完整关系路径和来源依据。",
-        ),
+        questions=GRAPH_COMPARISON_QUESTIONS,
         required_tools=frozenset({
-            "knowledge_search", "knowledge_graph_query", "knowledge_reason",
+            "knowledge_search", "knowledge_graph_query",
         }),
         citation_mode="document",
     ),
@@ -260,7 +267,12 @@ def _upsert_conversation(
     return str(created.json()["id"])
 
 
-def prepare(*, api_url: str, token: str) -> dict[str, Any]:
+def prepare(
+    *,
+    api_url: str,
+    token: str,
+    selected_titles: set[str] | None = None,
+) -> dict[str, Any]:
     client = httpx.Client(
         base_url=api_url.rstrip("/"),
         headers={"Authorization": f"Bearer {token}"},
@@ -269,7 +281,13 @@ def prepare(*, api_url: str, token: str) -> dict[str, Any]:
     summaries: list[dict[str, Any]] = []
     try:
         space_id = _space_id(client)
-        for spec in SPECS:
+        selected_specs = [
+            spec for spec in SPECS
+            if not selected_titles or spec.title in selected_titles
+        ]
+        if not selected_specs:
+            raise DemoConversationError("没有匹配的演示会话")
+        for spec in selected_specs:
             conversation_id = _upsert_conversation(client, spec, space_id)
             turns: list[dict[str, Any]] = []
             for number, question in enumerate(spec.questions, start=1):
@@ -287,7 +305,7 @@ def prepare(*, api_url: str, token: str) -> dict[str, Any]:
         listed = client.get("/conversations", params={"limit": 500})
         listed.raise_for_status()
         titles = {row.get("title") for row in (listed.json().get("items") or [])}
-        missing = {spec.title for spec in SPECS} - titles
+        missing = {spec.title for spec in selected_specs} - titles
         if missing:
             raise DemoConversationError("会话列表未返回全部演示历史")
         return {"ready": True, "conversation_count": len(summaries), "conversations": summaries}
@@ -301,13 +319,23 @@ def main() -> int:
         "--api-url",
         default=os.getenv("GUOLIAN_DEMO_API_URL", "http://localhost:8080/api/v1"),
     )
+    parser.add_argument(
+        "--title",
+        action="append",
+        choices=[spec.title for spec in SPECS],
+        help="只刷新指定会话；可重复使用",
+    )
     args = parser.parse_args()
     token = os.getenv("CHUANSHEN_TOKEN", "").strip()
     if not token:
         print("失败：缺少短期 CHUANSHEN_TOKEN", file=sys.stderr)
         return 2
     try:
-        report = prepare(api_url=args.api_url, token=token)
+        report = prepare(
+            api_url=args.api_url,
+            token=token,
+            selected_titles=set(args.title or []),
+        )
     except (DemoConversationError, httpx.HTTPError) as exc:
         if isinstance(exc, httpx.HTTPStatusError):
             message = f"接口返回 HTTP {exc.response.status_code}"

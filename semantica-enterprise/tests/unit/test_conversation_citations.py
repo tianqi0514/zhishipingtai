@@ -9,6 +9,7 @@ from apps.api.conversations import (
     _conversation_payload,
     _inherit_referenced_citations,
     _project_event,
+    _repair_internal_answer_details,
     _repair_unverifiable_citations,
     _reconcile_stale_turn,
     _validate_structured_citations,
@@ -147,6 +148,50 @@ def test_citation_guard_removes_unknown_document_reference_and_repairs_unambiguo
         assert repaired["removed_document_references"] == [11]
         assert repaired["repaired_data_references"] == [2]
         assert _validate_structured_citations(db, assistant.id) == []
+
+
+def test_public_answer_guard_hides_internal_adapter_fields_without_touching_citations() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000096",
+            harness_session_id="session-public-answer-guard",
+            tenant_id="tenant",
+            user_id="user",
+            title="public answer guard",
+        )
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000096",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="completed",
+            content=(
+                "use_graph=false，knowledge_search 找到依据[1]。\n"
+                "### 规则（rule_set_id: 371c2afc-4810-4517-a17a-662c2e38a530）\n"
+                "形式化表达：`受到影响(X, Y) :- 供应(X, Z).`\n"
+                "knowledge_reason 返回 preview，origin_type: asserted。"
+            ),
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+
+        repaired = _repair_internal_answer_details(db, assistant.id)
+
+        assert repaired is not None
+        assert "use_graph" not in assistant.content
+        assert "knowledge_search" not in assistant.content
+        assert "knowledge_reason" not in assistant.content
+        assert "rule_set_id" not in assistant.content
+        assert "371c2afc" not in assistant.content
+        assert "形式化" not in assistant.content
+        assert "[1]" in assistant.content
+        assert "本轮未启用图谱" in assistant.content
+        assert "文档检索" in assistant.content
+        assert "规则推演" in assistant.content
 
 
 def test_followup_citation_is_inherited_from_latest_verified_message() -> None:

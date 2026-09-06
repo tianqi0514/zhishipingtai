@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from scripts.demo.prepare_guolian_demo_conversations import (
+    GRAPH_COMPARISON_QUESTIONS,
     GRAPH_TOOLS,
     SPECS,
     _parse_sse,
@@ -36,10 +37,15 @@ def test_demo_history_has_unique_expected_titles_and_real_multiturn_case() -> No
 def test_graph_comparison_uses_the_same_question_and_distinct_tool_contracts() -> None:
     without_graph, with_graph = SPECS[:2]
     assert without_graph.questions == with_graph.questions
+    assert without_graph.questions == GRAPH_COMPARISON_QUESTIONS
+    assert len(GRAPH_COMPARISON_QUESTIONS) == 2
+    assert "已经登记的关系" in GRAPH_COMPARISON_QUESTIONS[0]
+    assert "不要根据相似文档自行补齐路径" in GRAPH_COMPARISON_QUESTIONS[0]
+    assert "关系范围核验" in GRAPH_COMPARISON_QUESTIONS[1]
     assert without_graph.use_graph is False
     assert with_graph.use_graph is True
     assert not (set(without_graph.required_tools) & GRAPH_TOOLS)
-    assert GRAPH_TOOLS.issubset(with_graph.required_tools)
+    assert "knowledge_graph_query" in with_graph.required_tools
 
 
 def test_demo_history_sse_parser_preserves_terminal_event() -> None:

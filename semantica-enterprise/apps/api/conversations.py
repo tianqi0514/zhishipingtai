@@ -739,6 +739,83 @@ def _repair_unverifiable_citations(
     }
 
 
+_PUBLIC_ANSWER_REPLACEMENTS = (
+    (re.compile(r"\buse_graph\s*=\s*false\b", re.IGNORECASE), "本轮未启用图谱"),
+    (re.compile(r"\buse_graph\s*=\s*true\b", re.IGNORECASE), "本轮已启用图谱"),
+    (re.compile(r"\bknowledge_graph_query\b"), "图谱查询"),
+    (re.compile(r"\bknowledge_reason\b"), "规则推演"),
+    (re.compile(r"\bknowledge_search\b"), "文档检索"),
+    (re.compile(r"\bcitation_policy\.allowed_citation_labels\b"), "平台引用校验规则"),
+    (re.compile(r"\borigin_type\s*:\s*asserted\b", re.IGNORECASE), "已有事实"),
+    (re.compile(r"\bpublished\s*:\s*false\b", re.IGNORECASE), "尚未加入正式知识"),
+    (re.compile(r"\basserted\b", re.IGNORECASE), "已有事实"),
+    (re.compile(r"\bpreview\b", re.IGNORECASE), "预览结果"),
+)
+_INTERNAL_UUID_PATTERN = re.compile(
+    r"(?<![0-9a-f])"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+    r"(?![0-9a-f])",
+    re.IGNORECASE,
+)
+_RAW_RULE_LINE_PATTERN = re.compile(
+    r"(?m)^\s*(?:[-*]\s*)?(?:\*{0,2})?形式化(?:表达)?(?:\*{0,2})?\s*[:：].*(?:\n|$)"
+)
+
+
+def _sanitize_public_answer_text(content: str) -> tuple[str, list[str]]:
+    """Remove adapter internals from the final user-visible answer.
+
+    Prompt instructions remain the first line of defence, but model output is
+    untrusted.  The persisted projection therefore enforces the public answer
+    contract without changing facts, scores, source labels, or citations.
+    """
+    value = str(content or "")
+    removed: list[str] = []
+    rewritten = _RAW_RULE_LINE_PATTERN.sub("", value)
+    if rewritten != value:
+        removed.append("raw_rule")
+    value = rewritten
+    rewritten = re.sub(
+        rf"\s*[（(]\s*rule_set_id\s*:\s*{_INTERNAL_UUID_PATTERN.pattern}\s*[）)]",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if rewritten != value:
+        removed.append("rule_set_id")
+    value = rewritten
+    rewritten = _INTERNAL_UUID_PATTERN.sub("内部记录", value)
+    if rewritten != value:
+        removed.append("uuid")
+    value = rewritten
+    for pattern, replacement in _PUBLIC_ANSWER_REPLACEMENTS:
+        rewritten = pattern.sub(replacement, value)
+        if rewritten != value:
+            removed.append(pattern.pattern)
+        value = rewritten
+    value = re.sub(r"\n{3,}", "\n\n", value).strip()
+    return value, removed
+
+
+def _repair_internal_answer_details(
+    db: Session,
+    assistant_id: str,
+) -> dict[str, Any] | None:
+    assistant = db.get(ConversationMessage, assistant_id)
+    if assistant is None:
+        return None
+    sanitized, removed = _sanitize_public_answer_text(assistant.content)
+    if not removed or sanitized == assistant.content:
+        return None
+    assistant.content = sanitized
+    return {
+        "content": sanitized,
+        "reason": "public_answer_contract",
+        "removed_internal_fields": sorted(set(removed)),
+        "message": "回答已按业务展示规范隐藏内部技术字段",
+    }
+
+
 async def _stream_turn(
     request: Request,
     conversation_id: str,
@@ -799,17 +876,23 @@ async def _stream_turn(
         if not terminal:
             raise RuntimeError("Agent Runtime 流提前结束")
         with SessionLocal() as db:
-            repaired = _repair_unverifiable_citations(db, assistant_id)
+            citation_repair = _repair_unverifiable_citations(db, assistant_id)
+            internal_repair = _repair_internal_answer_details(db, assistant_id)
+            repaired = internal_repair or citation_repair
             if repaired:
+                repaired["content"] = str(db.get(ConversationMessage, assistant_id).content or "")
                 _project_event(db, conversation_id, assistant_id, "answer_replaced", repaired)
                 warning = {
                     "message": repaired["message"],
                     "reason": repaired["reason"],
                     "removed_document_reference_count": len(
-                        repaired["removed_document_references"]
+                        (citation_repair or {}).get("removed_document_references") or []
                     ),
                     "repaired_data_reference_count": len(
-                        repaired["repaired_data_references"]
+                        (citation_repair or {}).get("repaired_data_references") or []
+                    ),
+                    "removed_internal_field_count": len(
+                        (internal_repair or {}).get("removed_internal_fields") or []
                     ),
                 }
                 _project_event(db, conversation_id, assistant_id, "warning", warning)
