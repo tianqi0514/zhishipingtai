@@ -46,18 +46,43 @@ def test_analysis_ui_uses_business_terms_and_preserves_expert_query() -> None:
     assert "run_readonly_sparql" not in javascript
 
 
-def test_visual_graph_query_reads_fields_by_their_rendered_name_selectors() -> None:
-    """The shared field helpers render ``name`` attributes, not element ids."""
+def test_visual_graph_query_reads_rendered_fields_without_stale_dom_crashes() -> None:
+    """Query handlers must tolerate navigation replacing their rendered controls."""
 
     javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
 
     for selector in (
-        "$('[name=visual_subject]').value.trim()",
-        "$('[name=visual_predicate]').value",
-        "$('[name=visual_object_type]').value",
-        "$('[name=visual_inferred]').checked",
+        "subject=$('[name=visual_subject]')",
+        "predicate=$('[name=visual_predicate]')",
+        "objectType=$('[name=visual_object_type]')",
+        "inferred=$('[name=visual_inferred]')",
     ):
         assert selector in javascript
+    assert "if(!subject||!predicate||!objectType||!inferred)" in javascript
+    assert "viewSequence!==state.requestSequence" in javascript
+    assert "renderToken!==state.analysisQueryRenderToken" in javascript
+    assert "if(button.isConnected)" in javascript
+    assert "if(err?.name==='AbortError'||!isCurrent())return" in javascript
     assert "$('#visual_subject').value" not in javascript
     assert "$('#visual_predicate').value" not in javascript
     assert "$('#visual_object_type').value" not in javascript
+
+
+def test_analysis_dynamic_forms_use_controlled_missing_field_errors() -> None:
+    javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
+
+    assert "function analysisRequiredControl" in javascript
+    assert "function analysisRequiredNamedControl" in javascript
+    assert "function analysisControlValue" in javascript
+    assert "function analysisNamedValue" in javascript
+    assert "已更新，请关闭后重新打开表单" in javascript
+    assert "row.querySelector('select').value.trim()" not in javascript
+    assert "form.elements.head_predicate.value" not in javascript
+    assert "form.name.value" not in javascript
+    assert "form.priority.value" not in javascript
+    assert "form.confidence.value" not in javascript
+
+    await_index = javascript.rindex("const queryResult=await api(path")
+    freshness_index = javascript.index("if(!isCurrent())return", await_index)
+    assignment_index = javascript.index("state.analysisQueryResult=queryResult", await_index)
+    assert await_index < freshness_index < assignment_index

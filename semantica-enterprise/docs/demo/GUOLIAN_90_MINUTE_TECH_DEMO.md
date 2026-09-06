@@ -102,13 +102,13 @@
 
 | 证据 | 本机 | 远端 |
 |---|---|---|
-| Git commit / 镜像 | 当前分支 HEAD（精确 SHA 见 Git 历史）；生产镜像 `semantica-enterprise:0.10.0`，摘要 `sha256:441f39ee40a1b743dc8c277edf5cd32a18f1b53e8b724915276002af9a423c93`，Linux/amd64 干净构建通过 | 远端待验证 |
-| Docker 健康 | API、Worker、Scheduler、MCP 已由最终生产镜像重建；16 个正式演示容器当前全部健康；15 个重启计数为 0，ASR 启动早期累计重启 10 次后已稳定并连续通过转写/预检；不删 Volume 恢复已通过 | 远端待验证；演示前复核 ASR |
+| Git commit / 镜像 | 当前分支 HEAD（精确 SHA 见 Git 历史）；第一版干净构建候选为 `sha256:441f39ee…`，最终交付代码层镜像 `semantica-enterprise:0.10.0` 为 `sha256:3659d35b767dd8ebba6cbd2569284c79795f1c24d5058a0f59f4c83bad86e494`，Linux/amd64 | 远端待验证 |
+| Docker 健康 | API、Worker、Scheduler、MCP 的实际镜像均为 `3659d35b…`，四者 `running/healthy`、重启 0、未 OOM，最近 20 分钟错误样式日志 0；16 个正式演示容器当前健康。ASR 累计重启 10 次，历史根因未知，当前进程可用但演示前后必须复核；不删 Volume 恢复已通过 | 远端待验证；演示前复核 ASR |
 | Semantica 版本/Run | Semantica 0.6.6；证据对齐后 3/3 个真实 Run、7 条结论，均由 `semantica.reasoning.DatalogReasoner` 生成；9/9 种子事实、8/8 前提通过 | 远端待验证 |
 | Harness commit | `cd5ef8148158c3a752a658978873241fdf8e2bbc`；契约测试 18/18 | 远端待验证 |
 | 20 条 DB GT | MySQL 20/20 + PostgreSQL 20/20 直连实算；平台公开 NL→Plan→IR→参数化 SQL→执行 20/20 | 远端待验证 |
 | 检索 Query | 六种模式均已真实调用；Reranker 未配置时“请求重排”明确降级为 RRF | 远端待验证 |
-| 浏览器 Console | 最终镜像已复测白底图谱、推演、智能问答、召回、片段、数据库预览和文档列表，已执行路径 0 error；三轮完整客户彩排仍未完成 | 远端待验证 |
+| 浏览器 Console | 完整客户彩排 1/3；扩展检查发现的分析表单/专业查询 `null.value` 与旧响应覆盖竞态已修复。两轮代码层镜像完成向导动态编辑、真实试运行、规则校验、专业查询、切换模式和快速离页定向回归，执行路径 0 error | 远端待验证 |
 | REST/MCP/CLI | REST、DSH、MCP、CLI 均通过；MCP 11 个工具可见、原始 SQL 被拒绝 | 远端待验证 |
 
 远端只有在本机服务关闭后仍能完整通过才标记“独立运行”。

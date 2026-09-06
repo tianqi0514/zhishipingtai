@@ -9,6 +9,8 @@
 - 演示前 10 分钟：执行 `preflight`，打开目标页面和三条关键引用。
 - 切换到测试环境后：停止本机相关服务，再运行同一套预检，证明远端独立运行。
 
+当前交付证据必须分开表述：第一版生产候选镜像的完整机器预检连续 **3/3** 通过，第一版前端修复镜像和最终交付镜像又各完成 **1/1** 完整复核；完整浏览器客户彩排只完成 **1/3**。机器预检不能替代第二、第三轮由演示人员从登录开始逐页操作的浏览器彩排，完成前不得写成“三轮完整演练通过”。
+
 ## 2. 环境变量
 
 凭据只从安全环境变量或现有 Secret 注入，不写入命令历史、脚本、文档或报告。
@@ -100,7 +102,7 @@ scripts/demo/preflight_guolian_demo.sh > .demo-build/guolian-preflight.json
 |---|---|---|
 | 页面 | `http://localhost:8080/` 可登录，刷新不掉登录 | 浏览器截图/Network |
 | 空间 | 全局选择器为国联演示空间，其他空间不受影响 | 空间 ID |
-| 文档 | 主演示 12 种素材均完成，失败任务为 0 | 文档详情、Job ID |
+| 文档 | 24/24 份主演示白名单材料完成，覆盖至少 12 种媒介，失败任务为 0 | 文档详情、Job ID |
 | MD 路由 | Markdown 解析器为文本链，无 OCR 阶段 | 解析摘要 |
 | 音频 | transcript 带 time_start/time_end | 片段详情 |
 | 视频 | 54 秒，帧和时间线可打开，视觉描述真实存在 | 帧 ID |
@@ -134,6 +136,43 @@ scripts/demo/preflight_guolian_demo.sh > .demo-build/guolian-preflight.json
 - Kimi：若作为显式备用则最小请求 1 次。
 - 内网 Qwen 不可达时保持停用，不触发测试风暴。
 
+### 7.1 ASR 运行稳定性门禁
+
+开始模型预热前记录 ASR 容器快照；完成一条短 WAV 的真实转写和完整预检后，再记录同一容器快照：
+
+```bash
+asr_container_id="$(docker compose ps -q asr-runtime)"
+docker inspect "${asr_container_id}" \
+  --format 'created={{.Created}} started={{.State.StartedAt}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restart={{.RestartCount}}'
+
+# 取演示 WAV 前 10 秒并真实调用 ASR；只输出状态和数量，不输出转写正文。
+docker compose exec -T worker ffmpeg -nostdin -v error -t 10 \
+  -i '/app/demo/guolian/智慧流程中枢项目例会（演示版）.wav' \
+  -ac 1 -ar 16000 -y /tmp/guolian-asr-smoke.wav
+docker compose exec -T worker python - <<'PY'
+from pathlib import Path
+from packages.semantica_adapter.transcription import transcribe_media
+
+result = transcribe_media(
+    Path("/tmp/guolian-asr-smoke.wav"), "audio",
+    api_key="local-runtime", model="sensevoice",
+    base_url="http://asr-runtime:8001/v1", timeout=120,
+    max_retries=1, language="zh", segment_seconds=15,
+)
+segments = result.get("segments") or []
+assert result.get("transcript")
+assert segments and all(row.get("start") is not None and row.get("end") is not None for row in segments)
+print({"status": result.get("transcription_status"), "segments": len(segments)})
+PY
+
+scripts/demo/preflight_guolian_demo.sh
+
+docker inspect "${asr_container_id}" \
+  --format 'created={{.Created}} started={{.State.StartedAt}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restart={{.RestartCount}}'
+```
+
+通过条件：前后 `RestartCount` 不增加，容器全程 `healthy`，短 WAV 返回非空转写及真实时间区间。历史累计重启数必须原样记录；非零本身不等于当前失败，但也不能写成“全栈零重启”或“历史根因已解决”。若计数增加、健康抖动或转写失败，应停止多模态主演示并保存脱敏日志。
+
 ## 8. 重置
 
 先只看范围：
@@ -159,4 +198,4 @@ docker compose exec -T \
 
 ## 9. 放行判断
 
-只有 `verify` 必需项全部通过、浏览器第三轮彩排无阻塞、Ground Truth 数值和引用全部一致，才标记“可以演示”。测试环境当前未验证；恢复后必须重复以上流程，且关闭本机后远端仍可独立通过。
+只有 `verify` 必需项全部通过、浏览器第二和第三轮完整彩排均无阻塞、Ground Truth 数值和引用全部一致，才标记“可以演示”。当前口径为候选镜像机器预检 3/3、两个代码层镜像各复核 1/1、浏览器完整彩排 1/3。测试环境当前未验证；恢复后必须先取得 SSH/管理通道，再从服务器外部确认 Web 根路径和 `/health/ready` 返回有效 HTTP 响应，最后关闭本机并在远端重复完整预检与浏览器关键链。TCP accept、服务器本机可访问或容器 `healthy` 不能单独证明远端独立可用。

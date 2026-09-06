@@ -11,16 +11,16 @@
 凭据未配置时直接拒绝启动。它还会使用 `Dockerfile.production`，从同一 Git
 仓库中的 Semantica 和传神智库源码构建完整镜像，不要求目标服务器预装
 `semantica-local` 镜像。服务器仅公开 Web/API 入口，数据库、中间件、
-MCP 和模型运行时继续绑定环回地址。例如将平台发布在 `9001`：
+MCP 和模型运行时继续绑定环回地址。例如将平台发布在建议的外网端口 `9002`：
 
 ```dotenv
 API_BIND_ADDRESS=0.0.0.0
-API_PUBLISHED_PORT=9001
+API_PUBLISHED_PORT=9002
 INTERNAL_BIND_ADDRESS=127.0.0.1
 MINIO_CONSOLE_PORT=19001
 ```
 
-这里把 MinIO 控制台移到本机 `19001`，避免与平台入口冲突；它仍不对公网开放。
+这里把 MinIO 控制台移到本机 `19001`，避免与平台入口冲突；它仍不对公网开放。端口能建立 TCP 连接不代表 Web/API 已经可用：部署后必须从服务器外部同时访问 `/` 和 `/health/ready`，并确认收到预期 HTTP 状态与响应正文。TCP 已连接但 HTTP 000、无首字节或超时均按“远端不可用”处理。
 
 应用镜像已内置 `ffmpeg/ffprobe`、LibreOffice headless、Tesseract 中英文语言包、`file/libmagic` 和文泉驿正黑中文字体。中文 Office 转换、扫描件 OCR 和验收数据生成不依赖宿主机字体或本地安装的软件。
 
@@ -124,6 +124,7 @@ API 启动时先执行追加式 SQL 迁移，使用 PostgreSQL advisory lock 避
 | scheduler | 数据源定时同步 | 无 |
 | agent-runtime | DeepSeek Harness Runtime | 仅 Docker 内网 `8090` |
 | mcp-server | MCP Streamable HTTP | `127.0.0.1:8091` |
+| asr-runtime | 本地 SenseVoice/FunASR 转写 | 仅 Docker 内网 `8001` |
 | postgres | 业务权威数据 | 仅内网 |
 | redis | Celery 结果与缓存 | 仅内网 |
 | rabbitmq | Celery Broker/Stream | 管理端 `15672` |
@@ -134,11 +135,25 @@ API 启动时先执行追加式 SQL 迁移，使用 PostgreSQL advisory lock 避
 
 ## 升级与回滚
 
-1. 记录当前镜像 ID、`scripts/deploy_server.sh check` 输出和数据库备份。
+1. 记录当前 Git HEAD、镜像 ID、`scripts/deploy_server.sh check` 输出和数据库备份。
 2. 保留当前 `.env` 与 `deploy/secrets/`，不得静默轮换已用于加密或初始化持久卷的凭据。
 3. 执行 `scripts/deploy_server.sh upgrade`。该命令始终叠加生产覆盖文件，构建新镜像并只重建应用容器，不停止数据库。
 4. 执行 `scripts/deploy_server.sh check`，检查 `/health/ready`、全部 Compose 服务、Harness 和迁移状态。
-5. 回滚时切回旧镜像并重新创建应用容器；不要删除 Volume。数据库变更只允许向后兼容的追加式迁移。
+5. 核对 API、Worker、Scheduler、MCP 四个应用容器的实际镜像 ID 均等于本次交付镜像；任一不一致都应阻断放行：
+
+   ```bash
+   expected_image_id="$(docker image inspect semantica-enterprise:0.10.0 --format '{{.Id}}')"
+   for app_service in api worker scheduler mcp-server; do
+     app_container_id="$(docker compose ps -q "${app_service}")"
+     actual_image_id="$(docker inspect "${app_container_id}" --format '{{.Image}}')"
+     test "${actual_image_id}" = "${expected_image_id}" || {
+       echo "${app_service}: image digest mismatch" >&2
+       exit 1
+     }
+   done
+   ```
+
+6. 回滚时切回旧镜像并重新创建应用容器；不要删除 Volume。数据库变更只允许向后兼容的追加式迁移。
 
 正常停止与持久化复验：
 
@@ -148,5 +163,49 @@ scripts/deploy_server.sh up
 scripts/deploy_server.sh check
 python3 tests/integration/restart_recovery.py
 ```
+
+ASR Runtime 还需单独记录当前容器的 `Created`、`StartedAt`、健康状态和累计 `RestartCount`。`RestartCount` 是累计观察值，历史非零不等于当前不可用，也不能据此推断历史退出根因；演示放行看本轮前后是否继续增长，以及短 WAV 是否真实转写成功：
+
+```bash
+asr_container_id="$(docker compose ps -q asr-runtime)"
+docker inspect "${asr_container_id}" \
+  --format 'created={{.Created}} started={{.State.StartedAt}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restart={{.RestartCount}}'
+
+# 取演示 WAV 前 10 秒并真实调用 Docker 内网 ASR；只输出状态和数量，不输出转写正文。
+docker compose exec -T worker ffmpeg -nostdin -v error -t 10 \
+  -i '/app/demo/guolian/智慧流程中枢项目例会（演示版）.wav' \
+  -ac 1 -ar 16000 -y /tmp/guolian-asr-smoke.wav
+docker compose exec -T worker python - <<'PY'
+from pathlib import Path
+from packages.semantica_adapter.transcription import transcribe_media
+
+result = transcribe_media(
+    Path("/tmp/guolian-asr-smoke.wav"), "audio",
+    api_key="local-runtime", model="sensevoice",
+    base_url="http://asr-runtime:8001/v1", timeout=120,
+    max_retries=1, language="zh", segment_seconds=15,
+)
+segments = result.get("segments") or []
+assert result.get("transcript")
+assert segments and all(row.get("start") is not None and row.get("end") is not None for row in segments)
+print({"status": result.get("transcription_status"), "segments": len(segments)})
+PY
+
+scripts/demo/preflight_guolian_demo.sh
+
+docker inspect "${asr_container_id}" \
+  --format 'created={{.Created}} started={{.State.StartedAt}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restart={{.RestartCount}}'
+```
+
+前后 `RestartCount` 必须不增加，容器保持 `healthy`，且短音频得到非空转写与真实时间区间。若任一条件失败，应暂停现场实时音视频加工并排查，不得把已有历史转写冒充本轮推理。
+
+内网检查通过后，还必须从独立外部终端验证公网入口；`${SERVER_PUBLIC_IP}` 只在执行时替换，不应提交真实凭据：
+
+```bash
+curl --fail --show-error --max-time 12 "http://${SERVER_PUBLIC_IP}:9002/"
+curl --fail --show-error --max-time 12 "http://${SERVER_PUBLIC_IP}:9002/health/ready"
+```
+
+最终远端独立验收必须先停止本机平台服务，再在远端重复完整预检和浏览器关键链。仅 `nc`/TCP accept、服务器本机 `curl` 或容器为 `healthy`，均不能单独证明公网环境可用。
 
 禁止在日常升级中运行 `docker compose down -v`。
