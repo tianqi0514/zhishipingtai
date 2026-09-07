@@ -337,6 +337,11 @@ def clear_conversation_messages(
             citation.message_id = None
         for run in db.scalars(select(StructuredQueryRun).where(StructuredQueryRun.message_id.in_(message_ids))):
             run.message_id = None
+        # Persist the detached immutable audit rows before issuing the bulk
+        # message delete.  SQLAlchemy does not guarantee an autoflush of dirty
+        # ORM objects before a Core bulk DELETE, and PostgreSQL otherwise sees
+        # the old foreign keys and rejects clearing database-QA conversations.
+        db.flush()
     db.execute(delete(AgentEventProjection).where(AgentEventProjection.conversation_id == conversation.id))
     db.execute(delete(AgentCredential).where(AgentCredential.conversation_id == conversation.id))
     db.execute(delete(ConversationMessage).where(ConversationMessage.conversation_id == conversation.id))

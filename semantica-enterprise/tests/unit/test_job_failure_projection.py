@@ -60,3 +60,9 @@ def test_frontend_summary_cards_use_the_same_unresolved_failure_projection() -> 
     assert "失败任务</span><b>${unresolvedFailedJobs(jobs).length}" in app_js
     assert "knowledge_inference:'知识分析'" in app_js
     assert "curation_publish:'治理发布'" in app_js
+
+
+def test_jobs_api_hides_logically_deleted_history() -> None:
+    source = (Path(__file__).parents[2] / "apps/api/routes.py").read_text(encoding="utf-8")
+    jobs_query = source[source.index("def list_jobs("):source.index("def _job_space_ids(")]
+    assert "_active(Job)" in jobs_query

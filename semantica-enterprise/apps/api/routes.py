@@ -1537,7 +1537,10 @@ def list_jobs(
 ):
     if space_id:
         require_space_permission(db, user, space_id, "read")
-    query = select(Job).where(Job.tenant_id == user.tenant_id).order_by(Job.created_at.desc()).limit(500)
+    query = select(Job).where(
+        Job.tenant_id == user.tenant_id,
+        _active(Job),
+    ).order_by(Job.created_at.desc()).limit(500)
     if status: query = query.where(Job.status == status)
     rows = [
         row

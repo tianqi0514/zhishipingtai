@@ -43,8 +43,8 @@ COPY scripts /app/scripts
 COPY demo /app/demo
 RUN pip install --no-cache-dir --no-deps -e .
 
-RUN groupadd --gid 10001 app \
-    && useradd --uid 10001 --gid app --home /app --shell /usr/sbin/nologin app \
+RUN if ! getent group app >/dev/null; then groupadd --gid 10001 app; fi \
+    && if ! id -u app >/dev/null 2>&1; then useradd --uid 10001 --gid app --home /app --shell /usr/sbin/nologin app; fi \
     && mkdir -p /app/data \
     && chown -R app:app /app
 ENV HOME=/app

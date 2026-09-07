@@ -115,6 +115,11 @@ class ObjectStorage:
             response.release_conn()
 
     def delete(self, object_key: str) -> None:
+        # Synthetic/imported fixtures may retain an external provenance URI
+        # instead of a key owned by this object store.  Such references must
+        # never be forwarded to MinIO as object names during document cleanup.
+        if "://" in object_key:
+            return
         if self.settings.use_local_object_store:
             path = self.settings.local_storage_path / object_key
             if path.exists():
