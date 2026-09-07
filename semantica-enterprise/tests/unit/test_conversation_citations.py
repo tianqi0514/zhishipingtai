@@ -392,6 +392,41 @@ def test_harness_event_projection_is_timestamped_and_deduplicated() -> None:
         assert rows[0].payload["occurred_at"]
 
 
+def test_distinct_projection_events_can_be_flushed_in_one_transaction() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000095",
+            harness_session_id="session-event-sequence",
+            tenant_id="tenant",
+            user_id="user",
+            title="event sequence",
+            status="active",
+        )
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000095",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="completed",
+            content="answer",
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+
+        _project_event(db, conversation.id, assistant.id, "answer_replaced", {"content": "answer"})
+        db.flush()
+        _project_event(db, conversation.id, assistant.id, "warning", {"message": "guarded"})
+        db.commit()
+
+        rows = list(db.scalars(select(AgentEventProjection).order_by(AgentEventProjection.sequence)))
+        assert [row.sequence for row in rows] == [1, 2]
+        assert [row.event_type for row in rows] == ["answer_replaced", "warning"]
+
+
 def test_stale_generating_turn_is_reconciled_as_retryable_failure() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

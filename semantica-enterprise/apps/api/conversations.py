@@ -882,6 +882,11 @@ async def _stream_turn(
             if repaired:
                 repaired["content"] = str(db.get(ConversationMessage, assistant_id).content or "")
                 _project_event(db, conversation_id, assistant_id, "answer_replaced", repaired)
+                # Both projections share one transaction. Flush the first
+                # sequence before allocating the next one, otherwise a
+                # database whose SELECT does not observe pending ORM inserts
+                # can assign the same (conversation_id, sequence) twice.
+                db.flush()
                 warning = {
                     "message": repaired["message"],
                     "reason": repaired["reason"],
