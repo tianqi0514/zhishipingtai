@@ -109,5 +109,6 @@ def test_presentation_copy_is_not_persistently_shown() -> None:
 
 
 def test_runtime_capability_uses_business_facing_engine_name() -> None:
-    assert "CAPABILITY_DISPLAY_NAMES={Semantica:'语义建模引擎'}" in APP
+    assert "CAPABILITY_DISPLAY_NAMES={semantica:'语义建模引擎'}" in APP
+    assert "Semantica" not in APP
     assert APP.count("capabilityDisplayName(x.name)") == 2

@@ -25,8 +25,8 @@ const jobTypeLabel=value=>JOB_TYPE_LABELS[value]||String(value||'任务').replac
 function jobDurableTarget(row={}){const input=row.input||{},target=input.version_id||input.source_id||input.inference_run_id||input.curation_batch_id||input.mapping_id||input.space_id||row.id||'';return `${row.job_type||'job'}:${target}`}
 function unresolvedFailedJobs(rows=[]){const latest=new Map();for(const row of rows){const key=jobDurableTarget(row);if(!latest.has(key))latest.set(key,row)}return [...latest.values()].filter(row=>row.target_current!==false&&['failed','partial_failed'].includes(row.status))}
 const JOB_STEP_LABELS={normalize_split:'内容切片',document_profile:'文档画像',semantic_extract:'图谱语义抽取',governance:'实体关系治理',graph_publish:'图谱发布',index_publish:'检索索引发布',resolve_effective:'读取治理结果'};
-const CAPABILITY_DISPLAY_NAMES={Semantica:'语义建模引擎'};
-const capabilityDisplayName=name=>CAPABILITY_DISPLAY_NAMES[name]||name;
+const CAPABILITY_DISPLAY_NAMES={semantica:'语义建模引擎'};
+const capabilityDisplayName=name=>CAPABILITY_DISPLAY_NAMES[String(name||'').toLowerCase()]||name;
 const KNOWLEDGE_PROCESSING_LABELS={vector:'仅检索',graph:'仅图谱',both:'检索 + 图谱'};
 const knowledgeProcessingLabel=value=>KNOWLEDGE_PROCESSING_LABELS[value]||KNOWLEDGE_PROCESSING_LABELS.both;
 const knowledgeProcessingTargetLabel=value=>({vector:'检索索引',graph:'知识图谱'}[value]||value);
