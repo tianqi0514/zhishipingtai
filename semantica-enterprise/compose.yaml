@@ -21,6 +21,11 @@ x-app-environment: &app-environment
   TMPDIR: /app/data
   XDG_CACHE_HOME: /app/data/model-cache
   HF_HOME: /app/data/model-cache/huggingface
+  # Keep model downloads configurable for restricted server networks. Xet is
+  # disabled by default because its CAS endpoint may remain unreachable even
+  # when a configured Hugging Face-compatible mirror is available.
+  HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}
+  HF_HUB_DISABLE_XET: ${HF_HUB_DISABLE_XET:-1}
   OPENSEARCH_URL: http://opensearch:9200
   QDRANT_URL: http://qdrant:6333
   QDRANT_SEARCH_TIMEOUT_SECONDS: ${QDRANT_SEARCH_TIMEOUT_SECONDS:-30}

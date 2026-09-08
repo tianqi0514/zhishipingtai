@@ -80,6 +80,10 @@ def test_production_build_mirrors_are_explicit_and_apply_to_api_and_asr() -> Non
     assert "API_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in env_example
     assert "ASR_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in env_example
     assert "ASR_TORCHAUDIO_CPU_WHEEL_URL=https://download.pytorch.org/whl/cpu/torchaudio-2.5.1%2Bcpu-cp310-cp310-linux_x86_64.whl" in env_example
+    assert "HF_ENDPOINT: ${HF_ENDPOINT:-https://huggingface.co}" in (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    assert "HF_HUB_DISABLE_XET: ${HF_HUB_DISABLE_XET:-1}" in (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    assert "HF_ENDPOINT=https://huggingface.co" in env_example
+    assert "HF_HUB_DISABLE_XET=1" in env_example
 
 
 def test_local_development_image_contains_demo_preflight_assets() -> None:

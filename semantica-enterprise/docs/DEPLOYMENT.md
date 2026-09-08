@@ -38,11 +38,16 @@ PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 API_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 ASR_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 ASR_TORCHAUDIO_CPU_WHEEL_URL=https://download.pytorch.org/whl/cpu/torchaudio-2.5.1%2Bcpu-cp310-cp310-linux_x86_64.whl
+HF_ENDPOINT=https://hf-mirror.com
+HF_HUB_DISABLE_XET=1
 scripts/deploy_server.sh build
 ```
 
 两个 PyTorch 索引需要分别验证：API 与 ASR 锁定的版本可能不同时出现在同一
 第三方镜像中，不能通过降低锁定版本规避构建失败。
+`HF_ENDPOINT` 只影响运行时模型仓库下载；切换镜像前必须验证模型文件完整性。
+`HF_HUB_DISABLE_XET=1` 会绕开可能在受限网络中不可达的 Xet CAS 端点，模型仍会
+持久化到 `application-data` Volume，容器重建或宿主机重启不会重复下载。
 
 ## Secret 与环境
 
