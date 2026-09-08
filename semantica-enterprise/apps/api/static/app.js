@@ -190,7 +190,7 @@ async function refreshLookups({force=false}={}){
 }
 $('#content').addEventListener('click',event=>{
   const createSpace=event.target.closest('[data-empty-action="create-space"]');
-  if(createSpace){go('spaces').then(()=>$('#space-add')?.click());return}
+  if(createSpace){if(state.view==='spaces')editSpace();else go('spaces').then(()=>editSpace());return}
   const addSource=event.target.closest('[data-empty-action="add-source"]');if(addSource){chooseSourceType();return}
   const target=event.target.closest('[data-empty-view]')?.dataset.emptyView;if(target)go(target);
 });

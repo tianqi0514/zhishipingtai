@@ -38,6 +38,7 @@ def test_space_scoped_pages_have_one_real_prerequisite_state() -> None:
         section = APP.rsplit(f"async function {renderer}()", 1)[1][:5000] if renderer in {"renderSources", "renderCuration", "renderRetrievalDebug", "renderSearch", "renderAnalysis"} else APP.split(f"async function {renderer}", 1)[1][:5000]
         assert "spaceRequiredState" in section
     assert "data-empty-action=\"create-space\"" in APP
+    assert "if(state.view==='spaces')editSpace();else go('spaces').then(()=>editSpace())" in APP
 
 
 def test_empty_graph_has_only_clear_business_actions() -> None:
