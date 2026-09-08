@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { api, ApiError } from './api';
 import { MiaobiEditor } from './editor/MiaobiEditor';
-import type { AgentMessage, AlternativePlan, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
+import type { AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
 
 type Product = { id: string; name: string; code: string };
 type Release = { id: string; version: number; status: string };
@@ -47,6 +47,8 @@ export function App() {
   const [facts, setFacts] = useState<Fact[]>([]);
   const [plans, setPlans] = useState<AlternativePlan[]>([]);
   const [documents, setDocuments] = useState<WritingDocument[]>([]);
+  const [computations, setComputations] = useState<ComputationRun[]>([]);
+  const [gates, setGates] = useState<DecisionGate[]>([]);
   const [document, setDocument] = useState<WritingDocument | null>(null);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -66,16 +68,20 @@ export function App() {
   };
 
   const loadProjectDetails = async (id: string) => {
-    const [detail, factRows, planRows, documentRows] = await Promise.all([
+    const [detail, factRows, planRows, documentRows, computationRows, gateRows] = await Promise.all([
       api<Project>(`/writing/projects/${id}`),
       api<Fact[]>(`/writing/projects/${id}/facts`),
       api<AlternativePlan[]>(`/writing/projects/${id}/plans`),
       api<WritingDocument[]>(`/writing/projects/${id}/documents`),
+      api<ComputationRun[]>(`/writing/projects/${id}/computations`),
+      api<DecisionGate[]>(`/writing/projects/${id}/decision-gates`),
     ]);
     setProject(detail);
     setFacts(factRows);
     setPlans(planRows);
     setDocuments(documentRows);
+    setComputations(computationRows);
+    setGates(gateRows);
     setDocument(documentRows.length ? await api<WritingDocument>(`/writing/documents/${documentRows[0].id}`) : null);
   };
 
@@ -141,9 +147,9 @@ export function App() {
           <>
             {tab !== 'writing' && <PageHeader project={selected} tab={tab} />}
             {tab === 'overview' && <Overview project={project || selected} facts={facts} plans={plans} documents={documents} onContinue={(next) => setTab(next)} />}
-            {tab === 'facts' && <Facts facts={facts} />}
-            {tab === 'reasoning' && <Reasoning project={selected} facts={facts} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
-            {tab === 'plans' && <Plans projectId={selected.id} rows={plans} onChanged={setPlans} onError={setError} />}
+            {tab === 'facts' && <Facts project={selected} facts={facts} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
+            {tab === 'reasoning' && <Reasoning project={selected} facts={facts} computations={computations} gates={gates} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
+            {tab === 'plans' && <Plans project={selected} rows={plans} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
             {tab === 'writing' && (
               <div className="writing-layout">
                 <section className="outline-pane"><b>文稿目录</b>{document ? <Outline content={document.current_version?.content || []} /> : <p>创建文稿后自动生成目录。</p>}<div className="missing-box"><AlertTriangle size={16} /><span>缺失项会在这里提示，不会由模型静默补齐。</span></div></section>
@@ -154,11 +160,11 @@ export function App() {
                   <div className="assistant-tabs">
                     {([['assistant','妙笔助手'],['evidence','引用依据'],['calculation','计算与推演'],['review','审校问题']] as const).map(([key,label]) => <button type="button" key={key} className={assistantTab === key ? 'active' : ''} onClick={() => setAssistantTab(key)}>{label}</button>)}
                   </div>
-                  <AssistantPanel tab={assistantTab} project={selected} document={document} facts={facts} plans={plans} onInsert={setInsertionRequest} onError={setError} />
+                  <AssistantPanel tab={assistantTab} project={selected} document={document} facts={facts} plans={plans} computations={computations} onInsert={setInsertionRequest} onError={setError} />
                 </aside>
               </div>
             )}
-            {tab === 'review' && <Review document={document} onError={setError} />}
+            {tab === 'review' && <Review project={selected} document={document} gates={gates} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
           </>
         )}
       </main>
@@ -188,69 +194,187 @@ function Overview({ project, facts, plans, documents, onContinue }: { project: P
   return <div className="overview-grid"><section className="hero-card"><div><span className="eyebrow">当前进度</span><h2>{steps.find((item) => !item.done)?.title || '可以进入审校发布'}</h2><p>系统不会替您跳过缺失事实、口径冲突和人工确认。</p></div><button type="button" className="primary" onClick={() => onContinue(steps.find((item) => !item.done)?.target || 'review')}>继续处理<ChevronRight size={17} /></button></section><section className="step-list">{steps.map((step, index) => <button type="button" key={step.title} onClick={() => onContinue(step.target)}><span className={step.done ? 'step done' : 'step'}>{step.done ? <CheckCircle2 size={18} /> : index + 1}</span><span><b>{step.title}</b><small>{step.detail}</small></span><ChevronRight size={17} /></button>)}</section><section className="metrics"><Metric label="已核验事实" value={`${verified}/${facts.length}`} /><Metric label="备选方案" value={String(plans.length)} /><Metric label="文稿版本" value={String(documents.length)} /><Metric label="待确认" value={String(project.pending_gates || 0)} /></section></div>;
 }
 
-function Facts({ facts }: { facts: Fact[] }) {
+function Facts({ project, facts, onChanged, onError }: { project: Project; facts: Fact[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
   const [query, setQuery] = useState('');
   const [pendingOnly, setPendingOnly] = useState(false);
+  const [decision, setDecision] = useState<{ fact: Fact; mode: 'confirm' | 'reject' | 'override' } | null>(null);
+  const [reason, setReason] = useState('已核对当前业务材料');
+  const [overrideValue, setOverrideValue] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   if (!facts.length) return <EmptyAction title="尚未形成项目事实" detail="接入灾情简报、预案、表格或数据库后，抽取结果会进入待核验事实清单。" action="前往知识资产" onClick={() => { window.location.href = '/#assets'; }} />;
   const visible = facts.filter((fact) => {
     if (pendingOnly && fact.verification_status === 'verified') return false;
     const text = `${fact.label} ${fact.fact_key} ${formatValue(fact.value)}`.toLowerCase();
     return text.includes(query.trim().toLowerCase());
   });
-  return <div className="content-card"><div className="card-toolbar"><div className="search"><Search size={16} /><input placeholder="搜索事实" value={query} onChange={(event) => setQuery(event.target.value)} /></div><button type="button" className={pendingOnly ? 'primary compact' : 'secondary'} onClick={() => setPendingOnly((value) => !value)}>{pendingOnly ? '显示全部事实' : '只看待确认'}</button></div><table><thead><tr><th>事实</th><th>当前值</th><th>来源</th><th>状态</th></tr></thead><tbody>{visible.map((fact) => <tr key={fact.id}><td><b>{fact.label}</b><small>{fact.fact_key}</small></td><td>{formatValue(fact.value)} {fact.unit || ''}</td><td>{sourceLabel(fact.source_type)}</td><td><span className={`status ${fact.verification_status}`}>{fact.verification_status === 'verified' ? '已核验' : '待确认'}</span></td></tr>)}</tbody></table>{!visible.length && <div className="empty-table">没有符合当前条件的事实</div>}</div>;
+  const openDecision = (fact: Fact, mode: 'confirm' | 'reject' | 'override') => {
+    setReason(mode === 'reject' ? '来源不足，暂不采用' : mode === 'override' ? '根据业务核验修正' : '已核对当前业务材料');
+    setOverrideValue(formatValue(fact.value));
+    setDecision({ fact, mode });
+  };
+  const submit = async () => {
+    if (!decision || submitting || reason.trim().length < 2) return;
+    setSubmitting(true);
+    try {
+      let newValue: Record<string, unknown> | undefined;
+      if (decision.mode === 'override') {
+        const originalNumber = decision.fact.value.number ?? decision.fact.value.value;
+        const parsed = Number(overrideValue);
+        newValue = typeof originalNumber === 'number' && Number.isFinite(parsed) ? { number: parsed } : { text: overrideValue.trim() };
+      }
+      await api(`/writing/projects/${project.id}/facts/${decision.fact.id}/confirm`, {
+        method: 'POST', body: { decision: decision.mode, reason: reason.trim(), ...(newValue ? { new_value: newValue } : {}) },
+      });
+      setDecision(null);
+      await onChanged();
+    } catch (failure) { onError(failure instanceof Error ? failure.message : '事实处理失败'); }
+    finally { setSubmitting(false); }
+  };
+  return <><div className="content-card"><div className="card-toolbar"><div className="search"><Search size={16} /><input placeholder="搜索事实" value={query} onChange={(event) => setQuery(event.target.value)} /></div><button type="button" className={pendingOnly ? 'primary compact' : 'secondary'} onClick={() => setPendingOnly((value) => !value)}>{pendingOnly ? '显示全部事实' : '只看待确认'}</button></div><div className="table-scroll"><table><thead><tr><th>事实</th><th>当前值</th><th>来源</th><th>版本</th><th>状态</th><th>操作</th></tr></thead><tbody>{visible.map((fact) => <tr key={fact.id}><td><b>{fact.label}</b><small>{fact.fact_key}</small></td><td>{formatValue(fact.value)} {fact.unit || ''}</td><td>{sourceLabel(fact.source_type)}</td><td>v{fact.version}</td><td><span className={`status ${fact.verification_status}`}>{fact.verification_status === 'verified' ? '已核验' : fact.verification_status === 'rejected' ? '已驳回' : '待确认'}</span></td><td><div className="row-actions">{fact.verification_status !== 'verified' && <><button type="button" onClick={() => openDecision(fact, 'confirm')}>确认</button><button type="button" onClick={() => openDecision(fact, 'reject')}>驳回</button></>}<button type="button" onClick={() => openDecision(fact, 'override')}>修正</button></div></td></tr>)}</tbody></table></div>{!visible.length && <div className="empty-table">没有符合当前条件的事实</div>}</div>{decision && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setDecision(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true"><div className="dialog-head"><div><span className="eyebrow">业务核验</span><h2>{decision.mode === 'confirm' ? '确认事实' : decision.mode === 'reject' ? '驳回事实' : '修正事实'}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setDecision(null)}>×</button></div><div className="fact-preview"><b>{decision.fact.label}</b><span>{formatValue(decision.fact.value)} {decision.fact.unit || ''}</span></div>{decision.mode === 'override' && <label>修正后的值<input value={overrideValue} onChange={(event) => setOverrideValue(event.target.value)} autoFocus /></label>}<label>处理理由<textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={3} /></label><p className="field-help">修正会创建新事实版本，原值继续保留用于追溯；依赖该事实的正文块会被标记为需要更新。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setDecision(null)}>取消</button><button type="button" className="primary" disabled={submitting || reason.trim().length < 2 || (decision.mode === 'override' && !overrideValue.trim())} onClick={() => void submit()}>{submitting ? '处理中…' : '确认处理'}</button></div></section></div>}</>;
 }
 
-function Reasoning({ project, facts, onChanged, onError }: { project: Project; facts: Fact[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
-  const [running, setRunning] = useState<'criteria' | 'reason' | ''>('');
+function Reasoning({ project, facts, computations, gates, onChanged, onError }: { project: Project; facts: Fact[]; computations: ComputationRun[]; gates: DecisionGate[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
+  const [running, setRunning] = useState<'criteria' | 'reason' | 'compute' | 'confirm' | ''>('');
   const criteria = facts.filter((item) => item.fact_key.startsWith('criterion_'));
   const conclusion = facts.find((item) => item.fact_key === 'disaster_grade');
-  const run = async (step: 'criteria' | 'reason') => {
+  const latestMetrics = new Map<string, ComputationRun>();
+  computations.forEach((item) => {
+    const key = item.result.output_fact?.fact_key;
+    if (key && !latestMetrics.has(key)) latestMetrics.set(key, item);
+  });
+  const run = async (step: 'criteria' | 'reason' | 'compute') => {
     if (running) return;
     setRunning(step);
     try {
-      await api(step === 'criteria' ? `/writing/projects/${project.id}/criteria/evaluate` : `/writing/projects/${project.id}/reason`, { method: 'POST', body: step === 'reason' ? { mode: 'preview' } : undefined });
+      const path = step === 'criteria' ? 'criteria/evaluate' : step === 'reason' ? 'reason' : 'computations/run-baseline';
+      await api(`/writing/projects/${project.id}/${path}`, { method: 'POST', body: step === 'reason' ? { mode: 'preview' } : undefined });
       await onChanged();
     } catch (reason) { onError(reason instanceof Error ? reason.message : '规则推演失败'); }
     finally { setRunning(''); }
   };
-  return <div className="two-columns"><section className="content-card"><span className="eyebrow">业务推演</span><h2>从已核验事实形成可解释结论</h2><div className="reason-flow"><span>确定性判据</span><ChevronRight /><span>语义规则推演</span><ChevronRight /><span>证据链</span><ChevronRight /><span>人工确认</span></div><div className="notice"><ShieldCheck /><div><b>模型不负责正式结论</b><p>数值条件先由确定性判据服务计算，再由规则推演引擎基于事实形成结论。</p></div></div><div className="reason-actions"><button type="button" className="secondary" disabled={!!running} onClick={() => void run('criteria')}>{running === 'criteria' ? '判据计算中…' : criteria.length ? '重新计算判据' : '计算等级判据'}</button><button type="button" className="primary" disabled={!!running || criteria.length < 2} onClick={() => void run('reason')}>{running === 'reason' ? '推演中…' : '预览推演结论'}</button></div></section><section className="content-card"><h3>执行结果</h3><div className="timeline"><p><i className={criteria.length >= 2 ? 'done' : ''} />确定性判据 {criteria.length >= 2 ? '已完成' : '待执行'}</p><p><i className={conclusion ? 'done' : ''} />规则推演 {conclusion ? '已完成' : '待执行'}</p><p><i className={conclusion?.verification_status === 'verified' ? 'done' : ''} />人工确认 {conclusion ? (conclusion.verification_status === 'verified' ? '已确认' : '待确认') : '待推演'}</p></div>{criteria.map((item) => <div className="reason-result" key={item.id}><b>{item.label}</b><span>{item.value.boolean ? '成立' : '不成立'}</span></div>)}{conclusion && <div className="reason-conclusion"><small>推演结论</small><b>{formatValue(conclusion.value)}</b><span>需要业务人员确认后才能作为正式方案依据</span></div>}</section></div>;
+  const confirmConclusion = async () => {
+    if (!conclusion || running) return;
+    setRunning('confirm');
+    try {
+      await api(`/writing/projects/${project.id}/facts/${conclusion.id}/confirm`, { method: 'POST', body: { decision: 'confirm', reason: '已核验判据与推演证据链' } });
+      await onChanged();
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '结论确认失败'); }
+    finally { setRunning(''); }
+  };
+  return <div className="reasoning-stack"><div className="two-columns"><section className="content-card"><span className="eyebrow">业务推演</span><h2>从已核验事实形成可解释结论</h2><div className="reason-flow"><span>确定性判据</span><ChevronRight /><span>语义规则推演</span><ChevronRight /><span>证据链</span><ChevronRight /><span>人工确认</span></div><div className="notice"><ShieldCheck /><div><b>模型不负责正式结论</b><p>数值条件先由确定性判据服务计算，再由规则推演引擎基于事实形成结论。</p></div></div><div className="reason-actions"><button type="button" className="secondary" disabled={!!running} onClick={() => void run('criteria')}>{running === 'criteria' ? '判据计算中…' : criteria.length ? '重新计算判据' : '计算等级判据'}</button><button type="button" className="primary" disabled={!!running || criteria.length < 2} onClick={() => void run('reason')}>{running === 'reason' ? '推演中…' : '预览推演结论'}</button></div></section><section className="content-card"><h3>执行结果</h3><div className="timeline"><p><i className={criteria.length >= 2 ? 'done' : ''} />确定性判据 {criteria.length >= 2 ? '已完成' : '待执行'}</p><p><i className={conclusion ? 'done' : ''} />规则推演 {conclusion ? '已完成' : '待执行'}</p><p><i className={conclusion?.verification_status === 'verified' ? 'done' : ''} />人工确认 {conclusion ? (conclusion.verification_status === 'verified' ? '已确认' : '待确认') : '待推演'}</p></div>{criteria.map((item) => <div className="reason-result" key={item.id}><b>{item.label}</b><span>{item.value.boolean ? '成立' : '不成立'}</span></div>)}{conclusion && <div className="reason-conclusion"><small>推演结论</small><b>{formatValue(conclusion.value)}</b><span>{conclusion.verification_status === 'verified' ? '已由业务人员确认，可作为方案依据' : '需要业务人员确认后才能作为正式方案依据'}</span>{conclusion.verification_status !== 'verified' && <button type="button" className="primary compact" disabled={!!running} onClick={() => void confirmConclusion()}>{running === 'confirm' ? '确认中…' : '确认该结论'}</button>}</div>}</section></div><section className="content-card computation-workbench"><div className="card-toolbar"><div><span className="eyebrow">确定性计算</span><h2>资源需求与缺口</h2></div><button type="button" className="primary" disabled={!!running} onClick={() => void run('compute')}>{running === 'compute' ? '计算中…' : latestMetrics.size ? '重新计算受控公式' : '计算资源缺口'}</button></div>{latestMetrics.size ? <div className="calculation-grid">{Array.from(latestMetrics.values()).map((item) => <article key={item.id}><small>{item.result.output_fact?.label || item.result.operation}</small><b>{item.result.value} {item.result.output_fact?.unit || ''}</b><span>{Object.values(item.result.dependencies || {}).join('、')} · 不可直接手改</span></article>)}</div> : <div className="empty-mini">确认搜救人员、床位和帐篷的需求与可用量后，可一次运行四项版本化公式。</div>}</section><section className="content-card"><div className="card-toolbar"><div><span className="eyebrow">人工确认闸门</span><h2>发布前业务决策</h2></div><span className="status">{gates.filter((item) => item.status !== 'confirmed').length} 项待确认</span></div><div className="gate-list">{gates.map((gate) => <div key={gate.id}><span className={gate.status === 'confirmed' ? 'step done' : 'step'}>{gate.status === 'confirmed' ? <CheckCircle2 size={16} /> : '!'}</span><b>{gate.name}</b><small>{gate.status === 'confirmed' ? '已确认' : '需要在审校发布前确认'}</small></div>)}</div></section></div>;
 }
 
-function Plans({ projectId, rows, onChanged, onError }: { projectId: string; rows: AlternativePlan[]; onChanged: (rows: AlternativePlan[]) => void; onError: (message: string) => void }) {
+function Plans({ project, rows, onChanged, onError }: { project: Project; rows: AlternativePlan[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
   const [selecting, setSelecting] = useState('');
-  if (!rows.length) return <EmptyAction title="尚未生成备选方案" detail="先完成事实确认、规则推演和资源计算，再用不同优化目标真实求解。" />;
+  const [generating, setGenerating] = useState(false);
+  const generate = async () => {
+    if (generating) return;
+    setGenerating(true);
+    try {
+      await api(`/writing/projects/${project.id}/plans/generate`, { method: 'POST', body: { count: 3, inputs: {} } });
+      await onChanged();
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '备选方案生成失败'); }
+    finally { setGenerating(false); }
+  };
+  if (!rows.length) return <EmptyAction title="尚未生成备选方案" detail="先完成事实确认和资源计算，再根据任务中接入的路线网络，用三个不同优化目标真实求解。" action={generating ? '求解中…' : '生成三套方案'} onClick={() => void generate()} />;
   const select = async (plan: AlternativePlan) => {
     if (plan.status === 'selected' || selecting) return;
     setSelecting(plan.id);
     try {
-      await api(`/writing/projects/${projectId}/plans/${plan.id}/select`, { method: 'POST', body: { reason: '业务人员在方案比较页确认' } });
-      onChanged(rows.map((item) => ({ ...item, status: item.id === plan.id ? 'selected' : 'candidate' })));
+      await api(`/writing/projects/${project.id}/plans/${plan.id}/select`, { method: 'POST', body: { reason: '业务人员在方案比较页确认' } });
+      await onChanged();
     } catch (reason) { onError(reason instanceof Error ? reason.message : '选择方案失败'); }
     finally { setSelecting(''); }
   };
-  return <div className="plan-grid">{rows.map((plan) => <article className={plan.status === 'selected' ? 'plan-card selected' : 'plan-card'} key={plan.id}><span className="status">{plan.status === 'selected' ? '已选择' : '待比较'}</span><h2>{plan.name}</h2><p>{plan.result.route?.path?.join(' → ') || '暂无路线'}</p><dl><div><dt>预计耗时</dt><dd>{plan.result.route?.minutes ?? '—'} 分钟</dd></div><div><dt>路线风险</dt><dd>{plan.result.route?.risk ?? '—'}</dd></div><div><dt>未解决缺口</dt><dd>{plan.unresolved_gaps.length} 项</dd></div></dl><button type="button" disabled={plan.status === 'selected' || !!selecting} className={plan.status === 'selected' ? 'secondary' : 'primary'} onClick={() => void select(plan)}>{plan.status === 'selected' ? '当前方案' : selecting === plan.id ? '确认中…' : '选择方案'}</button></article>)}</div>;
+  const latest = ['speed','safety','balanced'].map((key) => rows.find((item) => item.plan_key === key)).filter(Boolean) as AlternativePlan[];
+  return <div className="plans-page"><div className="plan-page-actions"><div><span className="eyebrow">算法方案比较</span><h2>同一组输入，不同优化目标</h2><p>三套方案由真实路线网络与资源约束计算，不是语言改写。</p></div><button type="button" className="secondary" disabled={generating} onClick={() => void generate()}>{generating ? '重新求解中…' : '重新生成'}</button></div><div className="plan-grid">{latest.map((plan) => <article className={plan.status === 'selected' ? 'plan-card selected' : 'plan-card'} key={plan.id}><span className="status">{plan.status === 'selected' ? '已选择' : '待比较'}</span><h2>{plan.name}</h2><p>{plan.result.route?.path?.join(' → ') || '暂无路线'}</p><dl><div><dt>预计耗时</dt><dd>{plan.result.route?.minutes ?? '—'} 分钟</dd></div><div><dt>路线风险</dt><dd>{plan.result.route?.risk ?? '—'}</dd></div><div><dt>未解决缺口</dt><dd>{plan.unresolved_gaps.length} 项</dd></div></dl><button type="button" disabled={plan.status === 'selected' || !!selecting} className={plan.status === 'selected' ? 'secondary' : 'primary'} onClick={() => void select(plan)}>{plan.status === 'selected' ? '当前方案' : selecting === plan.id ? '确认中…' : '选择方案'}</button></article>)}</div></div>;
 }
 
-function Review({ document, onError }: { document: WritingDocument | null; onError: (message: string) => void }) {
+function Review({ project, document, gates, onChanged, onError }: { project: Project; document: WritingDocument | null; gates: DecisionGate[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
   const [checking, setChecking] = useState(false);
   const [issues, setIssues] = useState<Array<{ code: string; message: string }>>([]);
+  const [pendingGates, setPendingGates] = useState<DecisionGate[]>([]);
+  const [confirming, setConfirming] = useState('');
+  const [exporting, setExporting] = useState('');
+  const [exports, setExports] = useState<ExportJob[]>([]);
+  useEffect(() => {
+    setIssues([]);
+    setPendingGates([]);
+    if (document) api<ExportJob[]>(`/writing/documents/${document.id}/exports`).then(setExports).catch(() => setExports([]));
+    else setExports([]);
+  }, [document?.id]);
   const validate = async () => {
     if (!document) return;
     setChecking(true);
     try {
-      const result = await api<{ issues: Array<{ code: string; message: string }> }>(`/writing/documents/${document.id}/validate`, { method: 'POST', body: { for_publish: true } });
+      const result = await api<{ issues: Array<{ code: string; message: string }>; pending_decision_gates: DecisionGate[] }>(`/writing/documents/${document.id}/validate`, { method: 'POST', body: { for_publish: true } });
       setIssues(result.issues || []);
+      setPendingGates(result.pending_decision_gates || []);
     } catch (reason) { onError(reason instanceof Error ? reason.message : '审校失败'); }
     finally { setChecking(false); }
   };
-  return <div className="two-columns"><section className="content-card"><h2>发布前检查</h2>{document ? <div className="check-list"><p><CheckCircle2 />文稿已创建</p><p><AlertTriangle />必须完成全部人工确认节点</p><p><AlertTriangle />可信块不得存在失效或未核验依据</p></div> : <p>请先创建文稿。</p>}<button type="button" className="primary" disabled={!document || checking} onClick={() => void validate()}>{checking ? '检查中…' : '执行审校'}</button>{issues.length > 0 && <ul className="issue-list">{issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul>}{document && !checking && issues.length === 0 && <p className="field-help">点击“执行审校”后显示真实检查结果。</p>}</section><section className="content-card"><h2>正式导出</h2><p>导出服务接入后才会开放格式选择；当前页面不提供无效下载按钮。</p><span className="status draft">导出服务建设中</span></section></div>;
+  const confirmGate = async (gate: DecisionGate) => {
+    if (confirming) return;
+    setConfirming(gate.id);
+    try {
+      await api(`/writing/projects/${project.id}/decision-gates/${gate.id}/records`, { method: 'POST', body: { decision: 'confirm', reason: '业务人员在审校发布页确认' } });
+      await onChanged();
+      setPendingGates((current) => current.filter((item) => item.id !== gate.id));
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '确认节点处理失败'); }
+    finally { setConfirming(''); }
+  };
+  const createExport = async (format: ExportJob['output_format']) => {
+    if (!document || exporting) return;
+    setExporting(format);
+    try {
+      const job = await api<ExportJob>(`/writing/documents/${document.id}/exports`, { method: 'POST', body: { output_format: format } });
+      setExports((current) => [job, ...current]);
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '导出失败'); }
+    finally { setExporting(''); }
+  };
+  const unresolved = gates.filter((item) => item.required && item.status !== 'confirmed');
+  return <div className="review-page"><div className="two-columns"><section className="content-card"><h2>发布前检查</h2>{document ? <div className="check-list"><p><CheckCircle2 />文稿已创建并具有不可变版本</p><p><AlertTriangle />{unresolved.length ? `仍有 ${unresolved.length} 个人工确认节点` : '人工确认节点已完成'}</p><p><AlertTriangle />可信块不得存在失效或未核验依据</p></div> : <p>请先创建文稿。</p>}<button type="button" className="primary" disabled={!document || checking} onClick={() => void validate()}>{checking ? '检查中…' : '执行审校'}</button>{issues.length > 0 && <ul className="issue-list">{issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul>}{pendingGates.length > 0 && <div className="gate-review-list">{pendingGates.map((gate) => <div key={gate.id}><span>{gate.name}</span><button type="button" disabled={!!confirming} onClick={() => void confirmGate(gate)}>{confirming === gate.id ? '确认中…' : '确认'}</button></div>)}</div>}{document && !checking && issues.length === 0 && pendingGates.length === 0 && <p className="field-help">点击“执行审校”核对正文来源和发布条件。</p>}</section><section className="content-card"><h2>正式导出</h2><p>Word 与 PDF 只有在全部业务节点确认、可信块有效后才能生成；证据数据可另行导出。</p><div className="export-actions">{(['docx','pdf','json','xlsx','geojson'] as const).map((format) => <button type="button" key={format} className={format === 'docx' || format === 'pdf' ? 'primary' : 'secondary'} disabled={!document || !!exporting} onClick={() => void createExport(format)}>{exporting === format ? '生成中…' : format.toUpperCase()}</button>)}</div></section></div><section className="content-card export-history"><h2>导出记录</h2>{exports.length ? <div className="export-list">{exports.map((job) => <div key={job.id}><span className={`status ${job.status}`}>{job.status === 'succeeded' ? '已生成' : job.status === 'failed' ? '失败' : `${job.progress}%`}</span><b>{job.manifest?.filename || job.output_format.toUpperCase()}</b><small>{job.checksum ? `校验值 ${job.checksum.slice(0, 12)}…` : job.error_message || ''}</small>{job.status === 'succeeded' && <a className="secondary" href={`/api/v1/writing/exports/${job.id}/download`}>下载</a>}</div>)}</div> : <div className="empty-mini">完成审校后生成的文件会保留版本、模板和校验记录。</div>}</section></div>;
 }
 
-function AssistantPanel({ tab, project, document, facts, plans, onInsert, onError }: { tab: string; project: Project; document: WritingDocument | null; facts: Fact[]; plans: AlternativePlan[]; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
+function AssistantPanel({ tab, project, document, facts, plans, computations, onInsert, onError }: { tab: string; project: Project; document: WritingDocument | null; facts: Fact[]; plans: AlternativePlan[]; computations: ComputationRun[]; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
   if (tab === 'evidence') return <EvidencePanel project={project} document={document} onInsert={onInsert} onError={onError} />;
-  if (tab === 'calculation') return <div className="assistant-content"><h3>计算与推演</h3><p>已核验事实 {facts.filter((item) => item.verification_status === 'verified').length} 条，备选方案 {plans.length} 套。</p><div className="empty-mini">选择测算值或推演结论查看输入、公式、规则和证据。</div></div>;
+  if (tab === 'calculation') return <CalculationPanel project={project} document={document} facts={facts} plans={plans} computations={computations} onInsert={onInsert} onError={onError} />;
   if (tab === 'review') return <div className="assistant-content"><h3>审校问题</h3><div className="empty-mini">执行审校后按严重程度列出事实、引用、结构和表述问题。</div></div>;
   return <WritingAssistant project={project} document={document} onInsert={onInsert} onError={onError} />;
+}
+
+function CalculationPanel({ project, document, facts, plans, computations, onInsert, onError }: { project: Project; document: WritingDocument | null; facts: Fact[]; plans: AlternativePlan[]; computations: ComputationRun[]; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
+  const [inserting, setInserting] = useState('');
+  const latest = new Map<string, ComputationRun>();
+  computations.forEach((item) => {
+    const key = item.result.output_fact?.fact_key;
+    if (key && !latest.has(key)) latest.set(key, item);
+  });
+  const insertMetric = async (run: ComputationRun) => {
+    if (!document || inserting) return;
+    setInserting(run.id);
+    const label = run.result.output_fact?.label || '确定性测算';
+    const unit = run.result.output_fact?.unit || '';
+    const block: PlateNode = { id: crypto.randomUUID(), type: 'computed_metric', formula: run.result.operation, freshness_status: 'current', children: [{ text: `${label}：${run.result.value}${unit}` }] };
+    try {
+      await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'computation', source_id: run.id, computation_run_id: run.id, evidence_ids: run.input_fact_ids, content_hash: await sha256(block), verification_status: 'verified', freshness_status: 'current', metadata: { formula: run.result.operation, dependencies: run.result.dependencies || {}, project_id: project.id } } });
+      onInsert(block);
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '插入测算结果失败'); }
+    finally { setInserting(''); }
+  };
+  const insertPlan = async (plan: AlternativePlan) => {
+    if (!document || inserting) return;
+    setInserting(plan.id);
+    const route = plan.result.route;
+    const block: PlateNode = { id: crypto.randomUUID(), type: 'alternative_plan', freshness_status: 'current', children: [{ text: `${plan.name}：${route?.path?.join(' → ') || '无路线'}，预计 ${route?.minutes ?? '—'} 分钟，路线风险 ${route?.risk ?? '—'}。` }] };
+    try {
+      await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'mcp_tool', source_id: plan.id, evidence_ids: [], content_hash: await sha256(block), verification_status: plan.status === 'selected' ? 'verified' : 'unverified', freshness_status: 'current', metadata: { plan_key: plan.plan_key, project_id: project.id } } });
+      onInsert(block);
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '插入备选方案失败'); }
+    finally { setInserting(''); }
+  };
+  const selected = plans.find((item) => item.status === 'selected');
+  return <div className="assistant-content"><h3>计算与推演</h3><p>已核验事实 {facts.filter((item) => item.verification_status === 'verified').length} 条；所有数值保留输入、公式与运行版本。</p><div className="calculation-list">{Array.from(latest.values()).map((run) => <article key={run.id}><div><b>{run.result.output_fact?.label || run.result.operation}</b><strong>{run.result.value} {run.result.output_fact?.unit || ''}</strong></div><small>{Object.entries(run.result.dependencies || {}).map(([name, key]) => `${name}←${key}`).join('；')}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insertMetric(run)}>{inserting === run.id ? '插入中…' : '插入测算块'}</button></article>)}</div>{selected && <div className="selected-plan-mini"><span className="eyebrow">已选方案</span><b>{selected.name}</b><p>{selected.result.route?.path?.join(' → ')}</p><button type="button" disabled={!document || !!inserting} onClick={() => void insertPlan(selected)}>{inserting === selected.id ? '插入中…' : '插入方案块'}</button></div>}{!latest.size && <div className="empty-mini">先在“推演工作台”运行确定性资源计算，再将结果作为可信块插入正文。</div>}</div>;
 }
 
 function WritingAssistant({ project, document, onInsert, onError }: { project: Project; document: WritingDocument | null; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {

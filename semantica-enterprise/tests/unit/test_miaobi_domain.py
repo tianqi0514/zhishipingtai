@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import tempfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ from packages.platform.writing import (
     validate_scenario_contract,
     validate_scenario_input,
 )
+from packages.platform.writing_export import build_export_artifact
 from packages.semantica_adapter.analyze import run_graph_inference
 
 
@@ -94,9 +97,11 @@ def test_alternative_plans_use_different_objectives_and_actual_paths() -> None:
             "指挥部": [
                 {"to": "快速通道", "minutes": 10, "risk": 7, "available": True},
                 {"to": "安全通道", "minutes": 24, "risk": 1, "available": True},
+                {"to": "综合通道", "minutes": 17.5, "risk": 3, "available": True},
             ],
             "快速通道": [{"to": "震中", "minutes": 10, "risk": 7, "available": True}],
             "安全通道": [{"to": "震中", "minutes": 24, "risk": 1, "available": True}],
+            "综合通道": [{"to": "震中", "minutes": 17.5, "risk": 3, "available": True}],
         },
         "resources": [{"name": "搜救人员", "unit": "人", "required": 500, "available": 320}],
     }
@@ -104,6 +109,8 @@ def test_alternative_plans_use_different_objectives_and_actual_paths() -> None:
     assert [item["objective"] for item in plans] == ["speed", "safety", "balanced"]
     assert plans[0]["route"]["path"] == ["指挥部", "快速通道", "震中"]
     assert plans[1]["route"]["path"] == ["指挥部", "安全通道", "震中"]
+    assert plans[2]["route"]["path"] == ["指挥部", "综合通道", "震中"]
+    assert len({tuple(item["route"]["path"]) for item in plans}) == 3
     assert all(item["unresolved_gaps"][0]["gap"] == 180 for item in plans)
 
 
@@ -178,3 +185,34 @@ def test_earthquake_numeric_criteria_feed_real_semantica_datalog() -> None:
         for item in result["items"]
     )
     assert len(result["items"][0]["evidence"]) == 2
+
+
+def test_production_export_builds_real_docx_xlsx_json_and_geojson() -> None:
+    content = [
+        {"id": "heading", "type": "h1", "children": [{"text": "灾情研判"}]},
+        {"id": "metric", "type": "computed_metric", "children": [{"text": "搜救人员缺口：180人"}]},
+    ]
+    facts = [{"label": "震级", "value": {"number": 6.2}, "unit": "级", "source_type": "official_brief", "version": 1, "verification_status": "verified"}]
+    computations = [{"result": {"operation": "resource_gap", "value": 180, "dependencies": {"required": "rescue_required"}, "output_fact": {"label": "搜救人员缺口", "unit": "人"}}}]
+    plans = [{"name": "综合平衡", "objective": "balanced", "status": "selected", "result": {"route": {"path": ["指挥部", "震中"], "minutes": 35, "risk": 6}}}]
+    audit_summary = {"knowledge_product_release": 1, "scenario_package_version": 1, "verified_fact_count": 1, "computation_count": 1, "reasoning_count": 1, "selected_plan": "综合平衡"}
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for output_format in ("docx", "xlsx", "json", "geojson"):
+            target = root / f"artifact.{output_format}"
+            build_export_artifact(
+                target,
+                output_format=output_format,
+                title="积石山县地震应急处置方案",
+                content=content,
+                facts=facts,
+                computations=computations,
+                plans=plans,
+                audit_summary=audit_summary,
+                coordinates={"指挥部": [103.2, 35.6], "震中": [103.1, 35.7]},
+            )
+            assert target.stat().st_size > 0
+        assert zipfile.is_zipfile(root / "artifact.docx")
+        assert zipfile.is_zipfile(root / "artifact.xlsx")
+        assert json.loads((root / "artifact.json").read_text(encoding="utf-8"))["title"] == "积石山县地震应急处置方案"
+        assert json.loads((root / "artifact.geojson").read_text(encoding="utf-8"))["features"][0]["geometry"]["type"] == "LineString"

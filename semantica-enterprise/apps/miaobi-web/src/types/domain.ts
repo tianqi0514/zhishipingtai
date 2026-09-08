@@ -29,6 +29,7 @@ export type Project = {
   role?: string;
   facts?: number;
   pending_gates?: number;
+  config?: Record<string, unknown>;
 };
 
 export type WritingDocument = {
@@ -48,6 +49,45 @@ export type Fact = {
   source_type: string;
   verification_status: string;
   freshness_status: string;
+  fact_type: string;
+  source_id?: string;
+  source_version?: string;
+  source_locator?: Record<string, unknown>;
+  version: number;
+};
+
+export type ComputationRun = {
+  id: string;
+  status: string;
+  inputs: Record<string, unknown>;
+  result: {
+    operation: string;
+    value: number;
+    dependencies?: Record<string, string>;
+    output_fact?: { fact_key?: string; label?: string; unit?: string };
+  };
+  input_fact_ids: string[];
+  checksum: string;
+  created_at: string;
+};
+
+export type DecisionGate = {
+  id: string;
+  gate_key: string;
+  name: string;
+  required: boolean;
+  status: string;
+};
+
+export type ExportJob = {
+  id: string;
+  output_format: 'docx' | 'pdf' | 'json' | 'xlsx' | 'geojson';
+  status: string;
+  progress: number;
+  checksum?: string;
+  created_at: string;
+  manifest?: { filename?: string; document_version?: number };
+  error_message?: string;
 };
 
 export type AlternativePlan = {

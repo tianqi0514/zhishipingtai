@@ -260,6 +260,46 @@ def shortest_path(
     raise ValueError(f"从 {start} 到 {target} 没有可用路线")
 
 
+def _route_candidates(
+    graph: dict[str, list[dict[str, Any]]],
+    start: str,
+    target: str,
+    *,
+    max_hops: int = 12,
+    max_candidates: int = 200,
+) -> list[dict[str, Any]]:
+    """Enumerate bounded simple paths for explainable alternative planning.
+
+    A single shortest path cannot produce genuinely different alternatives.
+    The graph is small and project-scoped, so a bounded DFS gives the planner
+    auditable candidates without accepting executable expressions or canned
+    route answers.
+    """
+    candidates: list[dict[str, Any]] = []
+    stack: list[tuple[str, list[str], float, float]] = [(start, [start], 0.0, 0.0)]
+    while stack and len(candidates) < max_candidates:
+        node, path, minutes, risk = stack.pop()
+        if node == target:
+            candidates.append({"path": path, "minutes": minutes, "risk": risk})
+            continue
+        if len(path) - 1 >= max_hops:
+            continue
+        for edge in reversed(graph.get(node, [])):
+            if edge.get("available") is False:
+                continue
+            nxt = str(edge.get("to") or "")
+            if not nxt or nxt in path:
+                continue
+            edge_minutes = float(edge.get("minutes") or 0)
+            edge_risk = float(edge.get("risk") or 0)
+            if edge_minutes < 0 or edge_risk < 0:
+                raise ValueError("路线时间和风险不能为负数")
+            stack.append((nxt, [*path, nxt], minutes + edge_minutes, risk + edge_risk))
+    if not candidates:
+        raise ValueError(f"从 {start} 到 {target} 没有可用路线")
+    return candidates
+
+
 def generate_alternative_plans(inputs: dict[str, Any], count: int = 3) -> list[dict[str, Any]]:
     if count < 2 or count > 3:
         raise ValueError("当前生产策略支持生成 2 或 3 套方案")
@@ -269,17 +309,35 @@ def generate_alternative_plans(inputs: dict[str, Any], count: int = 3) -> list[d
     if not isinstance(graph, dict) or not start or not target:
         raise ValueError("生成方案需要 route_graph、route_start 和 route_target")
     profiles = ["speed", "safety", "balanced"][:count]
+    candidates = _route_candidates(graph, start, target)
+    unique_paths = {tuple(item["path"]) for item in candidates}
+    if len(unique_paths) < count:
+        raise ValueError(f"当前路线网络只有 {len(unique_paths)} 条可用路径，无法生成 {count} 套真实差异方案")
     results: list[dict[str, Any]] = []
+    used_paths: set[tuple[str, ...]] = set()
     for key in profiles:
         profile = PLAN_PROFILES[key]
         weights = profile["weights"]
-        route = shortest_path(
-            graph,
-            start,
-            target,
-            time_weight=float(weights["time"]),
-            risk_weight=float(weights["risk"]),
+        ranked = sorted(
+            candidates,
+            key=lambda item: (
+                float(weights["time"]) * float(item["minutes"])
+                + float(weights["risk"]) * float(item["risk"]),
+                float(item["minutes"]),
+                float(item["risk"]),
+                tuple(item["path"]),
+            ),
         )
+        route = next(item for item in ranked if tuple(item["path"]) not in used_paths)
+        used_paths.add(tuple(route["path"]))
+        route = {
+            **route,
+            "score": round(
+                float(weights["time"]) * float(route["minutes"])
+                + float(weights["risk"]) * float(route["risk"]),
+                4,
+            ),
+        }
         resource_rows = []
         unresolved = []
         for resource in inputs.get("resources") or []:
@@ -305,7 +363,11 @@ def generate_alternative_plans(inputs: dict[str, Any], count: int = 3) -> list[d
                 "route": route,
                 "resource_allocation": resource_rows,
                 "unresolved_gaps": unresolved,
-                "algorithm": {"name": "weighted-dijkstra", "version": "1.0.0"},
+                "algorithm": {
+                    "name": "bounded-multi-objective-simple-path",
+                    "version": "1.0.0",
+                    "candidate_count": len(unique_paths),
+                },
                 "input_fingerprint": content_hash(inputs),
             }
         )

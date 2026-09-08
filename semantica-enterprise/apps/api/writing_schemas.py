@@ -132,17 +132,25 @@ class ComputationRequest(StrictModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     rounding: dict[str, Any] = Field(default_factory=lambda: {"mode": "half_up", "digits": 0})
     input_fact_ids: list[str] = Field(default_factory=list)
+    input_fact_map: dict[str, str] = Field(default_factory=dict)
+    output_fact_key: str | None = Field(default=None, min_length=1, max_length=160)
+    output_label: str | None = Field(default=None, min_length=1, max_length=300)
+    output_unit: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def require_definition_or_operation(self):
         if not self.definition_version_id and not self.operation:
             raise ValueError("必须选择公式版本或受控公式")
+        if self.output_fact_key and not self.output_label:
+            raise ValueError("生成项目事实时必须提供结果名称")
+        if set(self.input_fact_map.values()) - set(self.input_fact_ids):
+            raise ValueError("输入事实映射只能引用 input_fact_ids 中的事实")
         return self
 
 
 class AlternativePlanGenerate(StrictModel):
     count: int = Field(default=3, ge=2, le=3)
-    inputs: dict[str, Any]
+    inputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class AlternativePlanSelect(StrictModel):

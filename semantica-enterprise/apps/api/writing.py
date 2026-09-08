@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
-import json
+from pathlib import Path
+import tempfile
 import uuid
 from typing import Any
 
 import semantica
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_current_user, has_space_permission, require_permission
-from apps.api.utils import apply_patch, serialize_row
+from apps.api.utils import apply_patch, attachment_content_disposition, serialize_row
 from apps.api.writing_schemas import (
     AlternativePlanGenerate,
     AlternativePlanSelect,
@@ -38,6 +40,7 @@ from apps.api.writing_schemas import (
     WritingProjectUpdate,
     WritingRecomputeRequest,
     WritingReasoningRequest,
+    WritingExportCreate,
 )
 from packages.platform.audit import audit
 from packages.platform.curation import effective_chunk_text
@@ -59,6 +62,8 @@ from packages.platform.models import (
     KnowledgeProductReleaseItem,
     Document,
     DocumentVersion,
+    ExportJob,
+    ExportTemplateVersion,
     QueryRun,
     ProjectFact,
     ScenarioPackage,
@@ -84,6 +89,8 @@ from packages.platform.writing import (
     validate_plate_content,
     validate_scenario_contract,
 )
+from packages.platform.writing_export import CONTENT_TYPES, build_export_artifact
+from packages.platform.storage import object_storage
 from packages.semantica_adapter.analyze import run_graph_inference
 from apps.api.conversations import (
     _cancel_runtime,
@@ -273,6 +280,91 @@ def _ensure_formula_version(db: Session, user: User, operation: str) -> Computat
         db.flush()
         definition.current_version_id = version.id
     return version
+
+
+def _fact_number(row: ProjectFact) -> float:
+    value = row.value or {}
+    number = value.get("number", value.get("value"))
+    if number is None or isinstance(number, bool):
+        raise HTTPException(status_code=409, detail=f"事实“{row.label}”不是可计算数值")
+    try:
+        return float(number)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=f"事实“{row.label}”不是可计算数值") from exc
+
+
+def _execute_computation_run(
+    db: Session,
+    *,
+    project: WritingProject,
+    user: User,
+    definition_version: ComputationDefinitionVersion,
+    inputs: dict[str, Any],
+    parameters: dict[str, Any],
+    rounding: dict[str, Any],
+    input_facts: dict[str, ProjectFact],
+    output_fact: dict[str, Any] | None = None,
+) -> tuple[ComputationRun, ProjectFact | None]:
+    try:
+        calculated = execute_formula(
+            definition_version.operation,
+            inputs,
+            parameters={**(definition_version.default_parameters or {}), **parameters},
+            rounding=rounding or definition_version.rounding,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    dependencies = {name: row.fact_key for name, row in input_facts.items()}
+    result = {
+        **calculated,
+        "dependencies": dependencies,
+        "output_fact": output_fact or {},
+    }
+    now = datetime.now(timezone.utc)
+    run = ComputationRun(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        definition_version_id=definition_version.id,
+        status="succeeded",
+        inputs=inputs,
+        result=result,
+        input_fact_ids=[row.id for row in input_facts.values()],
+        checksum=content_hash(
+            {
+                "definition": definition_version.checksum,
+                "inputs": inputs,
+                "parameters": parameters,
+                "dependencies": dependencies,
+            }
+        ),
+        started_at=now,
+        finished_at=now,
+        created_by=user.id,
+    )
+    db.add(run)
+    db.flush()
+    generated = None
+    if output_fact:
+        generated = _upsert_generated_fact(
+            db,
+            project=project,
+            user=user,
+            fact_key=str(output_fact["fact_key"]),
+            label=str(output_fact["label"]),
+            fact_type="deterministic_computation",
+            value={"number": calculated["value"]},
+            unit=output_fact.get("unit") or definition_version.unit,
+            source_type="computation",
+            source_id=run.id,
+            source_locator={
+                "formula_version_id": definition_version.id,
+                "expression": definition_version.expression,
+                "input_fact_ids": run.input_fact_ids,
+                "dependencies": dependencies,
+            },
+            verification_status="verified",
+        )
+    return run, generated
 
 
 def _upsert_generated_fact(
@@ -1043,15 +1135,58 @@ def confirm_fact(
     if row.project_id != project_id or not row.active:
         raise HTTPException(status_code=404, detail="事实不存在")
     if payload.decision == "override":
-        row.value = payload.new_value
-        row.fact_type = "manual_override"
-        row.source_type = "manual_override"
-        row.freshness_status = "manual_override"
-    row.verification_status = "verified" if payload.decision in {"confirm", "override"} else "rejected"
-    row.confirmed_by = user.id
-    row.confirmed_at = datetime.now(timezone.utc)
-    audit(db, user.tenant_id, user.id, f"writing.fact.{payload.decision}", "writing_project_fact", row.id, {"reason": payload.reason})
+        previous = row
+        previous.active = False
+        previous.freshness_status = "superseded"
+        db.query(WritingBlockBinding).filter(
+            WritingBlockBinding.fact_id == previous.id,
+            _active(WritingBlockBinding),
+        ).update({"freshness_status": "stale"})
+        dependent_run_ids = [
+            item.id
+            for item in db.scalars(
+                select(ComputationRun).where(
+                    ComputationRun.project_id == project_id,
+                    _active(ComputationRun),
+                )
+            )
+            if previous.id in (item.input_fact_ids or [])
+        ]
+        if dependent_run_ids:
+            db.query(WritingBlockBinding).filter(
+                WritingBlockBinding.project_id == project_id,
+                WritingBlockBinding.computation_run_id.in_(dependent_run_ids),
+                _active(WritingBlockBinding),
+            ).update({"freshness_status": "stale"}, synchronize_session=False)
+        row = ProjectFact(
+            tenant_id=previous.tenant_id,
+            project_id=previous.project_id,
+            fact_key=previous.fact_key,
+            label=previous.label,
+            fact_type="manual_override",
+            value=payload.new_value,
+            unit=previous.unit,
+            source_type="manual_override",
+            source_id=previous.id,
+            source_version=str(previous.version),
+            source_locator={"supersedes_fact_id": previous.id, "reason": payload.reason},
+            confidence=1.0,
+            verification_status="verified",
+            freshness_status="manual_override",
+            version=previous.version + 1,
+            active=True,
+            created_by=user.id,
+            confirmed_by=user.id,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        db.add(row)
+    else:
+        row.verification_status = "verified" if payload.decision == "confirm" else "rejected"
+        row.confirmed_by = user.id
+        row.confirmed_at = datetime.now(timezone.utc)
+    audit(db, user.tenant_id, user.id, f"writing.fact.{payload.decision}", "writing_project_fact", row.id, {"reason": payload.reason, "version": row.version})
     db.commit()
+    db.refresh(row)
     return serialize_row(row)
 
 
@@ -1206,34 +1341,103 @@ def compute(
             raise HTTPException(status_code=409, detail="公式版本未激活")
     else:
         definition_version = _ensure_formula_version(db, user, str(payload.operation))
-    try:
-        result = execute_formula(
-            definition_version.operation,
-            payload.inputs,
-            parameters={**(definition_version.default_parameters or {}), **payload.parameters},
-            rounding=payload.rounding or definition_version.rounding,
+    fact_ids = set(payload.input_fact_ids)
+    facts = list(
+        db.scalars(
+            select(ProjectFact).where(
+                ProjectFact.id.in_(fact_ids),
+                ProjectFact.project_id == project.id,
+                ProjectFact.active.is_(True),
+                _active(ProjectFact),
+            )
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    now = datetime.now(timezone.utc)
-    run = ComputationRun(
-        tenant_id=user.tenant_id,
-        project_id=project.id,
-        definition_version_id=definition_version.id,
-        status="succeeded",
-        inputs=payload.inputs,
-        result=result,
-        input_fact_ids=payload.input_fact_ids,
-        checksum=content_hash({"definition": definition_version.checksum, "inputs": payload.inputs, "parameters": payload.parameters}),
-        started_at=now,
-        finished_at=now,
-        created_by=user.id,
+    ) if fact_ids else []
+    if len(facts) != len(fact_ids):
+        raise HTTPException(status_code=422, detail="计算输入事实不存在或不属于当前方案任务")
+    by_id = {row.id: row for row in facts}
+    input_facts = {name: by_id[fact_id] for name, fact_id in payload.input_fact_map.items()}
+    for name, row in input_facts.items():
+        if row.verification_status != "verified":
+            raise HTTPException(status_code=409, detail=f"事实“{row.label}”尚未核验，不能形成正式测算")
+        if name not in payload.inputs or float(payload.inputs[name]) != _fact_number(row):
+            raise HTTPException(status_code=409, detail=f"计算输入 {name} 与已核验事实不一致")
+    if payload.output_fact_key and not input_facts:
+        raise HTTPException(status_code=409, detail="生成权威测算事实必须绑定已核验输入事实")
+    output_fact = (
+        {"fact_key": payload.output_fact_key, "label": payload.output_label, "unit": payload.output_unit}
+        if payload.output_fact_key else None
     )
-    db.add(run)
+    run, generated = _execute_computation_run(
+        db,
+        project=project,
+        user=user,
+        definition_version=definition_version,
+        inputs=payload.inputs,
+        parameters=payload.parameters,
+        rounding=payload.rounding,
+        input_facts=input_facts,
+        output_fact=output_fact,
+    )
     audit(db, user.tenant_id, user.id, "writing.computation.execute", "computation_run", run.id, {"operation": definition_version.operation, "checksum": run.checksum})
     db.commit()
     db.refresh(run)
-    return serialize_row(run)
+    return {**serialize_row(run), "generated_fact": serialize_row(generated) if generated else None}
+
+
+@router.post("/projects/{project_id}/computations/run-baseline")
+def run_project_baseline_computations(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Run the accepted earthquake resource formulas from verified project facts."""
+    project = _project(db, project_id, user, "editor")
+    scenario = _tenant_row(db, ScenarioPackageVersion, project.scenario_package_version_id, user.tenant_id, "场景包版本")
+    package = _tenant_row(db, ScenarioPackage, scenario.scenario_package_id, user.tenant_id, "场景包")
+    if package.disaster_type != "earthquake":
+        raise HTTPException(status_code=409, detail="该灾种公式包尚待业务确认，不能生成正式测算")
+    rows = list(
+        db.scalars(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.active.is_(True),
+                ProjectFact.verification_status == "verified",
+                _active(ProjectFact),
+            )
+        )
+    )
+    by_key = {row.fact_key: row for row in rows}
+    specifications = [
+        ("rescue_gap", "搜救人员缺口", "人", "rescue_required", "rescue_available"),
+        ("county_bed_gap", "县域创伤床位缺口", "张", "trauma_beds_required", "county_trauma_beds"),
+        ("all_area_bed_gap", "全域创伤床位缺口", "张", "trauma_beds_required", "callable_trauma_beds"),
+        ("tents_gap", "帐篷缺口", "顶", "tents_required", "tents_available"),
+    ]
+    missing = sorted(
+        {key for _, _, _, required_key, available_key in specifications for key in (required_key, available_key)}
+        - set(by_key)
+    )
+    if missing:
+        raise HTTPException(status_code=409, detail=f"缺少已核验计算事实：{', '.join(missing)}")
+    definition = _ensure_formula_version(db, user, "resource_gap")
+    output = []
+    for fact_key, label, unit, required_key, available_key in specifications:
+        input_facts = {"required": by_key[required_key], "available": by_key[available_key]}
+        run, fact = _execute_computation_run(
+            db,
+            project=project,
+            user=user,
+            definition_version=definition,
+            inputs={"required": _fact_number(input_facts["required"]), "available": _fact_number(input_facts["available"])},
+            parameters={},
+            rounding={"mode": "half_up", "digits": 0},
+            input_facts=input_facts,
+            output_fact={"fact_key": fact_key, "label": label, "unit": unit},
+        )
+        output.append({"run": serialize_row(run), "fact": serialize_row(fact)})
+    audit(db, user.tenant_id, user.id, "writing.computations.baseline", "writing_project", project.id, {"count": len(output), "scenario_version": scenario.version})
+    db.commit()
+    return {"items": output, "scenario_version": scenario.version, "engine": "deterministic-formula-library"}
 
 
 @router.get("/projects/{project_id}/computations")
@@ -1250,8 +1454,32 @@ def generate_plans(
     db: Session = Depends(get_db),
 ):
     project = _project(db, project_id, user, "editor")
+    configured = dict((project.config or {}).get("plan_inputs") or {})
+    inputs = {**configured, **payload.inputs}
+    if not inputs.get("resources"):
+        facts = {
+            row.fact_key: row
+            for row in db.scalars(
+                select(ProjectFact).where(
+                    ProjectFact.project_id == project.id,
+                    ProjectFact.active.is_(True),
+                    ProjectFact.verification_status == "verified",
+                    _active(ProjectFact),
+                )
+            )
+        }
+        resources = []
+        for label, unit, required_key, available_key in (
+            ("搜救人员", "人", "rescue_required", "rescue_available"),
+            ("创伤床位", "张", "trauma_beds_required", "callable_trauma_beds"),
+            ("帐篷", "顶", "tents_required", "tents_available"),
+        ):
+            if required_key in facts and available_key in facts:
+                resources.append({"name": label, "unit": unit, "required": _fact_number(facts[required_key]), "available": _fact_number(facts[available_key])})
+        if resources:
+            inputs["resources"] = resources
     try:
-        generated = generate_alternative_plans(payload.inputs, payload.count)
+        generated = generate_alternative_plans(inputs, payload.count)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     rows = []
@@ -1265,17 +1493,17 @@ def generate_plans(
             version=version,
             objective=result["objective"],
             weights=result["weights"],
-            inputs=payload.inputs,
-            constraints=payload.inputs.get("constraints") or [],
+            inputs=inputs,
+            constraints=inputs.get("constraints") or [],
             result={"route": result["route"], "resource_allocation": result["resource_allocation"], "input_fingerprint": result["input_fingerprint"]},
             algorithm=result["algorithm"],
             unresolved_gaps=result["unresolved_gaps"],
-            risks=payload.inputs.get("risks") or [],
+            risks=inputs.get("risks") or [],
             status="candidate",
         )
         db.add(row)
         rows.append(row)
-    audit(db, user.tenant_id, user.id, "writing.plans.generate", "writing_project", project.id, {"count": len(rows), "input_fingerprint": content_hash(payload.inputs)})
+    audit(db, user.tenant_id, user.id, "writing.plans.generate", "writing_project", project.id, {"count": len(rows), "input_fingerprint": content_hash(inputs)})
     db.commit()
     return [serialize_row(row) for row in rows]
 
@@ -1563,11 +1791,272 @@ def recompute_impacts(
             )
         )
     )
-    runs = [serialize_row(row) for row in db.scalars(select(ComputationRun).where(ComputationRun.project_id == project.id, _active(ComputationRun)))]
+    run_rows = list(db.scalars(select(ComputationRun).where(ComputationRun.project_id == project.id, _active(ComputationRun)).order_by(ComputationRun.created_at.desc())))
+    runs = [serialize_row(row) for row in run_rows]
     bindings = [serialize_row(row) for row in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, _active(WritingBlockBinding)))]
     impact = affected_dependency_ids(fact_ids, runs, bindings)
     if impact["block_ids"]:
         db.query(WritingBlockBinding).filter(WritingBlockBinding.document_id == document.id, WritingBlockBinding.block_id.in_(impact["block_ids"]), _active(WritingBlockBinding)).update({"freshness_status": "stale"}, synchronize_session=False)
+    active_by_key = {
+        row.fact_key: row
+        for row in db.scalars(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.active.is_(True),
+                ProjectFact.verification_status == "verified",
+                _active(ProjectFact),
+            )
+        )
+    }
+    latest_dependencies: dict[tuple[str, str], ComputationRun] = {}
+    for old_run in run_rows:
+        if old_run.id not in set(impact["computation_run_ids"]):
+            continue
+        output = dict((old_run.result or {}).get("output_fact") or {})
+        key = (old_run.definition_version_id, str(output.get("fact_key") or old_run.id))
+        latest_dependencies.setdefault(key, old_run)
+    replacements = []
+    for old_run in latest_dependencies.values():
+        dependencies = dict((old_run.result or {}).get("dependencies") or {})
+        if not dependencies:
+            replacements.append({"previous_run_id": old_run.id, "status": "manual_input_mapping_required"})
+            continue
+        missing = sorted(set(dependencies.values()) - set(active_by_key))
+        if missing:
+            replacements.append({"previous_run_id": old_run.id, "status": "missing_verified_facts", "missing": missing})
+            continue
+        input_facts = {name: active_by_key[fact_key] for name, fact_key in dependencies.items()}
+        inputs = dict(old_run.inputs or {})
+        for name, fact in input_facts.items():
+            inputs[name] = _fact_number(fact)
+        definition = _tenant_row(db, ComputationDefinitionVersion, old_run.definition_version_id, user.tenant_id, "公式版本")
+        expected_checksum = content_hash(
+            {
+                "definition": definition.checksum,
+                "inputs": inputs,
+                "parameters": (old_run.result or {}).get("parameters") or {},
+                "dependencies": dependencies,
+            }
+        )
+        new_run = db.scalar(
+            select(ComputationRun).where(
+                ComputationRun.project_id == project.id,
+                ComputationRun.checksum == expected_checksum,
+                _active(ComputationRun),
+            ).order_by(ComputationRun.created_at.desc())
+        )
+        output_fact = dict((old_run.result or {}).get("output_fact") or {}) or None
+        generated = None
+        if new_run is None:
+            new_run, generated = _execute_computation_run(
+                db,
+                project=project,
+                user=user,
+                definition_version=definition,
+                inputs=inputs,
+                parameters=(old_run.result or {}).get("parameters") or {},
+                rounding=(old_run.result or {}).get("rounding") or definition.rounding,
+                input_facts=input_facts,
+                output_fact=output_fact,
+            )
+        replacements.append(
+            {
+                "previous_run_id": old_run.id,
+                "replacement_run_id": new_run.id,
+                "status": "recomputed",
+                "result": new_run.result,
+                "generated_fact_id": generated.id if generated else None,
+            }
+        )
     audit(db, user.tenant_id, user.id, "writing.document.impact", "writing_document", document.id, impact)
     db.commit()
-    return {**impact, "action": "marked_stale", "automatic_overwrite": False}
+    return {
+        **impact,
+        "action": "recomputed_and_marked_stale",
+        "automatic_overwrite": False,
+        "replacement_runs": replacements,
+    }
+
+
+@router.post("/documents/{document_id}/exports")
+def create_export(
+    document_id: str,
+    payload: WritingExportCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    document, project = _document(db, document_id, user, "publisher")
+    version = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+    if version is None or version.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="请先保存一个文稿版本")
+    bindings = {
+        row.block_id: serialize_row(row)
+        for row in db.scalars(
+            select(WritingBlockBinding).where(
+                WritingBlockBinding.document_id == document.id,
+                _active(WritingBlockBinding),
+            )
+        )
+    }
+    issues = validate_plate_content(version.content or [], bindings)
+    if issues:
+        raise HTTPException(status_code=409, detail=f"文稿存在 {len(issues)} 个来源或有效性问题，请先完成审校")
+    pending_gates = list(
+        db.scalars(
+            select(DecisionGate).where(
+                DecisionGate.project_id == project.id,
+                DecisionGate.required.is_(True),
+                DecisionGate.status != "confirmed",
+                _active(DecisionGate),
+            )
+        )
+    )
+    if payload.output_format in {"docx", "pdf"} and pending_gates:
+        raise HTTPException(status_code=409, detail=f"仍有 {len(pending_gates)} 个业务确认节点未完成")
+    template_version = None
+    if payload.template_version_id:
+        template_version = _tenant_row(db, ExportTemplateVersion, payload.template_version_id, user.tenant_id, "导出模板版本")
+        if template_version.status != "active":
+            raise HTTPException(status_code=409, detail="导出模板版本未激活")
+    facts = [
+        serialize_row(row)
+        for row in db.scalars(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.active.is_(True),
+                ProjectFact.verification_status == "verified",
+                _active(ProjectFact),
+            ).order_by(ProjectFact.fact_key)
+        )
+    ]
+    computations = [
+        serialize_row(row)
+        for row in db.scalars(
+            select(ComputationRun).where(
+                ComputationRun.project_id == project.id,
+                _active(ComputationRun),
+            ).order_by(ComputationRun.created_at.desc())
+        )
+    ]
+    plans = [
+        serialize_row(row)
+        for row in db.scalars(
+            select(AlternativePlan).where(
+                AlternativePlan.project_id == project.id,
+                _active(AlternativePlan),
+            ).order_by(AlternativePlan.created_at.desc())
+        )
+    ]
+    release = _tenant_row(db, KnowledgeProductRelease, project.knowledge_product_release_id, user.tenant_id, "知识产品版本")
+    scenario = _tenant_row(db, ScenarioPackageVersion, project.scenario_package_version_id, user.tenant_id, "场景包版本")
+    selected_plan = next((item["name"] for item in plans if item["status"] == "selected"), None)
+    audit_summary = {
+        "knowledge_product_release": release.version,
+        "scenario_package_version": scenario.version,
+        "verified_fact_count": len(facts),
+        "computation_count": len(computations),
+        "reasoning_count": int(
+            db.scalar(
+                select(func.count(WritingReasoningRun.id)).where(
+                    WritingReasoningRun.project_id == project.id,
+                    WritingReasoningRun.status == "succeeded",
+                    _active(WritingReasoningRun),
+                )
+            ) or 0
+        ),
+        "selected_plan": selected_plan,
+    }
+    job = ExportJob(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        document_id=document.id,
+        document_version_id=version.id,
+        template_version_id=template_version.id if template_version else None,
+        requested_by=user.id,
+        output_format=payload.output_format,
+        status="running",
+        progress=10,
+        manifest={"audit_summary": audit_summary},
+        started_at=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    db.flush()
+    safe_title = "".join(character if character not in "\\/:*?\"<>|" else "_" for character in document.title).strip() or "妙笔文稿"
+    filename = f"{safe_title}-v{version.version}.{payload.output_format}"
+    object_key = f"{user.tenant_id}/writing/{project.id}/{document.id}/{job.id}/{filename}"
+    try:
+        with tempfile.TemporaryDirectory(prefix="miaobi-export-") as temp_directory:
+            target = Path(temp_directory) / filename
+            build_export_artifact(
+                target,
+                output_format=payload.output_format,
+                title=document.title,
+                content=version.content or [],
+                facts=facts,
+                computations=computations,
+                plans=plans,
+                audit_summary=audit_summary,
+                coordinates=dict((project.config or {}).get("route_coordinates") or {}),
+            )
+            checksum = hashlib.sha256(target.read_bytes()).hexdigest()
+            object_storage.put_file(object_key, target, CONTENT_TYPES[payload.output_format])
+    except (ValueError, RuntimeError) as exc:
+        job.status = "failed"
+        job.progress = 100
+        job.error_code = type(exc).__name__
+        job.error_message = str(exc)[:500]
+        job.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        job.status = "failed"
+        job.progress = 100
+        job.error_code = type(exc).__name__
+        job.error_message = "导出服务执行失败"
+        job.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=500, detail="导出服务执行失败") from exc
+    job.status = "succeeded"
+    job.progress = 100
+    job.object_key = object_key
+    job.checksum = checksum
+    job.manifest = {
+        "filename": filename,
+        "content_type": CONTENT_TYPES[payload.output_format],
+        "document_version": version.version,
+        "audit_summary": audit_summary,
+    }
+    job.finished_at = datetime.now(timezone.utc)
+    audit(db, user.tenant_id, user.id, "writing.export.create", "writing_export_job", job.id, {"format": payload.output_format, "checksum": checksum, "document_version": version.version})
+    db.commit()
+    db.refresh(job)
+    return serialize_row(job)
+
+
+@router.get("/documents/{document_id}/exports")
+def list_exports(document_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _document(db, document_id, user)
+    return [
+        serialize_row(row)
+        for row in db.scalars(
+            select(ExportJob).where(
+                ExportJob.document_id == document_id,
+                _active(ExportJob),
+            ).order_by(ExportJob.created_at.desc())
+        )
+    ]
+
+
+@router.get("/exports/{job_id}/download")
+def download_export(job_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    job = _tenant_row(db, ExportJob, job_id, user.tenant_id, "导出任务")
+    _document(db, job.document_id, user)
+    if job.status != "succeeded" or not job.object_key:
+        raise HTTPException(status_code=409, detail="导出文件尚未可用")
+    filename = str((job.manifest or {}).get("filename") or f"妙笔文稿.{job.output_format}")
+    media_type = str((job.manifest or {}).get("content_type") or CONTENT_TYPES.get(job.output_format, "application/octet-stream"))
+    return Response(
+        object_storage.get_bytes(job.object_key),
+        media_type=media_type,
+        headers={"Content-Disposition": attachment_content_disposition(filename), "X-Content-Type-Options": "nosniff"},
+    )

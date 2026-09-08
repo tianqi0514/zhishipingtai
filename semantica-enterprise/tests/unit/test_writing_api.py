@@ -20,6 +20,7 @@ from packages.platform.models import (
     KnowledgeProductRelease,
     KnowledgeProductReleaseItem,
     KnowledgeSpace,
+    ProjectFact,
     Tenant,
     User,
     WritingAgentSession,
@@ -152,6 +153,19 @@ def _create_project(client: TestClient, release_id: str) -> dict:
 def test_writing_project_fact_computation_and_local_stale_propagation() -> None:
     with writing_client() as (client, _, release):
         project = _create_project(client, release.id)
+        required_fact = client.post(
+            f"/api/v1/writing/projects/{project['id']}/facts",
+            json={
+                "fact_key": "rescue_required",
+                "label": "搜救人员需求",
+                "fact_type": "official_brief",
+                "value": {"number": 500},
+                "unit": "人",
+                "source_type": "official_brief",
+                "source_id": "brief-v1",
+                "verification_status": "verified",
+            },
+        )
         fact = client.post(
             f"/api/v1/writing/projects/{project['id']}/facts",
             json={
@@ -171,7 +185,14 @@ def test_writing_project_fact_computation_and_local_stale_propagation() -> None:
             json={
                 "operation": "resource_gap",
                 "inputs": {"required": 500, "available": 320},
-                "input_fact_ids": [fact.json()["id"]],
+                "input_fact_ids": [required_fact.json()["id"], fact.json()["id"]],
+                "input_fact_map": {
+                    "required": required_fact.json()["id"],
+                    "available": fact.json()["id"],
+                },
+                "output_fact_key": "rescue_gap",
+                "output_label": "搜救人员缺口",
+                "output_unit": "人",
             },
         )
         assert run.status_code == 200, run.text
@@ -221,6 +242,54 @@ def test_writing_project_fact_computation_and_local_stale_propagation() -> None:
         assert impact.status_code == 200, impact.text
         assert impact.json()["block_ids"] == ["gap-block"]
         assert impact.json()["automatic_overwrite"] is False
+        replacement = impact.json()["replacement_runs"][0]
+        assert replacement["status"] == "recomputed"
+        assert replacement["result"]["value"] == 100
+        current_facts = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
+        assert next(item for item in current_facts if item["fact_key"] == "rescue_gap")["value"]["number"] == 100
+
+
+def test_ground_truth_baseline_computations_and_fact_override_are_versioned() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        ground_truth = json.loads(Path("demo/miaobi/earthquake_ground_truth.json").read_text(encoding="utf-8"))["facts"]
+        input_keys = [
+            "rescue_required", "rescue_available", "trauma_beds_required",
+            "county_trauma_beds", "callable_trauma_beds", "tents_required", "tents_available",
+        ]
+        created = {}
+        for key in input_keys:
+            item = ground_truth[key]
+            response = client.post(
+                f"/api/v1/writing/projects/{project['id']}/facts",
+                json={
+                    "fact_key": key,
+                    "label": key,
+                    "fact_type": "official_brief",
+                    "value": {"number": item["value"]},
+                    "unit": item["unit"],
+                    "source_type": "official_brief",
+                    "source_id": "customer-ground-truth",
+                    "verification_status": "verified",
+                },
+            )
+            assert response.status_code == 200, response.text
+            created[key] = response.json()
+        baseline = client.post(f"/api/v1/writing/projects/{project['id']}/computations/run-baseline")
+        assert baseline.status_code == 200, baseline.text
+        outputs = {item["fact"]["fact_key"]: item["fact"]["value"]["number"] for item in baseline.json()["items"]}
+        assert outputs == {"rescue_gap": 180, "county_bed_gap": 220, "all_area_bed_gap": 80, "tents_gap": 1800}
+
+        overridden = client.post(
+            f"/api/v1/writing/projects/{project['id']}/facts/{created['rescue_available']['id']}/confirm",
+            json={"decision": "override", "new_value": {"number": 400}, "reason": "现场资源更新"},
+        )
+        assert overridden.status_code == 200, overridden.text
+        assert overridden.json()["version"] == 2
+        assert overridden.json()["value"]["number"] == 400
+        historical = db.get(ProjectFact, created["rescue_available"]["id"])
+        assert historical is not None and historical.active is False
+        assert historical.value["number"] == 320
 
 
 def test_project_knowledge_search_is_locked_to_product_release(monkeypatch) -> None:
@@ -310,9 +379,11 @@ def test_plan_profiles_are_not_language_only_variants() -> None:
                         "指挥部": [
                             {"to": "快速通道", "minutes": 10, "risk": 7},
                             {"to": "安全通道", "minutes": 24, "risk": 1},
+                            {"to": "综合通道", "minutes": 17.5, "risk": 3},
                         ],
                         "快速通道": [{"to": "震中", "minutes": 10, "risk": 7}],
                         "安全通道": [{"to": "震中", "minutes": 24, "risk": 1}],
+                        "综合通道": [{"to": "震中", "minutes": 17.5, "risk": 3}],
                     },
                     "resources": [{"name": "搜救人员", "unit": "人", "required": 500, "available": 320}],
                 },
@@ -321,7 +392,7 @@ def test_plan_profiles_are_not_language_only_variants() -> None:
         assert response.status_code == 200, response.text
         plans = response.json()
         assert len(plans) == 3
-        assert plans[0]["result"]["route"]["path"] != plans[1]["result"]["route"]["path"]
+        assert len({tuple(item["result"]["route"]["path"]) for item in plans}) == 3
         assert all(item["unresolved_gaps"][0]["gap"] == 180 for item in plans)
 
 
