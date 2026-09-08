@@ -120,8 +120,29 @@ def main() -> None:
     if not search.get("snapshot_locked") or search.get("knowledge_product_release_id") != project.get("knowledge_product_release_id"):
         failures.append("妙笔检索没有锁定当前任务的不可变知识产品版本")
     graph_facts = api.get("/knowledge/facts", space_id=space["id"], limit=500) if space else {"total": 0, "items": []}
-    if graph_facts.get("total") != 6 or sum(bool(row.get("source_chunk_id")) for row in graph_facts.get("items", [])) != 6:
-        failures.append("地震验收图谱应包含 6 条具有真实片段依据的业务关系")
+    # The normal semantic-extraction pipeline is allowed to publish additional
+    # evidence-backed relations from the three source documents.  Verify the
+    # six deterministic acceptance relations by identity instead of assuming
+    # the whole isolated graph contains exactly six facts.
+    expected_graph_facts = {
+        ("积石山县6.2级地震", "发生于", "积石山县"),
+        ("积石山县6.2级地震", "需要", "500名搜救人员需求"),
+        ("积石山县6.2级地震", "需要", "7000顶帐篷需求"),
+        ("积石山县6.2级地震", "满足灾害等级判据", "重大地震灾害（Ⅱ级）"),
+        ("应急指挥机构", "负责", "人员搜救"),
+        ("应急指挥机构", "负责", "物资调度"),
+    }
+    evidence_backed_graph_facts = {
+        (row.get("subject_name"), row.get("predicate"), row.get("object_name"))
+        for row in graph_facts.get("items", [])
+        if row.get("source_chunk_id")
+    }
+    missing_graph_facts = expected_graph_facts - evidence_backed_graph_facts
+    if missing_graph_facts:
+        failures.append(
+            "地震验收图谱缺少具有真实片段依据的业务关系："
+            + "、".join(" → ".join(item) for item in sorted(missing_graph_facts))
+        )
     if not search.get("channel_counts", {}).get("graph"):
         failures.append("锁定知识产品的混合检索没有命中图谱关系")
     if failures:
@@ -139,6 +160,7 @@ def main() -> None:
         "retrieval_hits": len(titles),
         "retrieval_channels": search.get("channel_counts"),
         "graph_facts": graph_facts.get("total"),
+        "fixture_graph_facts": len(expected_graph_facts),
     }, ensure_ascii=False, indent=2))
 
 

@@ -1,5 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
+# Build the independent Plate application inside the production image.  The
+# API serves this artifact at /miaobi/; omitting it makes that route return the
+# main platform shell with a 503 status even though the API itself is healthy.
+FROM node:24-alpine AS miaobi-web-builder
+
+WORKDIR /frontend
+RUN corepack enable && corepack prepare pnpm@11.19.0 --activate
+COPY semantica-enterprise/apps/miaobi-web/package.json semantica-enterprise/apps/miaobi-web/pnpm-lock.yaml semantica-enterprise/apps/miaobi-web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY semantica-enterprise/apps/miaobi-web/index.html semantica-enterprise/apps/miaobi-web/tsconfig.json semantica-enterprise/apps/miaobi-web/vite.config.ts ./
+COPY semantica-enterprise/apps/miaobi-web/src ./src
+RUN pnpm build
+
 # Server image built only from sources committed in this repository. Unlike
 # the fast local-development Dockerfile, it does not require a pre-existing
 # `semantica-local:*` image on the target host.
@@ -58,6 +71,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
       "pytest>=8.3" "pytest-asyncio>=0.25" "pytest-cov>=6.0"
 
 COPY semantica-enterprise/apps ./apps
+COPY --from=miaobi-web-builder /frontend/dist /app/apps/miaobi-web/dist
 COPY semantica-enterprise/packages ./packages
 COPY semantica-enterprise/scripts ./scripts
 COPY semantica-enterprise/demo ./demo
