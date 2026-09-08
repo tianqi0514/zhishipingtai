@@ -36,7 +36,7 @@ DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
 DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 API_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
-ASR_PYTORCH_CPU_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cpu
+ASR_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 scripts/deploy_server.sh build
 ```
 

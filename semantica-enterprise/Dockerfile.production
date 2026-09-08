@@ -13,7 +13,7 @@ ARG PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
+    PIP_NO_CACHE_DIR=0 \
     PIP_INDEX_URL=${PIP_INDEX_URL}
 
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec \

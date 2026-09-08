@@ -57,6 +57,7 @@ def test_production_image_is_built_from_committed_semantica_source() -> None:
 
 def test_production_build_mirrors_are_explicit_and_apply_to_api_and_asr() -> None:
     production = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
+    production_dockerfile = (ROOT / "Dockerfile.production").read_text(encoding="utf-8")
     asr_dockerfile = (ROOT / "Dockerfile.asr").read_text(encoding="utf-8")
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
@@ -72,6 +73,7 @@ def test_production_build_mirrors_are_explicit_and_apply_to_api_and_asr() -> Non
     assert "ARG PIP_INDEX_URL=https://pypi.org/simple" in asr_dockerfile
     assert "ARG PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in asr_dockerfile
     assert 'pip install --index-url "${PYTORCH_CPU_INDEX_URL}"' in asr_dockerfile
+    assert "PIP_NO_CACHE_DIR=0" in production_dockerfile
     assert "PIP_INDEX_URL=https://pypi.org/simple" in env_example
     assert "API_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in env_example
     assert "ASR_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in env_example
