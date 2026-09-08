@@ -16,11 +16,14 @@ MCP 和模型运行时继续绑定环回地址。例如将平台发布在建议�
 ```dotenv
 API_BIND_ADDRESS=0.0.0.0
 API_PUBLISHED_PORT=9002
+AUTH_COOKIE_SECURE=false
 INTERNAL_BIND_ADDRESS=127.0.0.1
 MINIO_CONSOLE_PORT=19001
 ```
 
 这里把 MinIO 控制台移到本机 `19001`，避免与平台入口冲突；它仍不对公网开放。端口能建立 TCP 连接不代表 Web/API 已经可用：部署后必须从服务器外部同时访问 `/` 和 `/health/ready`，并确认收到预期 HTTP 状态与响应正文。TCP 已连接但 HTTP 000、无首字节或超时均按“远端不可用”处理。
+上例因为直接通过 HTTP IP 验收而显式关闭 Secure Cookie；接入 HTTPS 反向代理后必须
+删除该覆盖或设回 `AUTH_COOKIE_SECURE=true`。生产覆盖的默认值始终为 `true`。
 
 应用镜像已内置 `ffmpeg/ffprobe`、LibreOffice headless、Tesseract 中英文语言包、`file/libmagic` 和文泉驿正黑中文字体。中文 Office 转换、扫描件 OCR 和验收数据生成不依赖宿主机字体或本地安装的软件。
 

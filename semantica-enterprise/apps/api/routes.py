@@ -389,7 +389,7 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
         token,
         httponly=True,
         samesite="lax",
-        secure=settings.environment == "production",
+        secure=settings.effective_auth_cookie_secure,
         path="/",
         max_age=settings.access_token_minutes * 60,
     )

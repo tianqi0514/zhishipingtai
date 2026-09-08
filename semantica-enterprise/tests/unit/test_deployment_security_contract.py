@@ -16,6 +16,7 @@ def test_server_deployment_is_fail_closed_and_uses_pinned_minio() -> None:
 
     assert "minio/minio@sha256:" in base
     assert "ENVIRONMENT: production" in production
+    assert "AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}" in production
     for variable in (
         "APP_SECRET_KEY",
         "BOOTSTRAP_ADMIN_PASSWORD",

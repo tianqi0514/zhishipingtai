@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,6 +21,9 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     app_secret_key: str = "dev-only-change-this-secret-at-least-32-bytes"
     access_token_minutes: int = 480
+    # None preserves the safe environment-derived default. Direct HTTP test
+    # deployments may opt out explicitly; production behind HTTPS stays secure.
+    auth_cookie_secure: Optional[bool] = None
     application_access_token_minutes: int = 15
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = "Admin@123456"
@@ -63,6 +67,12 @@ class Settings(BaseSettings):
     agent_service_secret_file: Path = Path("/run/secrets/agent_service_secret")
     agent_access_token_minutes: int = 5
     agent_request_timeout_seconds: int = 600
+
+    @property
+    def effective_auth_cookie_secure(self) -> bool:
+        if self.auth_cookie_secure is not None:
+            return self.auth_cookie_secure
+        return self.environment == "production"
 
     @model_validator(mode="after")
     def production_secrets_must_be_explicit(self) -> "Settings":

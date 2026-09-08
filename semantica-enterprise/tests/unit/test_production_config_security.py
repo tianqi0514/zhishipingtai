@@ -39,3 +39,14 @@ def test_production_rejects_predictable_development_credentials(field: str, valu
 def test_production_accepts_explicit_non_default_secrets() -> None:
     settings = _production()
     assert settings.environment == "production"
+    assert settings.effective_auth_cookie_secure is True
+
+
+def test_direct_http_test_deployment_can_explicitly_disable_secure_cookie() -> None:
+    settings = _production(auth_cookie_secure=False)
+    assert settings.effective_auth_cookie_secure is False
+
+
+def test_development_cookie_is_not_secure_by_default() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.effective_auth_cookie_secure is False
