@@ -56,7 +56,10 @@ def test_frontend_summary_cards_use_the_same_unresolved_failure_projection() -> 
 
     assert "function unresolvedFailedJobs(rows=[])" in app_js
     assert "row.target_current!==false" in app_js
-    assert "异常任务</span><b>${unresolvedFailedJobs(jobs).length}" in app_js
+    # The former knowledge-assets landing card was removed from the primary
+    # journey. The dashboard now consumes the already projected API count,
+    # while Operations applies the same projection to its job collection.
+    assert "['异常任务',d.failed_jobs,'metric-red']" in app_js
     assert "失败任务</span><b>${unresolvedFailedJobs(jobs).length}" in app_js
     assert "knowledge_inference:'知识分析'" in app_js
     assert "curation_publish:'治理发布'" in app_js
