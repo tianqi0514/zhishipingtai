@@ -4,6 +4,7 @@ services:
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
         PYTORCH_CPU_INDEX_URL: ${ASR_PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+        TORCHAUDIO_CPU_WHEEL_URL: ${ASR_TORCHAUDIO_CPU_WHEEL_URL:-https://download.pytorch.org/whl/cpu/torchaudio-2.5.1%2Bcpu-cp310-cp310-linux_x86_64.whl}
 
   postgres:
     environment:

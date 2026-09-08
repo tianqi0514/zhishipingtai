@@ -37,6 +37,7 @@ DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
 API_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 ASR_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+ASR_TORCHAUDIO_CPU_WHEEL_URL=https://download.pytorch.org/whl/cpu/torchaudio-2.5.1%2Bcpu-cp310-cp310-linux_x86_64.whl
 scripts/deploy_server.sh build
 ```
 
