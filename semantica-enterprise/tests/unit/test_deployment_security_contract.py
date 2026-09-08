@@ -55,6 +55,22 @@ def test_production_image_is_built_from_committed_semantica_source() -> None:
     assert "!semantica-enterprise/demo/**" in ignore
 
 
+def test_production_build_mirrors_are_explicit_and_apply_to_api_and_asr() -> None:
+    production = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
+    asr_dockerfile = (ROOT / "Dockerfile.asr").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert production.count("PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}") == 2
+    assert production.count(
+        "PYTORCH_CPU_INDEX_URL: ${PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+    ) == 2
+    assert "ARG PIP_INDEX_URL=https://pypi.org/simple" in asr_dockerfile
+    assert "ARG PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in asr_dockerfile
+    assert 'pip install --index-url "${PYTORCH_CPU_INDEX_URL}"' in asr_dockerfile
+    assert "PIP_INDEX_URL=https://pypi.org/simple" in env_example
+    assert "PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in env_example
+
+
 def test_local_development_image_contains_demo_preflight_assets() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()

@@ -1,8 +1,13 @@
+# syntax=docker/dockerfile:1.7
 FROM python:3.10-slim
+
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
+    PIP_NO_CACHE_DIR=0 \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
     FUNASR_MODEL=sensevoice \
     FUNASR_DEVICE=cpu \
     FUNASR_PORT=8001
@@ -15,7 +20,8 @@ RUN apt-get update \
 
 # Version is intentionally pinned.  Model weights live in the mounted cache
 # volume and are not copied into application images.
-RUN python -m pip install --upgrade pip \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install --upgrade pip \
     && pip install \
         "funasr==1.4.13" \
         "fastapi>=0.115,<1" \
@@ -24,11 +30,13 @@ RUN python -m pip install --upgrade pip \
 
 # FunASR deliberately leaves the tensor runtime to the deployer.  Pin the CPU
 # wheel so this service never downloads CUDA libraries or drifts with latest.
-RUN pip install --index-url https://download.pytorch.org/whl/cpu \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url "${PYTORCH_CPU_INDEX_URL}" \
         "torch==2.5.1"
 
 # Feature extraction backend matched to the exact torch build.
-RUN pip install --index-url https://download.pytorch.org/whl/cpu \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --index-url "${PYTORCH_CPU_INDEX_URL}" \
         "torchaudio==2.5.1"
 
 EXPOSE 8001
