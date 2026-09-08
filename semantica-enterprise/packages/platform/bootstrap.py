@@ -144,9 +144,8 @@ def bootstrap(db: Session) -> None:
         select(ModelConfig).where(
             ModelConfig.tenant_id == tenant.id,
             ModelConfig.model_kind == "vision",
-            ModelConfig.is_default.is_(True),
             ModelConfig.deleted_at.is_(None),
-        )
+        ).order_by(ModelConfig.is_default.desc(), ModelConfig.created_at.asc())
     )
     if vision_model is None:
         vision_model = ModelConfig(
