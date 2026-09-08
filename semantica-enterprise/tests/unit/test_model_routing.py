@@ -108,3 +108,19 @@ def test_unresolved_route_does_not_claim_that_a_default_model_was_used() -> None
         assert resolved.source == "unresolved"
         assert resolved.warning == "模型路由未配置且没有可用的同类型默认模型"
         assert "已使用" not in resolved.warning
+
+
+def test_failed_connection_test_makes_model_unavailable_for_new_work() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        tenant = Tenant(code="failed", name="失效模型")
+        db.add(tenant); db.flush()
+        failed = _model(tenant.id, "失败模型", "llm", default=True)
+        failed.last_test_status = "failed"
+        db.add(failed); db.flush()
+
+        resolved = resolve_model_for_scene(db, tenant.id, "semantic_extract")
+
+        assert resolved.model is None
+        assert resolved.source == "unresolved"

@@ -2,7 +2,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from packages.platform.bootstrap import bootstrap
-from packages.platform.models import Base, ModelConfig
+from packages.platform.models import Base, ExtractionPolicy, ModelConfig
 
 
 def test_bootstrap_does_not_recreate_a_disabled_vision_model() -> None:
@@ -24,3 +24,15 @@ def test_bootstrap_does_not_recreate_a_disabled_vision_model() -> None:
         assert models[0].id == vision.id
         assert models[0].enabled is False
         assert models[0].is_default is False
+
+
+def test_bootstrap_extraction_policy_follows_model_routing() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with Session(engine) as db:
+        bootstrap(db)
+        policy = db.scalar(select(ExtractionPolicy).where(ExtractionPolicy.is_default.is_(True)))
+
+        assert policy is not None
+        assert policy.model_config_id is None

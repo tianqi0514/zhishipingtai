@@ -240,7 +240,10 @@ def bootstrap(db: Session) -> None:
             ExtractionPolicy(
                 tenant_id=tenant.id,
                 name="默认中文语义抽取",
-                model_config_id=kimi_model.id,
+                # Follow the active semantic-extraction route.  Binding the
+                # bootstrap model here would keep overriding a later model
+                # switch even after that model was disabled or failed tests.
+                model_config_id=None,
                 min_confidence=0.65,
                 max_chunks=30,
                 entity_types=["组织", "人物", "产品", "地点", "时间", "指标", "制度"],

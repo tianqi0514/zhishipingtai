@@ -158,9 +158,11 @@ from packages.platform.models import (
 )
 from packages.platform.knowledge_search import execute_hybrid_search
 from packages.platform.knowledge_processing import normalize_processing_mode
+from packages.platform.processing_readiness import build_processing_readiness
 from packages.platform.model_routing import (
     MODEL_ROUTE_SCENES,
     ModelRoutingError,
+    model_is_available,
     resolved_routes,
     validate_model_routes,
 )
@@ -830,6 +832,24 @@ def list_policies(user: User = Depends(get_current_user), db: Session = Depends(
     return [serialize_row(x) for x in db.scalars(select(ParserPolicy).where(ParserPolicy.tenant_id == user.tenant_id, _active(ParserPolicy)).order_by(ParserPolicy.name))]
 
 
+@router.get("/processing/readiness")
+def processing_readiness(
+    parser_policy_id: str | None = None,
+    mode: str = "both",
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return build_processing_readiness(
+            db,
+            tenant_id=user.tenant_id,
+            mode=mode,
+            parser_policy_id=parser_policy_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.post("/parser-policies")
 def create_policy(payload: ParserPolicyCreate, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     if payload.is_default: db.query(ParserPolicy).filter(ParserPolicy.tenant_id == admin.tenant_id).update({"is_default": False})
@@ -977,6 +997,30 @@ async def upload_document(
         processing_mode = normalize_processing_mode(knowledge_processing_mode)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if parser_policy_id:
+        selected_policy = _must(db, ParserPolicy, parser_policy_id, "解析策略")
+        if selected_policy.tenant_id != user.tenant_id:
+            raise HTTPException(404, "解析策略不存在")
+    else:
+        selected_policy = db.scalar(select(ParserPolicy).where(
+            ParserPolicy.tenant_id == user.tenant_id,
+            ParserPolicy.is_default.is_(True),
+            _active(ParserPolicy),
+        ))
+        parser_policy_id = selected_policy.id if selected_policy else None
+    readiness = build_processing_readiness(
+        db,
+        tenant_id=user.tenant_id,
+        mode=processing_mode,
+        parser_policy_id=parser_policy_id,
+    )
+    if not readiness["ready"]:
+        first_issue = readiness["blocking_issues"][0]
+        raise HTTPException(409, {
+            "code": "PROCESSING_NOT_READY",
+            "message": first_issue["message"],
+            "readiness": readiness,
+        })
     filename = Path(file.filename or "upload.bin").name
     suffix = Path(filename).suffix.lower()
     capability = FORMAT_CAPABILITIES.get(suffix)
@@ -1018,12 +1062,6 @@ async def upload_document(
         existing = db.scalar(select(DocumentVersion).where(DocumentVersion.document_id == document.id, DocumentVersion.sha256 == sha256))
         if existing: raise HTTPException(409, "相同内容的版本已存在")
         version_number = (db.scalar(select(func.max(DocumentVersion.version_number)).where(DocumentVersion.document_id == document.id)) or 0) + 1
-        if parser_policy_id:
-            selected_policy = _must(db, ParserPolicy, parser_policy_id, "解析策略")
-            if selected_policy.tenant_id != user.tenant_id: raise HTTPException(404, "解析策略不存在")
-        else:
-            policy = db.scalar(select(ParserPolicy).where(ParserPolicy.tenant_id == user.tenant_id, ParserPolicy.is_default.is_(True), _active(ParserPolicy)))
-            parser_policy_id = policy.id if policy else None
         object_key = f"{user.tenant_id}/{space_id}/{document.id}/{sha256}/{filename}"
         stored_content_type = (
             file.content_type
@@ -1815,6 +1853,7 @@ def create_extraction_policy(payload: ExtractionPolicyCreate, admin: User = Depe
     if payload.model_config_id:
         model = _must(db, ModelConfig, payload.model_config_id, "模型")
         if model.tenant_id != admin.tenant_id or model.model_kind != "llm": raise HTTPException(422, "抽取策略只能使用本租户大模型")
+        if not model_is_available(model): raise HTTPException(422, "抽取策略选择的大模型未启用或最近检测失败")
     row = ExtractionPolicy(tenant_id=admin.tenant_id, **payload.model_dump())
     db.add(row); db.flush()
     if row.is_default: _set_only_default(db, ExtractionPolicy, admin.tenant_id, row.id)
@@ -1832,6 +1871,7 @@ def update_extraction_policy(row_id: str, payload: ExtractionPolicyUpdate, admin
     if values.get("model_config_id"):
         model = _must(db, ModelConfig, values["model_config_id"], "模型")
         if model.tenant_id != admin.tenant_id or model.model_kind != "llm": raise HTTPException(422, "抽取策略只能使用本租户大模型")
+        if not model_is_available(model): raise HTTPException(422, "抽取策略选择的大模型未启用或最近检测失败")
     apply_patch(row, values, {"name", "model_config_id", "min_confidence", "max_chunks", "entity_types", "relation_types", "config", "enabled", "is_default"}); row.policy_version += 1
     if row.is_default: _set_only_default(db, ExtractionPolicy, admin.tenant_id, row.id)
     db.commit(); return serialize_row(row)

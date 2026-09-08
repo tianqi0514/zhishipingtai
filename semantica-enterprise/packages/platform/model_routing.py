@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .models import ModelConfig, ModelRoutingPolicy
@@ -31,6 +31,21 @@ class ResolvedModel:
     source: str
     scene: str
     warning: str | None = None
+
+
+def model_is_available(model: ModelConfig | None) -> bool:
+    """Return whether a configured model may be selected for new work.
+
+    A failed connection test is authoritative until the model is tested again.
+    Untested models remain selectable so a newly created configuration can be
+    wired before its first explicit connectivity test.
+    """
+    return bool(
+        model
+        and model.enabled
+        and model.deleted_at is None
+        and model.last_test_status != "failed"
+    )
 
 
 def validate_model_routes(
@@ -65,6 +80,8 @@ def validate_model_routes(
             )
         if not model.enabled:
             raise ModelRoutingError(f"{MODEL_ROUTE_SCENES[scene]['label']}引用的模型未启用")
+        if model.last_test_status == "failed":
+            raise ModelRoutingError(f"{MODEL_ROUTE_SCENES[scene]['label']}引用的模型最近检测失败")
     return normalized
 
 
@@ -85,8 +102,7 @@ def resolve_model_for_scene(
             explicit
             and explicit.tenant_id == tenant_id
             and explicit.model_kind == expected
-            and explicit.enabled
-            and explicit.deleted_at is None
+            and model_is_available(explicit)
         ):
             return ResolvedModel(explicit, "explicit", scene)
         return ResolvedModel(None, "explicit", scene, "显式配置的模型不可用")
@@ -106,8 +122,7 @@ def resolve_model_for_scene(
             routed
             and routed.tenant_id == tenant_id
             and routed.model_kind == expected
-            and routed.enabled
-            and routed.deleted_at is None
+            and model_is_available(routed)
         ):
             return ResolvedModel(routed, "routing_policy", scene)
 
@@ -118,6 +133,10 @@ def resolve_model_for_scene(
             ModelConfig.enabled.is_(True),
             ModelConfig.is_default.is_(True),
             ModelConfig.deleted_at.is_(None),
+            or_(
+                ModelConfig.last_test_status.is_(None),
+                ModelConfig.last_test_status != "failed",
+            ),
         ).limit(1)
     )
     if fallback is not None:
@@ -141,6 +160,7 @@ def resolved_routes(db: Session, tenant_id: str) -> list[dict[str, Any]]:
             "model_kind": definition["model_kind"],
             "model_config_id": resolved.model.id if resolved.model else None,
             "model_name": resolved.model.name if resolved.model else None,
+            "model_status": resolved.model.last_test_status if resolved.model else None,
             "source": resolved.source,
             "warning": resolved.warning,
         })
