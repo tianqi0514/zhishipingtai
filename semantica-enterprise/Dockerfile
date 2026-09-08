@@ -1,3 +1,13 @@
+FROM node:24-alpine AS miaobi-web-builder
+
+WORKDIR /frontend
+RUN corepack enable && corepack prepare pnpm@11.19.0 --activate
+COPY apps/miaobi-web/package.json apps/miaobi-web/pnpm-lock.yaml apps/miaobi-web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY apps/miaobi-web/index.html apps/miaobi-web/tsconfig.json apps/miaobi-web/vite.config.ts ./
+COPY apps/miaobi-web/src ./src
+RUN pnpm build
+
 FROM semantica-local:0.6.6-cce5ea1
 
 ARG DEBIAN_MIRROR=http://deb.debian.org/debian
@@ -38,6 +48,7 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
     && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 install -y --no-install-recommends libgl1 \
     && rm -rf /var/lib/apt/lists/*
 COPY apps /app/apps
+COPY --from=miaobi-web-builder /frontend/dist /app/apps/miaobi-web/dist
 COPY packages /app/packages
 COPY scripts /app/scripts
 COPY demo /app/demo

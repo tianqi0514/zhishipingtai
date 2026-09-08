@@ -25,6 +25,7 @@ from packages.platform.storage import object_storage
 
 settings = get_settings()
 static_dir = Path(__file__).parent / "static"
+miaobi_dir = Path(__file__).parents[1] / "miaobi-web" / "dist"
 
 
 @asynccontextmanager
@@ -78,6 +79,18 @@ def public_config():
 
 if static_dir.exists():
     app.mount("/assets", StaticFiles(directory=static_dir), name="assets")
+
+if miaobi_dir.exists():
+    app.mount("/miaobi/assets", StaticFiles(directory=miaobi_dir / "assets"), name="miaobi-assets")
+
+
+@app.get("/miaobi", include_in_schema=False)
+@app.get("/miaobi/", include_in_schema=False)
+@app.get("/miaobi/{path:path}", include_in_schema=False)
+def miaobi_spa(path: str = ""):
+    if not miaobi_dir.exists():
+        return FileResponse(static_dir / "index.html", status_code=503)
+    return FileResponse(miaobi_dir / "index.html")
 
 
 @app.get("/{path:path}", include_in_schema=False)

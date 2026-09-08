@@ -1,0 +1,4 @@
+allowBuilds:
+  # Vite requires esbuild's platform binary; no other dependency may run an
+  # install script without being reviewed and added here.
+  esbuild: true

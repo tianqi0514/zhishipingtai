@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import (
+    Application,
     ComputationDefinition,
     ComputationDefinitionVersion,
     ScenarioPackage,
@@ -20,6 +21,28 @@ SCENARIO_ROOT = Path(__file__).resolve().parents[2] / "demo" / "miaobi" / "scena
 
 def bootstrap_writing(db: Session, *, tenant_id: str, actor_id: str) -> None:
     """Idempotently install reviewed built-in contracts without changing user versions."""
+    application = db.scalar(
+        select(Application).where(
+            Application.tenant_id == tenant_id,
+            Application.code == "miaobi-emergency",
+            Application.deleted_at.is_(None),
+        )
+    )
+    if application is None:
+        db.add(
+            Application(
+                tenant_id=tenant_id,
+                code="miaobi-emergency",
+                name="妙笔·应急方案生成",
+                description="基于组织知识、确定性计算和规则推演生成可核验的专业方案。",
+                app_type="web",
+                environment="production",
+                owner_id=actor_id,
+                status="active",
+                config={"launch_url": "/miaobi/", "product": "miaobi"},
+                enabled=True,
+            )
+        )
     for operation, spec in BUILTIN_FORMULAS.items():
         definition = db.scalar(
             select(ComputationDefinition).where(
@@ -119,4 +142,3 @@ def bootstrap_writing(db: Session, *, tenant_id: str, actor_id: str) -> None:
         db.add(version)
         db.flush()
         package.current_version_id = version.id
-

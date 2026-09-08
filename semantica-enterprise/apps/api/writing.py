@@ -744,6 +744,24 @@ def create_document(
     return {**serialize_row(row), "current_version": serialize_row(version)}
 
 
+@router.get("/projects/{project_id}/documents")
+def list_project_documents(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _project(db, project_id, user)
+    return [
+        serialize_row(row)
+        for row in db.scalars(
+            select(WritingDocument).where(
+                WritingDocument.project_id == project_id,
+                _active(WritingDocument),
+            ).order_by(WritingDocument.updated_at.desc())
+        )
+    ]
+
+
 @router.get("/documents/{document_id}")
 def get_document(document_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     row, project = _document(db, document_id, user)
@@ -790,13 +808,17 @@ def create_document_version(
         blocking = [item for item in issues if item["code"] in {"missing_binding", "stale_binding", "unverified_binding"}]
         if blocking:
             raise HTTPException(status_code=409, detail={"message": "文稿仍有不可发布的问题", "issues": blocking})
+    next_hash = content_hash(payload.content)
+    current = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+    if current and current.content_hash == next_hash and not payload.publish:
+        return {**serialize_row(current), "issues": issues, "unchanged": True}
     number = int(db.scalar(select(func.max(WritingDocumentVersion.version)).where(WritingDocumentVersion.document_id == document.id)) or 0) + 1
     row = WritingDocumentVersion(
         tenant_id=user.tenant_id,
         document_id=document.id,
         version=number,
         content=payload.content,
-        content_hash=content_hash(payload.content),
+        content_hash=next_hash,
         scenario_package_version_id=project.scenario_package_version_id,
         knowledge_product_release_id=project.knowledge_product_release_id,
         status="published" if payload.publish else "draft",

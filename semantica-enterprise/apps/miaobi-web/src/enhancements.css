@@ -1,0 +1,32 @@
+.secondary {
+  text-decoration: none;
+}
+
+.primary.compact {
+  padding: 8px 12px;
+}
+
+.empty-table {
+  padding: 28px;
+  color: #8993a5;
+  text-align: center;
+}
+
+.notice.compact {
+  margin: 12px 0;
+  padding: 12px;
+}
+
+.availability {
+  padding-top: 16px;
+  color: #6c788c;
+  border-top: 1px solid #edf0f4;
+}
+
+.issue-list {
+  margin: 16px 0 0;
+  padding: 12px 12px 12px 30px;
+  color: #9a4528;
+  background: #fff5ef;
+  border-radius: 10px;
+}

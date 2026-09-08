@@ -9,5 +9,7 @@ deploy/secrets
 __pycache__
 .pytest_cache
 tests
+apps/miaobi-web/node_modules
+apps/miaobi-web/dist
 uv.lock
 *.pyc
