@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -26,22 +26,29 @@ from apps.api.writing_schemas import (
     WritingDocumentValidate,
     WritingDocumentVersionCreate,
     WritingMemberCreate,
+    WritingKnowledgeSearch,
     WritingProjectCreate,
     WritingProjectUpdate,
     WritingRecomputeRequest,
 )
 from packages.platform.audit import audit
+from packages.platform.curation import effective_chunk_text
 from packages.platform.database import get_db
+from packages.platform.knowledge_search import execute_hybrid_search
 from packages.platform.models import (
     AlternativePlan,
     Application,
     ComputationDefinition,
     ComputationDefinitionVersion,
     ComputationRun,
+    Chunk,
     DecisionGate,
     DecisionRecord,
     KnowledgeProductRelease,
     KnowledgeProductReleaseItem,
+    Document,
+    DocumentVersion,
+    QueryRun,
     ProjectFact,
     ScenarioPackage,
     ScenarioPackageVersion,
@@ -129,6 +136,25 @@ def _release_for_user(db: Session, release_id: str, user: User) -> KnowledgeProd
     if any(not has_space_permission(db, user, item.space_id, "read") for item in items):
         raise HTTPException(status_code=403, detail="无权读取知识产品版本包含的全部知识空间")
     return release
+
+
+def _release_scope(
+    db: Session,
+    project: WritingProject,
+    user: User,
+) -> tuple[list[str], dict[str, str]]:
+    release = _release_for_user(db, project.knowledge_product_release_id, user)
+    items = list(
+        db.scalars(
+            select(KnowledgeProductReleaseItem).where(
+                KnowledgeProductReleaseItem.product_release_id == release.id,
+                _active(KnowledgeProductReleaseItem),
+            )
+        )
+    )
+    return [item.space_id for item in items], {
+        item.space_id: item.knowledge_release_id for item in items
+    }
 
 
 def _scenario_contract(version: ScenarioPackageVersion) -> dict[str, Any]:
@@ -430,6 +456,104 @@ def get_project(project_id: str, user: User = Depends(get_current_user), db: Ses
         db.scalar(select(func.count()).select_from(DecisionGate).where(DecisionGate.project_id == row.id, DecisionGate.required.is_(True), DecisionGate.status != "confirmed", _active(DecisionGate))) or 0
     )
     return data
+
+
+@router.post("/projects/{project_id}/knowledge/search")
+def search_project_knowledge(
+    project_id: str,
+    payload: WritingKnowledgeSearch,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Search the immutable Knowledge Product release bound to this project."""
+    project = _project(db, project_id, user)
+    space_ids, knowledge_release_ids = _release_scope(db, project, user)
+    try:
+        result = execute_hybrid_search(
+            db,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            query=payload.query,
+            space_ids=space_ids,
+            top_k=payload.top_k,
+            use_keyword=payload.use_keyword,
+            use_vector=payload.use_vector,
+            use_graph=payload.use_graph,
+            use_reranker=payload.use_reranker,
+            filters=payload.filters,
+            audit_action="writing.knowledge.search",
+            knowledge_release_ids=knowledge_release_ids,
+            retrieval_context={
+                "writing_project_id": project.id,
+                "knowledge_product_release_id": project.knowledge_product_release_id,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    result["knowledge_product_release_id"] = project.knowledge_product_release_id
+    result["snapshot_locked"] = True
+    return result
+
+
+@router.get("/projects/{project_id}/knowledge/fragments/{chunk_id}")
+def get_project_fragment(
+    project_id: str,
+    chunk_id: str,
+    query_run_id: str = Query(min_length=1),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read only a fragment attested by this project's release-scoped QueryRun."""
+    project = _project(db, project_id, user)
+    run = _tenant_row(db, QueryRun, query_run_id, user.tenant_id, "检索记录")
+    policy = dict(run.retrieval_policy or {})
+    if (
+        run.user_id != user.id
+        or policy.get("writing_project_id") != project.id
+        or policy.get("knowledge_product_release_id") != project.knowledge_product_release_id
+    ):
+        raise HTTPException(status_code=403, detail="该检索记录不属于当前方案任务")
+    item = next(
+        (
+            row
+            for row in (run.results or [])
+            if str(row.get("chunk_id") or "") == chunk_id
+        ),
+        None,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="该片段不在本次检索结果中")
+    chunk = _tenant_row(db, Chunk, chunk_id, user.tenant_id, "知识片段")
+    space_ids, _ = _release_scope(db, project, user)
+    if chunk.space_id not in space_ids:
+        raise HTTPException(status_code=403, detail="知识片段超出项目知识产品范围")
+    document = db.get(Document, chunk.document_id)
+    version = db.get(DocumentVersion, chunk.version_id)
+    if document is None or version is None or document.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="来源文档不存在")
+    try:
+        text, curation = effective_chunk_text(db, chunk, include_superseded=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="知识片段已被人工屏蔽") from exc
+    return {
+        "query_run_id": run.id,
+        "knowledge_product_release_id": project.knowledge_product_release_id,
+        "chunk_id": chunk.id,
+        "document_id": document.id,
+        "version_id": version.id,
+        "document_title": document.title,
+        "text": text,
+        "page_number": chunk.page_number,
+        "structural_path": chunk.structural_path,
+        "source_span": chunk.source_span or {},
+        "document_version": version.version_number,
+        "filename": version.filename,
+        "content_type": version.content_type,
+        "historical_snapshot": document.current_version_id != version.id,
+        "curation": curation,
+        "has_access": True,
+    }
 
 
 @router.put("/projects/{project_id}")
@@ -851,6 +975,19 @@ def upsert_binding(
     document, project = _document(db, document_id, user, "editor")
     if payload.knowledge_product_release_id and payload.knowledge_product_release_id != project.knowledge_product_release_id:
         raise HTTPException(status_code=409, detail="引用必须属于方案任务锁定的知识产品版本")
+    if payload.block_type == "knowledge_citation":
+        query_run = _tenant_row(db, QueryRun, str(payload.query_run_id), user.tenant_id, "检索记录")
+        query_policy = dict(query_run.retrieval_policy or {})
+        if (
+            query_run.user_id != user.id
+            or query_policy.get("writing_project_id") != project.id
+            or query_policy.get("knowledge_product_release_id") != project.knowledge_product_release_id
+            or not any(
+                str(item.get("chunk_id") or "") == str(payload.chunk_id)
+                for item in (query_run.results or [])
+            )
+        ):
+            raise HTTPException(status_code=403, detail="知识引用不属于当前方案任务的检索结果")
     if payload.fact_id:
         fact = _tenant_row(db, ProjectFact, payload.fact_id, user.tenant_id, "事实")
         if fact.project_id != project.id:

@@ -113,6 +113,15 @@ def test_trusted_blocks_require_authoritative_reference() -> None:
             content_hash="a" * 64,
         )
 
+    with pytest.raises(ValueError, match="检索记录"):
+        WritingBlockBindingUpsert(
+            block_id="citation-1",
+            block_type="knowledge_citation",
+            source_type="policy_document",
+            chunk_id="chunk-1",
+            content_hash="a" * 64,
+        )
+
 
 def test_plate_content_validation_reports_stale_and_duplicate_blocks() -> None:
     content = [
@@ -146,4 +155,3 @@ def test_dependency_impact_is_local_to_changed_fact() -> None:
     )
     assert result["computation_run_ids"] == ["run-rescue"]
     assert result["block_ids"] == ["rescue-gap"]
-

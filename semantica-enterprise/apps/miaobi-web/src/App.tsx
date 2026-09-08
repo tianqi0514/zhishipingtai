@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { api, ApiError } from './api';
 import { MiaobiEditor } from './editor/MiaobiEditor';
-import type { AlternativePlan, Fact, Project, ScenarioPackage, WritingDocument } from './types/domain';
+import type { AlternativePlan, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingDocument } from './types/domain';
 
 type Product = { id: string; name: string; code: string };
 type Release = { id: string; version: number; status: string };
@@ -51,6 +51,7 @@ export function App() {
   const [error, setError] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
   const [assistantTab, setAssistantTab] = useState<'assistant' | 'evidence' | 'calculation' | 'review'>('assistant');
+  const [insertionRequest, setInsertionRequest] = useState<PlateNode | null>(null);
 
   const selected = projects.find((item) => item.id === projectId) || null;
 
@@ -146,13 +147,13 @@ export function App() {
               <div className="writing-layout">
                 <section className="outline-pane"><b>文稿目录</b>{document ? <Outline content={document.current_version?.content || []} /> : <p>创建文稿后自动生成目录。</p>}<div className="missing-box"><AlertTriangle size={16} /><span>缺失项会在这里提示，不会由模型静默补齐。</span></div></section>
                 <section className="document-pane">
-                  {document ? <MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} /> : <EmptyAction title="还没有文稿" detail="从锁定的知识产品版本创建第一份方案初稿。" action="创建文稿" onClick={() => void createDocument()} />}
+                  {document ? <MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /> : <EmptyAction title="还没有文稿" detail="从锁定的知识产品版本创建第一份方案初稿。" action="创建文稿" onClick={() => void createDocument()} />}
                 </section>
                 <aside className="assistant-pane">
                   <div className="assistant-tabs">
                     {([['assistant','妙笔助手'],['evidence','引用依据'],['calculation','计算与推演'],['review','审校问题']] as const).map(([key,label]) => <button type="button" key={key} className={assistantTab === key ? 'active' : ''} onClick={() => setAssistantTab(key)}>{label}</button>)}
                   </div>
-                  <AssistantPanel tab={assistantTab} facts={facts} plans={plans} />
+                  <AssistantPanel tab={assistantTab} project={selected} document={document} facts={facts} plans={plans} onInsert={setInsertionRequest} onError={setError} />
                 </aside>
               </div>
             )}
@@ -232,11 +233,72 @@ function Review({ document, onError }: { document: WritingDocument | null; onErr
   return <div className="two-columns"><section className="content-card"><h2>发布前检查</h2>{document ? <div className="check-list"><p><CheckCircle2 />文稿已创建</p><p><AlertTriangle />必须完成全部人工确认节点</p><p><AlertTriangle />可信块不得存在失效或未核验依据</p></div> : <p>请先创建文稿。</p>}<button type="button" className="primary" disabled={!document || checking} onClick={() => void validate()}>{checking ? '检查中…' : '执行审校'}</button>{issues.length > 0 && <ul className="issue-list">{issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul>}{document && !checking && issues.length === 0 && <p className="field-help">点击“执行审校”后显示真实检查结果。</p>}</section><section className="content-card"><h2>正式导出</h2><p>导出服务接入后才会开放格式选择；当前页面不提供无效下载按钮。</p><span className="status draft">导出服务建设中</span></section></div>;
 }
 
-function AssistantPanel({ tab, facts, plans }: { tab: string; facts: Fact[]; plans: AlternativePlan[] }) {
-  if (tab === 'evidence') return <div className="assistant-content"><h3>引用依据</h3><p>正文中选择知识引用后，这里展示文件、版本、页码和当前有效状态。</p><div className="empty-mini">尚未选择引用块</div></div>;
+function AssistantPanel({ tab, project, document, facts, plans, onInsert, onError }: { tab: string; project: Project; document: WritingDocument | null; facts: Fact[]; plans: AlternativePlan[]; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
+  if (tab === 'evidence') return <EvidencePanel project={project} document={document} onInsert={onInsert} onError={onError} />;
   if (tab === 'calculation') return <div className="assistant-content"><h3>计算与推演</h3><p>已核验事实 {facts.filter((item) => item.verification_status === 'verified').length} 条，备选方案 {plans.length} 套。</p><div className="empty-mini">选择测算值或推演结论查看输入、公式、规则和证据。</div></div>;
   if (tab === 'review') return <div className="assistant-content"><h3>审校问题</h3><div className="empty-mini">执行审校后按严重程度列出事实、引用、结构和表述问题。</div></div>;
   return <div className="assistant-content"><h3>妙笔助手</h3><div className="notice compact"><Sparkles size={16} /><div><b>知识 Agent 接入中</b><p>工具注册和证据绑定完成前，这里不会提供假生成按钮。</p></div></div><small>后续生成内容将以修订建议插入，不会静默覆盖正文。</small></div>;
+}
+
+function EvidencePanel({ project, document, onInsert, onError }: { project: Project; document: WritingDocument | null; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
+  const [query, setQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [result, setResult] = useState<KnowledgeSearchResponse | null>(null);
+  const [inserting, setInserting] = useState('');
+
+  const search = async () => {
+    if (!query.trim() || searching) return;
+    setSearching(true);
+    try {
+      setResult(await api<KnowledgeSearchResponse>(`/writing/projects/${project.id}/knowledge/search`, {
+        method: 'POST',
+        body: { query: query.trim(), top_k: 8, use_keyword: true, use_vector: true, use_graph: true, use_reranker: false },
+      }));
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '知识检索失败'); }
+    finally { setSearching(false); }
+  };
+
+  const insert = async (item: KnowledgeResult) => {
+    if (!document || !result || inserting) return;
+    setInserting(item.chunk_id);
+    const block: PlateNode = {
+      id: crypto.randomUUID(),
+      type: 'knowledge_citation',
+      source_title: item.title,
+      source_locator: { page_number: item.page_number, structural_path: item.structural_path },
+      freshness_status: 'current',
+      children: [{ text: `${item.title}${item.page_number ? `（第 ${item.page_number} 页）` : ''}：${item.snippet || item.text || ''}` }],
+    };
+    try {
+      await api(`/writing/documents/${document.id}/bindings`, {
+        method: 'POST',
+        body: {
+          block_id: block.id,
+          block_type: block.type,
+          source_type: 'policy_document',
+          source_id: item.document_id,
+          source_version: item.version_id,
+          knowledge_product_release_id: project.knowledge_product_release_id,
+          chunk_id: item.chunk_id,
+          query_run_id: result.query_id,
+          content_hash: await sha256(block),
+          verification_status: 'verified',
+          freshness_status: 'current',
+          metadata: { rank: item.rank, channels: item.channels, fused_score: item.fused_score },
+        },
+      });
+      onInsert(block);
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '插入引用失败'); }
+    finally { setInserting(''); }
+  };
+
+  return <div className="assistant-content"><h3>引用依据</h3><p>检索范围固定为当前方案任务锁定的知识产品版本。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{item.snippet || item.text || '无摘要'}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前锁定版本中没有检索到依据。</div>}</div></div>;
+}
+
+async function sha256(value: unknown) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map((item) => item.toString(16).padStart(2, '0')).join('');
 }
 
 function Outline({ content }: { content: Array<Record<string, unknown>> }) {

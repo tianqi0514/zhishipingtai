@@ -58,3 +58,28 @@ export type AlternativePlan = {
   result: { route?: { path: string[]; minutes: number; risk: number }; resource_allocation?: unknown[] };
   unresolved_gaps: Array<{ resource: string; gap: number; unit: string }>;
 };
+
+export type KnowledgeResult = {
+  rank: number;
+  chunk_id: string;
+  document_id: string;
+  version_id: string;
+  title: string;
+  text?: string;
+  snippet?: string;
+  page_number?: number;
+  structural_path?: string;
+  channels: string[];
+  fused_score: number;
+  rerank_score?: number;
+  historical_snapshot?: boolean;
+};
+
+export type KnowledgeSearchResponse = {
+  query_id: string;
+  knowledge_product_release_id: string;
+  snapshot_locked: boolean;
+  items: KnowledgeResult[];
+  warnings: string[];
+  trace_summary: Record<string, unknown>;
+};

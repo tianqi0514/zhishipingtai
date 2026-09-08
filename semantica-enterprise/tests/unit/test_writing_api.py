@@ -219,6 +219,51 @@ def test_writing_project_fact_computation_and_local_stale_propagation() -> None:
         assert impact.json()["automatic_overwrite"] is False
 
 
+def test_project_knowledge_search_is_locked_to_product_release(monkeypatch) -> None:
+    captured = {}
+
+    def fake_search(_db, **kwargs):
+        captured.update(kwargs)
+        return {
+            "query_id": "query-run",
+            "normalized_query": kwargs["query"],
+            "items": [],
+            "channel_counts": {"keyword": 0, "vector": 0, "graph": 0},
+            "warnings": [],
+            "trace_summary": {},
+        }
+
+    monkeypatch.setattr("apps.api.writing.execute_hybrid_search", fake_search)
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        response = client.post(
+            f"/api/v1/writing/projects/{project['id']}/knowledge/search",
+            json={"query": "地震应急响应等级", "use_reranker": False},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["snapshot_locked"] is True
+        assert captured["knowledge_release_ids"]
+        assert captured["retrieval_context"] == {
+            "writing_project_id": project["id"],
+            "knowledge_product_release_id": release.id,
+        }
+
+
+def test_project_knowledge_search_rejects_all_channels_disabled() -> None:
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        response = client.post(
+            f"/api/v1/writing/projects/{project['id']}/knowledge/search",
+            json={
+                "query": "地震应急响应等级",
+                "use_keyword": False,
+                "use_vector": False,
+                "use_graph": False,
+            },
+        )
+        assert response.status_code == 422
+
+
 def test_publish_requires_all_decision_gates() -> None:
     with writing_client() as (client, _, release):
         project = _create_project(client, release.id)

@@ -28,6 +28,7 @@ from .models import (
     InferenceEvidence,
     InferredFact,
     IndexRelease,
+    KnowledgeRelease,
     MediaFrame,
     MediaProcessingRun,
     ModelConfig,
@@ -188,6 +189,7 @@ def _is_current_chunk_item(
     *,
     tenant_id: str,
     space_ids: list[str],
+    allow_historical_snapshot: bool = False,
 ) -> bool:
     """Fail closed when a search backend returns a stale or foreign point.
 
@@ -201,15 +203,21 @@ def _is_current_chunk_item(
     if not chunk_id:
         return False
     chunk = db.get(Chunk, str(chunk_id))
-    if (
-        chunk is None
-        or chunk.deleted_at is not None
-        or chunk.status != "published"
-        or chunk.tenant_id != tenant_id
-        or chunk.space_id not in space_ids
-    ):
+    if chunk is None or chunk.tenant_id != tenant_id or chunk.space_id not in space_ids:
         return False
     document = db.get(Document, chunk.document_id)
+    if allow_historical_snapshot:
+        if document is None or document.tenant_id != tenant_id or document.space_id != chunk.space_id:
+            return False
+        item["document_id"] = chunk.document_id
+        item["version_id"] = chunk.version_id
+        item["space_id"] = chunk.space_id
+        item["title"] = document.title
+        item["document_tags"] = document.tags or []
+        item["historical_snapshot"] = document.current_version_id != chunk.version_id
+        return True
+    if chunk.deleted_at is not None or chunk.status != "published":
+        return False
     if (
         document is None
         or document.deleted_at is not None
@@ -231,22 +239,25 @@ def _graph_search(
     query: str,
     space_ids: list[str],
     limit: int,
+    graph_releases: list[GraphRelease] | None = None,
+    allow_historical_snapshot: bool = False,
 ) -> list[dict[str, Any]]:
     if not query.casefold().strip():
         return []
-    releases: list[GraphRelease] = []
-    for space_id in space_ids:
-        release = db.scalar(
-            select(GraphRelease)
-            .where(
-                GraphRelease.space_id == space_id,
-                GraphRelease.status == "published",
+    releases: list[GraphRelease] = list(graph_releases or [])
+    if graph_releases is None:
+        for space_id in space_ids:
+            release = db.scalar(
+                select(GraphRelease)
+                .where(
+                    GraphRelease.space_id == space_id,
+                    GraphRelease.status == "published",
+                )
+                .order_by(GraphRelease.release_number.desc())
+                .limit(1)
             )
-            .order_by(GraphRelease.release_number.desc())
-            .limit(1)
-        )
-        if release is not None:
-            releases.append(release)
+            if release is not None:
+                releases.append(release)
     if not releases:
         return []
     ranked_facts: dict[str, float] = {}
@@ -269,8 +280,7 @@ def _graph_search(
             select(Fact).where(
                 Fact.id.in_(ranked_facts),
                 Fact.space_id.in_(space_ids),
-                Fact.status == "published",
-                _active(Fact),
+                *([] if allow_historical_snapshot else [Fact.status == "published", _active(Fact)]),
             )
         )
     }
@@ -280,8 +290,7 @@ def _graph_search(
             select(InferredFact).where(
                 InferredFact.id.in_(ranked_facts),
                 InferredFact.space_id.in_(space_ids),
-                InferredFact.status == "published",
-                _active(InferredFact),
+                *([] if allow_historical_snapshot else [InferredFact.status == "published", _active(InferredFact)]),
             )
         )
     }
@@ -308,7 +317,10 @@ def _graph_search(
         if chunk is None or chunk.space_id not in space_ids:
             continue
         document = db.get(Document, chunk.document_id)
-        if document is None or document.deleted_at is not None or document.current_version_id != chunk.version_id:
+        if document is None or (
+            not allow_historical_snapshot
+            and (document.deleted_at is not None or document.current_version_id != chunk.version_id)
+        ):
             continue
         relation = fact or inferred
         subject = db.get(CanonicalEntity, relation.subject_entity_id)
@@ -406,6 +418,8 @@ def execute_hybrid_search(
     use_reranker: bool,
     filters: dict[str, Any] | None = None,
     audit_action: str = "knowledge.search",
+    knowledge_release_ids: dict[str, str] | None = None,
+    retrieval_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute the authoritative retrieval pipeline for UI, REST, MCP and Harness."""
     filters = filters or {}
@@ -413,19 +427,39 @@ def execute_hybrid_search(
     warnings: list[str] = []
     timings: dict[str, int] = {}
     releases: list[IndexRelease] = []
+    graph_releases: list[GraphRelease] = []
+    pinned_releases = knowledge_release_ids or {}
     for space_id in space_ids:
-        release = db.scalar(
-            select(IndexRelease)
-            .where(
-                IndexRelease.space_id == space_id,
-                IndexRelease.status == "published",
-                _active(IndexRelease),
-            )
-            .order_by(IndexRelease.release_number.desc())
-            .limit(1)
-        )
-        if release:
+        if pinned_releases:
+            pinned_id = pinned_releases.get(space_id)
+            knowledge_release = db.get(KnowledgeRelease, pinned_id) if pinned_id else None
+            if (
+                knowledge_release is None
+                or knowledge_release.deleted_at is not None
+                or knowledge_release.tenant_id != tenant_id
+                or knowledge_release.space_id != space_id
+            ):
+                raise ValueError("知识产品版本包含无效的知识快照")
+            release = db.get(IndexRelease, knowledge_release.index_release_id)
+            graph_release = db.get(GraphRelease, knowledge_release.graph_release_id)
+            if release is None or release.deleted_at is not None or release.tenant_id != tenant_id:
+                raise ValueError("知识产品版本对应的检索快照不可用")
             releases.append(release)
+            if graph_release is not None and graph_release.deleted_at is None:
+                graph_releases.append(graph_release)
+        else:
+            release = db.scalar(
+                select(IndexRelease)
+                .where(
+                    IndexRelease.space_id == space_id,
+                    IndexRelease.status == "published",
+                    _active(IndexRelease),
+                )
+                .order_by(IndexRelease.release_number.desc())
+                .limit(1)
+            )
+            if release:
+                releases.append(release)
 
     channel_results: dict[str, list[dict[str, Any]]] = {
         "keyword": [],
@@ -477,7 +511,14 @@ def execute_hybrid_search(
     if use_graph:
         channel_started = time.perf_counter()
         try:
-            channel_results["graph"] = _graph_search(db, query, space_ids, top_k * 3)
+            channel_results["graph"] = _graph_search(
+                db,
+                query,
+                space_ids,
+                top_k * 3,
+                graph_releases=graph_releases if pinned_releases else None,
+                allow_historical_snapshot=bool(pinned_releases),
+            )
         except Exception as exc:
             warnings.append(f"图谱检索暂不可用：{str(exc)[:160]}")
         timings["graph_ms"] = round((time.perf_counter() - channel_started) * 1000)
@@ -492,6 +533,7 @@ def execute_hybrid_search(
                 canonical,
                 tenant_id=tenant_id,
                 space_ids=space_ids,
+                allow_historical_snapshot=bool(pinned_releases),
             ):
                 stale_filtered += 1
                 continue
@@ -580,6 +622,8 @@ def execute_hybrid_search(
             "use_graph": use_graph,
             "use_reranker": use_reranker,
             "filters": filters,
+            "knowledge_release_ids": pinned_releases,
+            **(retrieval_context or {}),
         },
         result_count=len(items),
         results=items,

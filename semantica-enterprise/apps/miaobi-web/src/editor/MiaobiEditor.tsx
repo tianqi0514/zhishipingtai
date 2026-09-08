@@ -85,9 +85,11 @@ type Props = {
   document: WritingDocument;
   onSaved: (document: WritingDocument) => void;
   onDirtyChange: (dirty: boolean) => void;
+  insertionRequest?: PlateNode | null;
+  onInserted?: () => void;
 };
 
-export function MiaobiEditor({ document, onSaved, onDirtyChange }: Props) {
+export function MiaobiEditor({ document, onSaved, onDirtyChange, insertionRequest, onInserted }: Props) {
   const initial = (document.current_version?.content?.length ? document.current_version.content : EMPTY_VALUE) as Value;
   const editor = usePlateEditor({ plugins: EditorKit, value: initial }, [document.id]);
   const [saving, setSaving] = useState(false);
@@ -112,6 +114,12 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange }: Props) {
   };
 
   useEffect(() => () => window.clearTimeout(saveTimer.current), []);
+
+  useEffect(() => {
+    if (!insertionRequest) return;
+    editor.tf.insertNodes(insertionRequest as Value[number]);
+    onInserted?.();
+  }, [editor, insertionRequest, onInserted]);
 
   const tools = useMemo(() => [
     ['正文', KEYS.p], ['标题1', KEYS.h1], ['标题2', KEYS.h2], ['标题3', KEYS.h3],

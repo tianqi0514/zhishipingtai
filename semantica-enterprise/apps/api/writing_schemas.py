@@ -219,6 +219,8 @@ class WritingBlockBindingUpsert(StrictModel):
         expected = mapping.get(self.block_type)
         if self.block_type in mapping and not expected:
             raise ValueError("该可信业务块缺少对应的权威来源")
+        if self.block_type == "knowledge_citation" and not self.query_run_id:
+            raise ValueError("知识引用必须关联产生该片段的检索记录")
         return self
 
 
@@ -231,6 +233,22 @@ class WritingRecomputeRequest(StrictModel):
     changed_fact_ids: list[str] = Field(min_length=1)
 
 
+class WritingKnowledgeSearch(StrictModel):
+    query: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=8, ge=1, le=30)
+    use_keyword: bool = True
+    use_vector: bool = True
+    use_graph: bool = True
+    use_reranker: bool = False
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_retrieval_channel(self):
+        if not (self.use_keyword or self.use_vector or self.use_graph):
+            raise ValueError("至少启用一种知识检索方式")
+        return self
+
+
 class DecisionRecordCreate(StrictModel):
     decision: Literal["confirm", "reject", "override"]
     original_value: dict[str, Any] = Field(default_factory=dict)
@@ -241,4 +259,3 @@ class DecisionRecordCreate(StrictModel):
 class WritingExportCreate(StrictModel):
     output_format: Literal["docx", "pdf", "json", "xlsx", "geojson"]
     template_version_id: str | None = None
-
