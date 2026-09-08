@@ -53,12 +53,41 @@ def main() -> None:
     routes = {tuple(row["result"]["route"]["path"]) for row in plans}
     if len(plans) != 3 or len(routes) != 3:
         failures.append("三套方案没有形成三条真实不同路线")
+    selected_plans = [row for row in plans if row.get("status") == "selected"]
+    if len(selected_plans) != 1 or selected_plans[0].get("plan_key") != "balanced":
+        failures.append("演示任务应且仅应选择综合平衡方案")
     reasoning = api.get(f"/writing/projects/{project['id']}/reasoning-runs")
     if not reasoning or reasoning[0]["engine"] != "semantica-datalog" or reasoning[0]["status"] != "succeeded":
         failures.append("Semantica 地震等级推演未成功")
     documents = api.get(f"/writing/projects/{project['id']}/documents")
     if not documents:
         failures.append("演示文稿不存在")
+    else:
+        release_version = next(
+            (
+                row["version"]
+                for row in api.get(f"/knowledge-products/{product['id']}/releases")
+                if row["id"] == project.get("knowledge_product_release_id")
+            ),
+            None,
+        ) if product else None
+        ready_title = f"积石山县6.2级地震应急处置方案（知识版本 {release_version}）"
+        ready_document = next((row for row in documents if row["title"] == ready_title), None)
+        if not ready_document:
+            failures.append("缺少与当前知识产品版本一致的可审校演示文稿")
+        else:
+            validation = api.post(
+                f"/writing/documents/{ready_document['id']}/validate",
+                {"for_publish": False},
+            )
+            if validation.get("issues"):
+                failures.append(f"当前演示文稿存在可信块问题：{validation['issues']}")
+            bindings = api.get(f"/writing/documents/{ready_document['id']}/bindings")
+            if len(bindings) < 3 or any(
+                (row.get("metadata_json") or {}).get("content_hash_algorithm") != "canonical-json-v1"
+                for row in bindings
+            ):
+                failures.append("当前演示文稿没有完成引用、测算和推演块的服务端哈希绑定")
     material_documents = api.get("/documents", space_id=space["id"]) if space else []
     if len(material_documents) != 3:
         failures.append(f"地震应急专属空间应有 3 份确定性材料，实际为 {len(material_documents)} 份")

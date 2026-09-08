@@ -1,11 +1,12 @@
 {
   "code": "fire-response-plan", "name": "火灾扑救保障方案", "disaster_type": "fire", "status": "draft",
-  "input_schema": {"type": "object", "required": ["event_name", "fire_type", "affected_area"], "properties": {"event_name": {"type": "string"}, "fire_type": {"type": "string"}, "affected_area": {"type": "number"}, "hazardous_material": {"type": "boolean"}}},
-  "ontology_mapping": {"event_name": "FireEvent.name", "fire_type": "FireEvent.type", "affected_area": "FireEvent.affectedArea"},
+  "input_schema": {"type": "object", "required": ["event_name", "fire_type", "affected_area", "fire_engines_required", "fire_engines_available"], "properties": {"event_name": {"type": "string"}, "fire_type": {"type": "string"}, "affected_area": {"type": "number"}, "hazardous_material": {"type": "boolean"}, "fire_engines_required": {"type": "integer", "minimum": 0, "unit": "辆"}, "fire_engines_available": {"type": "integer", "minimum": 0, "unit": "辆"}}},
+  "ontology_mapping": {"event_name": "FireEvent.name", "fire_type": "FireEvent.type", "affected_area": "FireEvent.affectedArea", "fire_engines_required": "ResourceDemand.required", "fire_engines_available": "ResourceInventory.available"},
   "rule_set_ids": ["fire-response-tasks"], "formula_ids": ["resource-gap", "vehicle-trips"], "tool_ids": ["ResourceInventoryMCP", "TrafficStatusMCP", "MapRoutingMCP"],
   "chapter_template": {"chapters": [{"key": "general", "title": "总则"}, {"key": "assessment", "title": "火情研判"}, {"key": "organization", "title": "组织体系"}, {"key": "response", "title": "灭火与救援保障"}, {"key": "appendix", "title": "附则"}]},
   "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]}, "review_rules": {"require_citations": true},
   "decision_gates": [{"key": "hazard", "name": "危险物质确认", "required": true}, {"key": "publish", "name": "正式发布确认", "required": true}],
   "comparison_dimensions": [{"key": "suppression_time", "name": "控制时间", "direction": "min"}, {"key": "responder_risk", "name": "救援风险", "direction": "min"}],
-  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"}
+  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"},
+  "fixture": {"disclaimer": "确定性技术验收数据，模板待客户业务确认", "inputs": {"event_name": "工业园区火灾演练", "fire_type": "厂房火灾", "affected_area": 3200, "hazardous_material": true, "fire_engines_required": 20, "fire_engines_available": 12}, "resource": {"required_key": "fire_engines_required", "available_key": "fire_engines_available", "label": "消防车辆缺口", "unit": "辆", "expected_gap": 8}}
 }

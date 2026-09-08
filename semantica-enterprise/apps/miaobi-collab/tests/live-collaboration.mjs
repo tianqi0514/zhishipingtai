@@ -9,6 +9,7 @@ const url = process.env.COLLABORATION_WS_URL || 'ws://127.0.0.1:8092';
 const secretFile = process.env.COLLABORATION_SECRET_FILE || new URL('../../../deploy/secrets/agent_service_secret', import.meta.url);
 const mode = process.argv[2] || 'write';
 const marker = process.env.COLLABORATION_TEST_MARKER || 'p4-persistence-marker';
+const clientCount = Math.max(2, Number.parseInt(process.env.COLLABORATION_CLIENTS || '2', 10));
 const tenant = '11111111-1111-1111-1111-111111111111';
 const document = '22222222-2222-2222-2222-222222222222';
 const room = `writing-${tenant}-${document}`;
@@ -37,23 +38,31 @@ function open(documentState) {
   });
 }
 
-const firstDocument = new Y.Doc();
-const first = await open(firstDocument);
+const documents = Array.from({ length: mode === 'read' ? 1 : clientCount }, () => new Y.Doc());
+const providers = await Promise.all(documents.map(open));
+const firstDocument = documents[0];
 if (mode === 'read') {
   assert.equal(firstDocument.getText('integration-probe').toString(), marker);
-  first.destroy();
+  providers[0].destroy();
+  firstDocument.destroy();
   console.log('协同持久化恢复验证通过');
   process.exit(0);
 }
 
-const secondDocument = new Y.Doc();
-const second = await open(secondDocument);
 const text = firstDocument.getText('integration-probe');
 if (text.length) text.delete(0, text.length);
 text.insert(0, marker);
-await new Promise((resolve) => setTimeout(resolve, 500));
-assert.equal(secondDocument.getText('integration-probe').toString(), marker);
-first.destroy();
-second.destroy();
+const deadline = Date.now() + 5000;
+while (
+  documents.slice(1).some((documentState) => documentState.getText('integration-probe').toString() !== marker)
+  && Date.now() < deadline
+) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+for (const documentState of documents) {
+  assert.equal(documentState.getText('integration-probe').toString(), marker);
+}
+for (const provider of providers) provider.destroy();
+for (const documentState of documents) documentState.destroy();
 await new Promise((resolve) => setTimeout(resolve, 1200));
-console.log('双客户端实时同步验证通过');
+console.log(`${clientCount} 客户端实时同步验证通过`);

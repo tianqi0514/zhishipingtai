@@ -477,6 +477,18 @@ def validate_plate_content(content: list[dict[str, Any]], bindings: dict[str, di
             issues.append({"code": "invalid_source_type", "block_id": block_id, "message": "来源类型不受支持"})
         if binding.get("freshness_status") != "current":
             issues.append({"code": "stale_binding", "block_id": block_id, "message": "正文块依据已经变化"})
+        metadata = binding.get("metadata") or binding.get("metadata_json") or {}
+        if (
+            metadata.get("content_hash_algorithm") == "canonical-json-v1"
+            and binding.get("content_hash") != content_hash(node)
+        ):
+            issues.append(
+                {
+                    "code": "trusted_block_modified",
+                    "block_id": block_id,
+                    "message": "可信正文块内容已被修改，请从原始依据重新插入或转为人工说明",
+                }
+            )
         if node_type in {"verified_fact", "computed_metric", "inference_conclusion"} and (
             binding.get("verification_status") != "verified"
         ):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -20,7 +20,7 @@ SCENARIO_ROOT = Path(__file__).resolve().parents[2] / "demo" / "miaobi" / "scena
 
 
 def bootstrap_writing(db: Session, *, tenant_id: str, actor_id: str) -> None:
-    """Idempotently install reviewed built-in contracts without changing user versions."""
+    """Idempotently install reviewed built-in contracts while preserving version history."""
     application = db.scalar(
         select(Application).where(
             Application.tenant_id == tenant_id,
@@ -112,8 +112,6 @@ def bootstrap_writing(db: Session, *, tenant_id: str, actor_id: str) -> None:
             )
             db.add(package)
             db.flush()
-        if package.current_version_id:
-            continue
         contract = {
             key: payload.get(key, [] if key.endswith("_ids") else {})
             for key in (
@@ -130,11 +128,25 @@ def bootstrap_writing(db: Session, *, tenant_id: str, actor_id: str) -> None:
                 "config",
             )
         }
+        contract_checksum = content_hash(contract)
+        current = db.get(ScenarioPackageVersion, package.current_version_id) if package.current_version_id else None
+        if current and current.checksum == contract_checksum:
+            continue
+        next_version = int(
+            db.scalar(
+                select(func.max(ScenarioPackageVersion.version)).where(
+                    ScenarioPackageVersion.scenario_package_id == package.id
+                )
+            )
+            or 0
+        ) + 1
+        if current and current.status == "active":
+            current.status = "retired"
         version = ScenarioPackageVersion(
             tenant_id=tenant_id,
             scenario_package_id=package.id,
-            version=1,
-            checksum=content_hash(contract),
+            version=next_version,
+            checksum=contract_checksum,
             status="active",
             created_by=actor_id,
             **contract,

@@ -1931,7 +1931,12 @@ def create_document_version(
         pending_gates = int(db.scalar(select(func.count()).select_from(DecisionGate).where(DecisionGate.project_id == project.id, DecisionGate.required.is_(True), DecisionGate.status != "confirmed", _active(DecisionGate))) or 0)
         if pending_gates:
             raise HTTPException(status_code=409, detail=f"仍有 {pending_gates} 个必需确认节点未完成")
-        blocking = [item for item in issues if item["code"] in {"missing_binding", "stale_binding", "unverified_binding"}]
+        blocking = [
+            item
+            for item in issues
+            if item["code"]
+            in {"missing_binding", "stale_binding", "unverified_binding", "trusted_block_modified"}
+        ]
         if blocking:
             raise HTTPException(status_code=409, detail={"message": "文稿仍有不可发布的问题", "issues": blocking})
     next_hash = content_hash(payload.content)
@@ -2011,13 +2016,21 @@ def upsert_binding(
         if run.project_id != project.id:
             raise HTTPException(status_code=403, detail="计算运行不属于当前方案任务")
     row = db.scalar(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, WritingBlockBinding.block_id == payload.block_id))
-    values = payload.model_dump(exclude={"metadata"})
+    values = payload.model_dump(exclude={"metadata", "block_content"})
+    if payload.block_content is not None:
+        authoritative_hash = content_hash(payload.block_content)
+        if payload.content_hash != authoritative_hash:
+            raise HTTPException(status_code=422, detail="可信业务块哈希与提交内容不一致")
+        values["content_hash"] = authoritative_hash
     if payload.block_type == "knowledge_citation":
         # Knowledge-search QueryRun and structured-SQL QueryRun are separate,
         # intentionally typed audit trails. Keep the public request contract
         # stable while persisting the retrieval FK in its dedicated column.
         values["retrieval_query_run_id"] = values.pop("query_run_id", None)
-    values["metadata_json"] = payload.metadata
+    values["metadata_json"] = {
+        **payload.metadata,
+        **({"content_hash_algorithm": "canonical-json-v1"} if payload.block_content is not None else {}),
+    }
     if row:
         row.deleted_at = None
         apply_patch(row, values, set(values))
@@ -2047,8 +2060,28 @@ def validate_document(
 
 @router.get("/documents/{document_id}/stale-blocks")
 def stale_blocks(document_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    _document(db, document_id, user)
-    return [serialize_row(row) for row in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document_id, WritingBlockBinding.freshness_status != "current", _active(WritingBlockBinding)).order_by(WritingBlockBinding.updated_at.desc()))]
+    document, _ = _document(db, document_id, user)
+    current = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+    current_block_ids = {
+        str(node.get("id"))
+        for node in walk_plate_nodes((current.content if current else []) or [])
+        if node.get("id")
+    }
+    if not current_block_ids:
+        return []
+    return [
+        serialize_row(row)
+        for row in db.scalars(
+            select(WritingBlockBinding)
+            .where(
+                WritingBlockBinding.document_id == document_id,
+                WritingBlockBinding.block_id.in_(current_block_ids),
+                WritingBlockBinding.freshness_status != "current",
+                _active(WritingBlockBinding),
+            )
+            .order_by(WritingBlockBinding.updated_at.desc())
+        )
+    ]
 
 
 @router.post("/documents/{document_id}/recompute")
@@ -2272,6 +2305,11 @@ def create_export(
     try:
         with tempfile.TemporaryDirectory(prefix="miaobi-export-") as temp_directory:
             target = Path(temp_directory) / filename
+            project_config = dict(project.config or {})
+            plan_inputs = project_config.get("plan_inputs")
+            route_coordinates = project_config.get("route_coordinates")
+            if not route_coordinates and isinstance(plan_inputs, dict):
+                route_coordinates = plan_inputs.get("coordinates")
             build_export_artifact(
                 target,
                 output_format=payload.output_format,
@@ -2281,7 +2319,7 @@ def create_export(
                 computations=computations,
                 plans=plans,
                 audit_summary=audit_summary,
-                coordinates=dict((project.config or {}).get("route_coordinates") or {}),
+                coordinates=dict(route_coordinates or {}),
             )
             checksum = hashlib.sha256(target.read_bytes()).hexdigest()
             object_storage.put_file(object_key, target, CONTENT_TYPES[payload.output_format])

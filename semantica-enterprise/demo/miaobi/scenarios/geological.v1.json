@@ -1,11 +1,12 @@
 {
   "code": "geological-response-plan", "name": "地质灾害救援方案", "disaster_type": "geological", "status": "draft",
-  "input_schema": {"type": "object", "required": ["event_name", "hazard_type", "threatened_population"], "properties": {"event_name": {"type": "string"}, "hazard_type": {"type": "string"}, "threatened_population": {"type": "integer"}, "slope_risk": {"type": "number"}}},
-  "ontology_mapping": {"event_name": "GeologicalHazard.name", "hazard_type": "GeologicalHazard.type", "threatened_population": "AffectedPopulation.count"},
+  "input_schema": {"type": "object", "required": ["event_name", "hazard_type", "threatened_population", "transfer_vehicles_required", "transfer_vehicles_available"], "properties": {"event_name": {"type": "string"}, "hazard_type": {"type": "string"}, "threatened_population": {"type": "integer"}, "slope_risk": {"type": "number"}, "transfer_vehicles_required": {"type": "integer", "minimum": 0, "unit": "辆"}, "transfer_vehicles_available": {"type": "integer", "minimum": 0, "unit": "辆"}}},
+  "ontology_mapping": {"event_name": "GeologicalHazard.name", "hazard_type": "GeologicalHazard.type", "threatened_population": "AffectedPopulation.count", "transfer_vehicles_required": "ResourceDemand.required", "transfer_vehicles_available": "ResourceInventory.available"},
   "rule_set_ids": ["geological-response-tasks"], "formula_ids": ["resource-gap", "shelter-gap"], "tool_ids": ["WeatherMCP", "MapRoutingMCP"],
   "chapter_template": {"chapters": [{"key": "general", "title": "总则"}, {"key": "assessment", "title": "灾情研判"}, {"key": "organization", "title": "组织体系"}, {"key": "response", "title": "救援与转移保障"}, {"key": "appendix", "title": "附则"}]},
   "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]}, "review_rules": {"require_citations": true},
   "decision_gates": [{"key": "slope_risk", "name": "坡体风险确认", "required": true}, {"key": "publish", "name": "正式发布确认", "required": true}],
   "comparison_dimensions": [{"key": "evacuation_time", "name": "转移时间", "direction": "min"}, {"key": "route_risk", "name": "路线风险", "direction": "min"}],
-  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"}
+  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"},
+  "fixture": {"disclaimer": "确定性技术验收数据，模板待客户业务确认", "inputs": {"event_name": "山区滑坡演练", "hazard_type": "滑坡", "threatened_population": 860, "slope_risk": 0.82, "transfer_vehicles_required": 15, "transfer_vehicles_available": 9}, "resource": {"required_key": "transfer_vehicles_required", "available_key": "transfer_vehicles_available", "label": "转移车辆缺口", "unit": "辆", "expected_gap": 6}}
 }

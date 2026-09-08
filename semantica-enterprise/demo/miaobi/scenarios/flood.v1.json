@@ -1,11 +1,12 @@
 {
   "code": "flood-response-plan", "name": "洪涝应急保障方案", "disaster_type": "flood", "status": "draft",
-  "input_schema": {"type": "object", "required": ["event_name", "water_level", "affected_population"], "properties": {"event_name": {"type": "string"}, "water_level": {"type": "number"}, "affected_population": {"type": "integer"}, "levee_status": {"type": "string"}}},
-  "ontology_mapping": {"event_name": "FloodEvent.name", "water_level": "FloodEvent.waterLevel", "affected_population": "AffectedPopulation.count"},
+  "input_schema": {"type": "object", "required": ["event_name", "water_level", "affected_population", "rescue_boats_required", "rescue_boats_available"], "properties": {"event_name": {"type": "string"}, "water_level": {"type": "number"}, "affected_population": {"type": "integer"}, "levee_status": {"type": "string"}, "rescue_boats_required": {"type": "integer", "minimum": 0, "unit": "艘"}, "rescue_boats_available": {"type": "integer", "minimum": 0, "unit": "艘"}}},
+  "ontology_mapping": {"event_name": "FloodEvent.name", "water_level": "FloodEvent.waterLevel", "affected_population": "AffectedPopulation.count", "rescue_boats_required": "ResourceDemand.required", "rescue_boats_available": "ResourceInventory.available"},
   "rule_set_ids": ["flood-response-tasks"], "formula_ids": ["resource-gap", "vehicle-trips"], "tool_ids": ["WeatherMCP", "TrafficStatusMCP", "MapRoutingMCP"],
   "chapter_template": {"chapters": [{"key": "general", "title": "总则"}, {"key": "assessment", "title": "灾情研判"}, {"key": "organization", "title": "组织体系"}, {"key": "response", "title": "抗洪与运输保障"}, {"key": "appendix", "title": "附则"}]},
   "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]}, "review_rules": {"require_citations": true},
   "decision_gates": [{"key": "critical_facts", "name": "关键事实确认", "required": true}, {"key": "publish", "name": "正式发布确认", "required": true}],
   "comparison_dimensions": [{"key": "response_time", "name": "响应时间", "direction": "min"}, {"key": "unmet_demand", "name": "未满足需求", "direction": "min"}],
-  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"}
+  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"},
+  "fixture": {"disclaimer": "确定性技术验收数据，模板待客户业务确认", "inputs": {"event_name": "滨河区域洪涝演练", "water_level": 4.8, "affected_population": 6800, "levee_status": "局部漫溢", "rescue_boats_required": 30, "rescue_boats_available": 18}, "resource": {"required_key": "rescue_boats_required", "available_key": "rescue_boats_available", "label": "救援舟艇缺口", "unit": "艘", "expected_gap": 12}}
 }

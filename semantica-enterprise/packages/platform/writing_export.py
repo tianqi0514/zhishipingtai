@@ -82,6 +82,18 @@ def _set_run_font(run, size: float = 11, bold: bool = False) -> None:
     run.font.color.rgb = RGBColor(0, 0, 0)
 
 
+def _remove_paragraph_borders(paragraph_or_style) -> None:
+    paragraph_properties = paragraph_or_style._element.get_or_add_pPr()
+    borders = paragraph_properties.find(qn("w:pBdr"))
+    if borders is not None:
+        paragraph_properties.remove(borders)
+
+
+def _display_title(title: str) -> str:
+    """Remove controlled workspace qualifiers from the formal document title."""
+    return re.sub(r"\s*（知识版本\s*\d+）\s*$", "", title).strip()
+
+
 def _configure_docx(document: Document, title: str) -> None:
     section = document.sections[0]
     # Letter portrait is the deterministic default required by the document
@@ -101,8 +113,11 @@ def _configure_docx(document: Document, title: str) -> None:
         style.font.size = Pt(size)
         style.font.bold = bold
         style.font.color.rgb = RGBColor(0, 0, 0)
+        if style_name == "Title":
+            _remove_paragraph_borders(style)
     title_paragraph = document.add_paragraph(style="Title")
     title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _remove_paragraph_borders(title_paragraph)
     _set_run_font(title_paragraph.add_run(title), 22, True)
     subtitle = document.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -146,12 +161,15 @@ def _add_table(document: Document, node: dict[str, Any]) -> None:
 
 def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_summary: dict[str, Any]) -> None:
     document = Document()
-    _configure_docx(document, title)
+    formal_title = _display_title(title)
+    _configure_docx(document, formal_title)
     opening = document.add_paragraph()
     _set_run_font(opening.add_run("本方案依据已锁定的知识版本、已核验事实、确定性计算和规则推演结果形成。发布前须完成业务确认。"), 11)
-    for node in content:
+    for index, node in enumerate(content):
         node_type = str(node.get("type") or "p")
         text = _node_text(node).strip()
+        if index == 0 and node_type in {"h1", "heading1"} and text in {title, formal_title}:
+            continue
         if node_type == "knowledge_citation":
             text = _clean_citation_text(text)
         if node_type == "table":

@@ -1,11 +1,12 @@
 {
   "code": "epidemic-response-plan", "name": "疫情防控保障方案", "disaster_type": "epidemic", "status": "draft",
-  "input_schema": {"type": "object", "required": ["event_name", "case_count", "population"], "properties": {"event_name": {"type": "string"}, "case_count": {"type": "integer"}, "population": {"type": "integer"}, "medical_capacity": {"type": "integer"}}},
-  "ontology_mapping": {"event_name": "EpidemicEvent.name", "case_count": "EpidemicEvent.caseCount", "medical_capacity": "MedicalResource.capacity"},
+  "input_schema": {"type": "object", "required": ["event_name", "case_count", "population", "isolation_beds_required", "isolation_beds_available"], "properties": {"event_name": {"type": "string"}, "case_count": {"type": "integer"}, "population": {"type": "integer"}, "medical_capacity": {"type": "integer"}, "isolation_beds_required": {"type": "integer", "minimum": 0, "unit": "张"}, "isolation_beds_available": {"type": "integer", "minimum": 0, "unit": "张"}}},
+  "ontology_mapping": {"event_name": "EpidemicEvent.name", "case_count": "EpidemicEvent.caseCount", "medical_capacity": "MedicalResource.capacity", "isolation_beds_required": "ResourceDemand.required", "isolation_beds_available": "ResourceInventory.available"},
   "rule_set_ids": ["epidemic-response-tasks"], "formula_ids": ["resource-gap", "medical-pressure"], "tool_ids": ["HospitalCapacityMCP", "ResourceInventoryMCP"],
   "chapter_template": {"chapters": [{"key": "general", "title": "总则"}, {"key": "assessment", "title": "疫情研判"}, {"key": "organization", "title": "组织体系"}, {"key": "response", "title": "防疫与医疗保障"}, {"key": "appendix", "title": "附则"}]},
   "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]}, "review_rules": {"require_citations": true},
   "decision_gates": [{"key": "case_definition", "name": "病例口径确认", "required": true}, {"key": "publish", "name": "正式发布确认", "required": true}],
   "comparison_dimensions": [{"key": "medical_pressure", "name": "医疗压力", "direction": "min"}, {"key": "supply_gap", "name": "物资缺口", "direction": "min"}],
-  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"}
+  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"},
+  "fixture": {"disclaimer": "确定性技术验收数据，模板待客户业务确认", "inputs": {"event_name": "聚集性疫情演练", "case_count": 76, "population": 420000, "medical_capacity": 140, "isolation_beds_required": 200, "isolation_beds_available": 140}, "resource": {"required_key": "isolation_beds_required", "available_key": "isolation_beds_available", "label": "隔离床位缺口", "unit": "张", "expected_gap": 60}}
 }

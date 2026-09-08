@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   BookOpenCheck,
@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { api, ApiError } from './api';
 import { cleanEvidenceText } from './evidence';
-import { MiaobiEditor } from './editor/MiaobiEditor';
+import { createFrameDeltaBuffer } from './streaming';
 import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
 
 type Product = { id: string; name: string; code: string };
@@ -38,6 +38,8 @@ const tabs: Array<{ key: Tab; label: string; icon: typeof LayoutDashboard }> = [
   { key: 'writing', label: '妙笔文稿', icon: PenLine },
   { key: 'review', label: '审校发布', icon: ShieldCheck },
 ];
+
+const MiaobiEditor = lazy(() => import('./editor/MiaobiEditor').then((module) => ({ default: module.MiaobiEditor })));
 
 export function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -155,7 +157,7 @@ export function App() {
               <div className="writing-layout">
                 <section className="outline-pane"><b>文稿目录</b>{document ? <Outline content={document.current_version?.content || []} /> : <p>创建文稿后自动生成目录。</p>}<div className="missing-box"><AlertTriangle size={16} /><span>缺失项会在这里提示，不会由模型静默补齐。</span></div></section>
                 <section className="document-pane">
-                  {document ? <MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} onRequestSource={setAssistantTab} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /> : <EmptyAction title="还没有文稿" detail="从锁定的知识产品版本创建第一份方案初稿。" action="创建文稿" onClick={() => void createDocument()} />}
+                  {document ? <Suspense fallback={<div className="editor-shell editor-loading">正在加载完整文稿编辑器…</div>}><MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} onRequestSource={setAssistantTab} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /></Suspense> : <EmptyAction title="还没有文稿" detail="从锁定的知识产品版本创建第一份方案初稿。" action="创建文稿" onClick={() => void createDocument()} />}
                 </section>
                 <aside className="assistant-pane">
                   <div className="assistant-tabs">
@@ -361,7 +363,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
     const unit = run.result.output_fact?.unit || '';
     const block: PlateNode = { id: crypto.randomUUID(), type: 'computed_metric', formula: run.result.operation, freshness_status: 'current', children: [{ text: `${label}：${run.result.value}${unit}` }] };
     try {
-      await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'computation', source_id: run.id, computation_run_id: run.id, evidence_ids: run.input_fact_ids, content_hash: await sha256(block), verification_status: 'verified', freshness_status: 'current', metadata: { formula: run.result.operation, dependencies: run.result.dependencies || {}, project_id: project.id } } });
+      await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'computation', source_id: run.id, computation_run_id: run.id, evidence_ids: run.input_fact_ids, content_hash: await sha256(block), block_content: block, verification_status: 'verified', freshness_status: 'current', metadata: { formula: run.result.operation, dependencies: run.result.dependencies || {}, project_id: project.id } } });
       onInsert(block);
     } catch (reason) { onError(reason instanceof Error ? reason.message : '插入测算结果失败'); }
     finally { setInserting(''); }
@@ -372,7 +374,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
     const route = plan.result.route;
     const block: PlateNode = { id: crypto.randomUUID(), type: 'alternative_plan', freshness_status: 'current', children: [{ text: `${plan.name}：${route?.path?.join(' → ') || '无路线'}，预计 ${route?.minutes ?? '—'} 分钟，路线风险 ${route?.risk ?? '—'}。` }] };
     try {
-      await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'mcp_tool', source_id: plan.id, evidence_ids: [], content_hash: await sha256(block), verification_status: plan.status === 'selected' ? 'verified' : 'unverified', freshness_status: 'current', metadata: { plan_key: plan.plan_key, project_id: project.id } } });
+      await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'mcp_tool', source_id: plan.id, evidence_ids: [], content_hash: await sha256(block), block_content: block, verification_status: plan.status === 'selected' ? 'verified' : 'unverified', freshness_status: 'current', metadata: { plan_key: plan.plan_key, project_id: project.id } } });
       onInsert(block);
     } catch (reason) { onError(reason instanceof Error ? reason.message : '插入备选方案失败'); }
     finally { setInserting(''); }
@@ -384,7 +386,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
     const evidence = Array.isArray(fact.source_locator?.evidence) ? fact.source_locator.evidence : [];
     const evidenceIds = evidence.map((item) => String((item as Record<string, unknown>).source_fact_id || '')).filter(Boolean);
     try {
-      await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'semantica_inference', source_id: fact.source_id, source_version: fact.source_version, fact_id: fact.id, evidence_ids: evidenceIds, content_hash: await sha256(block), verification_status: 'verified', freshness_status: 'current', metadata: { rule_id: fact.source_locator?.rule_id, reasoning_run_id: fact.source_id, project_id: project.id } } });
+      await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'semantica_inference', source_id: fact.source_id, source_version: fact.source_version, fact_id: fact.id, evidence_ids: evidenceIds, content_hash: await sha256(block), block_content: block, verification_status: 'verified', freshness_status: 'current', metadata: { rule_id: fact.source_locator?.rule_id, reasoning_run_id: fact.source_id, project_id: project.id } } });
       onInsert(block);
     } catch (reason) { onError(reason instanceof Error ? reason.message : '插入推演结论失败'); }
     finally { setInserting(''); }
@@ -404,6 +406,14 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
+  const deltaBatchRef = useRef<ReturnType<typeof createFrameDeltaBuffer> | null>(null);
+  if (!deltaBatchRef.current) {
+    deltaBatchRef.current = createFrameDeltaBuffer((delta) => {
+      setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, content: item.content + delta } : item));
+    });
+  }
+
+  const flushAnswerDelta = () => deltaBatchRef.current?.flush();
 
   const applySession = (value: WritingAgentSession) => {
     setSession(value);
@@ -428,11 +438,15 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
 
   useEffect(() => {
     abortRef.current?.abort();
+    flushAnswerDelta();
     setSession(null);
     setMessages([]);
     setEvents([]);
     void createSession().catch((reason) => onError(reason instanceof Error ? reason.message : '妙笔助手会话加载失败'));
-    return () => abortRef.current?.abort();
+    return () => {
+      abortRef.current?.abort();
+      deltaBatchRef.current?.dispose();
+    };
   }, [project.id, document?.id]);
 
   useEffect(() => {
@@ -450,6 +464,7 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
     setRunning(true);
     setStage('正在连接知识 Agent');
     setEvents([]);
+    deltaBatchRef.current?.dispose();
     setStartedAt(Date.now());
     setElapsedSeconds(0);
     setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', content: prompt, status: 'completed' }, { id: 'streaming', role: 'assistant', content: '', status: 'generating' }]);
@@ -484,20 +499,23 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
           }
           if (event === 'turn_started') setStartedAt(eventTime({ event_type: event, payload }) || Date.now());
           if (event === 'answer_delta') {
-            setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, content: item.content + String(payload.text || '') } : item));
+            deltaBatchRef.current?.enqueue(String(payload.text || ''));
             setStage('正在生成修订建议');
           } else if (event === 'tool_started' || event === 'writing_stage_started') {
             setStage(writingStage(String(payload.name || '')));
           } else if (event === 'turn_completed') {
+            flushAnswerDelta();
             setStage('已完成');
             setStartedAt(null);
             if (payload.duration_ms) setElapsedSeconds(Math.max(1, Math.round(Number(payload.duration_ms) / 1000)));
             setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, status: 'completed' } : item));
           } else if (event === 'turn_failed') {
+            flushAnswerDelta();
             setStage('生成失败');
             setStartedAt(null);
             setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, status: 'failed', error_message: String(payload.message || payload.reason || '生成失败') } : item));
           } else if (event === 'turn_cancelled') {
+            flushAnswerDelta();
             setStage('已停止');
             setStartedAt(null);
             setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, status: 'cancelled' } : item));
@@ -518,6 +536,7 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
     if (!session || !running) return;
     await api(`/writing/agent-sessions/${session.id}/cancel`, { method: 'POST' }).catch(() => undefined);
     abortRef.current?.abort();
+    flushAnswerDelta();
     setRunning(false);
     setStage('已停止');
     setStartedAt(null);
@@ -607,6 +626,7 @@ function EvidencePanel({ project, document, onInsert, onError }: { project: Proj
           chunk_id: item.chunk_id,
           query_run_id: result.query_id,
           content_hash: await sha256(block),
+          block_content: block,
           verification_status: 'verified',
           freshness_status: 'current',
           metadata: { rank: item.rank, channels: item.channels, fused_score: item.fused_score },
@@ -620,8 +640,16 @@ function EvidencePanel({ project, document, onInsert, onError }: { project: Proj
   return <div className="assistant-content"><h3>引用依据</h3><p>检索范围固定为当前方案任务锁定的知识产品版本。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{cleanEvidenceText(item.snippet || item.text || '无摘要')}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前锁定版本中没有检索到依据。</div>}</div></div>;
 }
 
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>).filter((key) => (value as Record<string, unknown>)[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  }
+  return value === undefined ? 'null' : JSON.stringify(value);
+}
+
 async function sha256(value: unknown) {
-  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const bytes = new TextEncoder().encode(canonicalJson(value));
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest)).map((item) => item.toString(16).padStart(2, '0')).join('');
 }

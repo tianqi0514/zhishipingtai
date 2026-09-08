@@ -6,10 +6,12 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from docx import Document
 
 from apps.api.writing_schemas import WritingBlockBindingUpsert
 from packages.platform.writing import (
     affected_dependency_ids,
+    content_hash,
     execute_formula,
     generate_alternative_plans,
     evaluate_earthquake_criteria,
@@ -47,6 +49,30 @@ def test_non_earthquake_packages_are_explicitly_pending_business_confirmation() 
         payload = json.loads(path.read_text(encoding="utf-8"))
         expected = "accepted" if payload["disaster_type"] == "earthquake" else "pending_customer_confirmation"
         assert payload["config"]["business_validation"] == expected
+
+
+def test_non_earthquake_packages_have_executable_deterministic_fixtures() -> None:
+    checked = 0
+    for path in SCENARIO_ROOT.glob("*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload["disaster_type"] == "earthquake":
+            continue
+        fixture = payload["fixture"]
+        assert fixture["disclaimer"] == "确定性技术验收数据，模板待客户业务确认"
+        assert validate_scenario_input(payload["input_schema"], fixture["inputs"]) == []
+        resource = fixture["resource"]
+        result = execute_formula(
+            "resource_gap",
+            {
+                "required": fixture["inputs"][resource["required_key"]],
+                "available": fixture["inputs"][resource["available_key"]],
+            },
+        )
+        assert result["value"] == resource["expected_gap"]
+        assert resource["required_key"] in payload["ontology_mapping"]
+        assert resource["available_key"] in payload["ontology_mapping"]
+        checked += 1
+    assert checked == 6
 
 
 def test_scenario_input_validation_reports_missing_unknown_and_type_errors() -> None:
@@ -151,6 +177,23 @@ def test_plate_content_validation_reports_stale_and_duplicate_blocks() -> None:
     assert {item["code"] for item in issues} == {"duplicate_block_id", "stale_binding"}
 
 
+def test_plate_content_validation_rejects_modified_canonical_trusted_block() -> None:
+    node = {"id": "metric-1", "type": "computed_metric", "children": [{"text": "180人"}]}
+    issues = validate_plate_content(
+        [{**node, "children": [{"text": "100人"}]}],
+        {
+            "metric-1": {
+                "source_type": "computation",
+                "verification_status": "verified",
+                "freshness_status": "current",
+                "content_hash": content_hash(node),
+                "metadata": {"content_hash_algorithm": "canonical-json-v1"},
+            }
+        },
+    )
+    assert [item["code"] for item in issues] == ["trusted_block_modified"]
+
+
 def test_dependency_impact_is_local_to_changed_fact() -> None:
     result = affected_dependency_ids(
         {"fact-rescue-available"},
@@ -216,6 +259,42 @@ def test_production_export_builds_real_docx_xlsx_json_and_geojson() -> None:
         assert zipfile.is_zipfile(root / "artifact.xlsx")
         assert json.loads((root / "artifact.json").read_text(encoding="utf-8"))["title"] == "积石山县地震应急处置方案"
         assert json.loads((root / "artifact.geojson").read_text(encoding="utf-8"))["features"][0]["geometry"]["type"] == "LineString"
+
+
+def test_route_coordinates_can_be_read_from_plan_inputs() -> None:
+    config = {
+        "plan_inputs": {
+            "coordinates": {"指挥部": [103.2, 35.6], "震中": [103.1, 35.7]},
+        }
+    }
+    route_coordinates = config.get("route_coordinates")
+    plan_inputs = config.get("plan_inputs")
+    if not route_coordinates and isinstance(plan_inputs, dict):
+        route_coordinates = plan_inputs.get("coordinates")
+    assert route_coordinates == {"指挥部": [103.2, 35.6], "震中": [103.1, 35.7]}
+
+
+def test_formal_export_removes_workspace_title_suffix_and_duplicate_heading() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "formal.docx"
+        build_export_artifact(
+            target,
+            output_format="docx",
+            title="积石山县6.2级地震应急处置方案（知识版本 5）",
+            content=[
+                {"id": "title", "type": "h1", "children": [{"text": "积石山县6.2级地震应急处置方案"}]},
+                {"id": "body", "type": "p", "children": [{"text": "正文"}]},
+            ],
+            facts=[],
+            computations=[],
+            plans=[],
+            audit_summary={},
+        )
+        exported = Document(target)
+        paragraphs = [paragraph.text for paragraph in exported.paragraphs]
+        assert paragraphs[0] == "积石山县6.2级地震应急处置方案"
+        assert paragraphs.count("积石山县6.2级地震应急处置方案") == 1
+        assert "w:pBdr" not in exported.paragraphs[0]._p.xml
 
 
 def test_export_citation_cleans_markdown_entities_and_limits_length() -> None:

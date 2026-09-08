@@ -51,6 +51,7 @@ import {
   usePluginOption,
 } from 'platejs/react';
 import { api } from '../api';
+import { cleanEvidenceText } from '../evidence';
 import type { CollaborationAccess, PlateNode, WritingComment, WritingDocument } from '../types/domain';
 import { TrustedBlockKit } from './plugins/trusted-blocks';
 import { RemoteCursorOverlay } from './RemoteCursorOverlay';
@@ -100,6 +101,26 @@ const EMPTY_VALUE: Value = [
   { id: 'intro', type: KEYS.p, children: [{ text: '请从左侧目录选择章节，或使用右侧妙笔助手生成有依据的草稿。' }] },
 ];
 
+export function normalizeCollaborativeValue(value: Value): { value: Value; changed: boolean } {
+  let changed = false;
+  const normalizeNode = (node: Record<string, unknown>): Record<string, unknown> => {
+    const children = Array.isArray(node.children)
+      ? (node.children as Array<Record<string, unknown>>).map(normalizeNode)
+      : undefined;
+    if (node.type !== 'knowledge_citation' || !children) {
+      return children ? { ...node, children } : { ...node };
+    }
+    const normalizedChildren = children.map((child) => {
+      if (typeof child.text !== 'string') return child;
+      const text = cleanEvidenceText(child.text);
+      if (text !== child.text) changed = true;
+      return { ...child, text };
+    });
+    return { ...node, children: normalizedChildren };
+  };
+  return { value: value.map((node) => normalizeNode(node as Record<string, unknown>)) as Value, changed };
+}
+
 type Props = {
   document: WritingDocument;
   onSaved: (document: WritingDocument) => void;
@@ -110,7 +131,9 @@ type Props = {
 };
 
 export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource, insertionRequest, onInserted }: Props) {
-  const initial = (document.current_version?.content?.length ? document.current_version.content : EMPTY_VALUE) as Value;
+  const initial = normalizeCollaborativeValue(
+    (document.current_version?.content?.length ? document.current_version.content : EMPTY_VALUE) as Value,
+  ).value;
   const [collaboration, setCollaboration] = useState<CollaborationAccess | null>(null);
   const [collaborationError, setCollaborationError] = useState('');
   const [collaborationAttempt, setCollaborationAttempt] = useState(0);
@@ -191,7 +214,14 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
       value: initial,
       onReady: () => {
         if (!active) return;
-        valueRef.current = editor.children as Value;
+        const synchronized = normalizeCollaborativeValue(editor.children as Value);
+        if (synchronized.changed && !collaboration.read_only) {
+          editor.tf.setValue(synchronized.value);
+          valueRef.current = synchronized.value;
+          window.setTimeout(() => void save('协同文稿引用格式迁移'), 0);
+        } else {
+          valueRef.current = synchronized.value;
+        }
         setEditorReady(true);
       },
     }).catch((reason: unknown) => {

@@ -1,11 +1,12 @@
 {
   "code": "ice-snow-response-plan", "name": "雨雪冰冻灾害保障方案", "disaster_type": "ice_snow", "status": "draft",
-  "input_schema": {"type": "object", "required": ["event_name", "temperature", "affected_population"], "properties": {"event_name": {"type": "string"}, "temperature": {"type": "number"}, "affected_population": {"type": "integer"}, "road_icing_level": {"type": "string"}}},
-  "ontology_mapping": {"event_name": "IceSnowEvent.name", "temperature": "WeatherObservation.temperature", "affected_population": "AffectedPopulation.count"},
+  "input_schema": {"type": "object", "required": ["event_name", "temperature", "affected_population", "deicing_vehicles_required", "deicing_vehicles_available"], "properties": {"event_name": {"type": "string"}, "temperature": {"type": "number"}, "affected_population": {"type": "integer"}, "road_icing_level": {"type": "string"}, "deicing_vehicles_required": {"type": "integer", "minimum": 0, "unit": "辆"}, "deicing_vehicles_available": {"type": "integer", "minimum": 0, "unit": "辆"}}},
+  "ontology_mapping": {"event_name": "IceSnowEvent.name", "temperature": "WeatherObservation.temperature", "affected_population": "AffectedPopulation.count", "deicing_vehicles_required": "ResourceDemand.required", "deicing_vehicles_available": "ResourceInventory.available"},
   "rule_set_ids": ["ice-snow-response-tasks"], "formula_ids": ["resource-gap", "vehicle-trips"], "tool_ids": ["WeatherMCP", "TrafficStatusMCP"],
   "chapter_template": {"chapters": [{"key": "general", "title": "总则"}, {"key": "assessment", "title": "灾情研判"}, {"key": "organization", "title": "组织体系"}, {"key": "response", "title": "水电与人员保障"}, {"key": "appendix", "title": "附则"}]},
   "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]}, "review_rules": {"require_citations": true},
   "decision_gates": [{"key": "weather", "name": "气象事实确认", "required": true}, {"key": "publish", "name": "正式发布确认", "required": true}],
   "comparison_dimensions": [{"key": "restoration_time", "name": "恢复时间", "direction": "min"}, {"key": "cold_exposure", "name": "低温暴露风险", "direction": "min"}],
-  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"}
+  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"},
+  "fixture": {"disclaimer": "确定性技术验收数据，模板待客户业务确认", "inputs": {"event_name": "跨区域雨雪冰冻演练", "temperature": -8.5, "affected_population": 12500, "road_icing_level": "严重", "deicing_vehicles_required": 24, "deicing_vehicles_available": 16}, "resource": {"required_key": "deicing_vehicles_required", "available_key": "deicing_vehicles_available", "label": "除冰车辆缺口", "unit": "辆", "expected_gap": 8}}
 }

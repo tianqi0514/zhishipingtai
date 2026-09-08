@@ -200,6 +200,7 @@ class WritingBlockBindingUpsert(StrictModel):
     evidence_ids: list[str] = Field(default_factory=list)
     data_time: str | None = None
     content_hash: str = Field(min_length=64, max_length=64)
+    block_content: dict[str, Any] | None = None
     verification_status: Literal["unverified", "verified", "rejected"] = "unverified"
     freshness_status: str = "current"
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -227,6 +228,11 @@ class WritingBlockBindingUpsert(StrictModel):
 
     @model_validator(mode="after")
     def require_authoritative_reference(self):
+        if self.block_content is not None:
+            if str(self.block_content.get("id") or "") != self.block_id:
+                raise ValueError("可信业务块内容与 block_id 不一致")
+            if str(self.block_content.get("type") or "") != self.block_type:
+                raise ValueError("可信业务块内容与 block_type 不一致")
         mapping = {
             "knowledge_citation": self.chunk_id,
             "verified_fact": self.fact_id,

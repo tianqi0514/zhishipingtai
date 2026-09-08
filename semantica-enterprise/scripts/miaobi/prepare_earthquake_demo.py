@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import html
+import json
+import re
 from pathlib import Path
 
 from demo_client import (
@@ -53,6 +55,166 @@ PLAN_INPUTS = {
         "积石山震中安置点": [103.40, 35.66],
     },
 }
+
+
+def _block_hash(block: dict) -> str:
+    payload = json.dumps(block, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _clean_evidence(value: str) -> str:
+    value = html.unescape(value or "")
+    value = re.sub(r"(^|[\s：])#{1,6}\s+", r"\1", value)
+    value = re.sub(r"(^|\s)>\s*", r"\1", value)
+    value = re.sub(r"\*\*|__|`", "", value)
+    value = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", value)
+    return re.sub(r"\s+", " ", value).strip()[:420]
+
+
+def ensure_ready_document(api: DemoClient, project: dict, release: dict) -> dict:
+    """Build a reviewable draft from current authoritative runs and release evidence."""
+    title = f"积石山县6.2级地震应急处置方案（知识版本 {release['version']}）"
+    documents = api.get(f"/writing/projects/{project['id']}/documents")
+    document = next((row for row in documents if row["title"] == title), None)
+    base = [
+        {"id": "demo-title", "type": "h1", "children": [{"text": "积石山县6.2级地震应急处置方案"}]},
+        {"id": "demo-notice", "type": "callout", "children": [{"text": "验收演示数据，不代表实时灾情或正式指挥决定。"}]},
+        {"id": "demo-assessment", "type": "h2", "children": [{"text": "一、灾情研判"}]},
+    ]
+    if not document:
+        document = api.post(
+            "/writing/documents",
+            {"project_id": project["id"], "title": title, "content": base},
+        )
+    search = api.post(
+        f"/writing/projects/{project['id']}/knowledge/search",
+        {
+            "query": "积石山县6.2级地震灾害等级判据",
+            "top_k": 8,
+            "use_keyword": True,
+            "use_vector": True,
+            "use_graph": True,
+            "use_reranker": False,
+        },
+    )
+    if not search.get("items"):
+        raise RuntimeError("当前知识产品版本没有可绑定的地震等级依据")
+    evidence = search["items"][0]
+    citation = {
+        "id": "demo-current-citation",
+        "type": "knowledge_citation",
+        "source_title": evidence["title"],
+        "source_locator": {
+            "page_number": evidence.get("page_number"),
+            "structural_path": evidence.get("structural_path"),
+        },
+        "freshness_status": "current",
+        "children": [{"text": f"{evidence['title']}：{_clean_evidence(evidence.get('snippet') or evidence.get('text') or '')}"}],
+    }
+    api.post(
+        f"/writing/documents/{document['id']}/bindings",
+        {
+            "block_id": citation["id"],
+            "block_type": citation["type"],
+            "source_type": "policy_document",
+            "source_id": evidence["document_id"],
+            "source_version": evidence["version_id"],
+            "knowledge_product_release_id": release["id"],
+            "chunk_id": evidence["chunk_id"],
+            "query_run_id": search["query_id"],
+            "content_hash": _block_hash(citation),
+            "block_content": citation,
+            "verification_status": "verified",
+            "freshness_status": "current",
+            "metadata": {"rank": evidence["rank"], "channels": evidence["channels"]},
+        },
+    )
+
+    computations = api.get(f"/writing/projects/{project['id']}/computations")
+    rescue = next(
+        (
+            row
+            for row in computations
+            if (row.get("result") or {}).get("output_fact", {}).get("fact_key") == "rescue_gap"
+        ),
+        None,
+    )
+    if not rescue:
+        raise RuntimeError("当前任务没有可绑定的搜救人员缺口计算")
+    metric = {
+        "id": "demo-current-rescue-gap",
+        "type": "computed_metric",
+        "formula": (rescue.get("result") or {}).get("operation"),
+        "freshness_status": "current",
+        "children": [{"text": f"搜救人员缺口：{rescue['result']['value']}人"}],
+    }
+    api.post(
+        f"/writing/documents/{document['id']}/bindings",
+        {
+            "block_id": metric["id"],
+            "block_type": metric["type"],
+            "source_type": "computation",
+            "source_id": rescue["id"],
+            "computation_run_id": rescue["id"],
+            "evidence_ids": rescue.get("input_fact_ids") or [],
+            "content_hash": _block_hash(metric),
+            "block_content": metric,
+            "verification_status": "verified",
+            "freshness_status": "current",
+            "metadata": {"formula": (rescue.get("result") or {}).get("operation")},
+        },
+    )
+
+    facts = {row["fact_key"]: row for row in api.get(f"/writing/projects/{project['id']}/facts")}
+    conclusion = facts.get("disaster_grade")
+    if conclusion and conclusion.get("verification_status") != "verified":
+        conclusion = api.post(
+            f"/writing/projects/{project['id']}/facts/{conclusion['id']}/confirm",
+            {"decision": "confirm", "reason": "演示准备依据确定性 Ground Truth 完成管理员核验"},
+        )
+    if not conclusion or conclusion.get("verification_status") != "verified":
+        raise RuntimeError("当前任务没有已核验的 Semantica 灾害等级结论")
+    locator = conclusion.get("source_locator") or {}
+    proof_items = locator.get("evidence") or []
+    inference = {
+        "id": "demo-current-disaster-grade",
+        "type": "inference_conclusion",
+        "freshness_status": "current",
+        "children": [{"text": f"灾害等级：{(conclusion.get('value') or {}).get('text')}"}],
+    }
+    api.post(
+        f"/writing/documents/{document['id']}/bindings",
+        {
+            "block_id": inference["id"],
+            "block_type": inference["type"],
+            "source_type": "semantica_inference",
+            "source_id": conclusion.get("source_id"),
+            "source_version": conclusion.get("source_version"),
+            "fact_id": conclusion["id"],
+            "evidence_ids": [item.get("source_fact_id") for item in proof_items if item.get("source_fact_id")],
+            "content_hash": _block_hash(inference),
+            "block_content": inference,
+            "verification_status": "verified",
+            "freshness_status": "current",
+            "metadata": {"rule_id": locator.get("rule_id"), "reasoning_run_id": conclusion.get("source_id")},
+        },
+    )
+    content = [
+        *base,
+        citation,
+        inference,
+        {"id": "demo-response", "type": "h2", "children": [{"text": "二、应急保障"}]},
+        metric,
+        {"id": "demo-closing", "type": "p", "children": [{"text": "调度方案需在方案比较与人工确认后纳入正式发布版本。"}]},
+    ]
+    api.post(
+        f"/writing/documents/{document['id']}/versions",
+        {"content": content, "change_summary": "按当前知识产品版本重建可核验演示文稿", "publish": False},
+    )
+    validation = api.post(f"/writing/documents/{document['id']}/validate", {"for_publish": False})
+    if validation.get("issues"):
+        raise RuntimeError(f"当前演示文稿仍有审校问题：{validation['issues']}")
+    return api.get(f"/writing/documents/{document['id']}")
 
 
 def ensure_product_release(api: DemoClient, space: dict, product: dict) -> dict:
@@ -403,6 +565,7 @@ def main() -> None:
                 "config": {
                     "disclaimer": "验收演示数据，不代表实时灾情或正式指挥决定。",
                     "plan_inputs": PLAN_INPUTS,
+                    "route_coordinates": PLAN_INPUTS["coordinates"],
                 },
             },
         )
@@ -426,34 +589,15 @@ def main() -> None:
     plans = api.get(f"/writing/projects/{project['id']}/plans")
     if len(plans) < 3:
         plans = api.post(f"/writing/projects/{project['id']}/plans/generate", {"count": 3})
+    if not any(row.get("status") == "selected" for row in plans):
+        default_plan = next((row for row in plans if row.get("plan_key") == "balanced"), plans[0])
+        api.post(
+            f"/writing/projects/{project['id']}/plans/{default_plan['id']}/select",
+            {"reason": "演示准备默认采用综合平衡方案，现场可重新比较和选择"},
+        )
+        plans = api.get(f"/writing/projects/{project['id']}/plans")
+    ready_document = ensure_ready_document(api, project, release)
     documents = api.get(f"/writing/projects/{project['id']}/documents")
-    if not documents:
-        documents = [api.post(
-            "/writing/documents",
-            {
-                "project_id": project["id"],
-                "title": "积石山县6.2级地震应急处置方案",
-                "content": [
-                    {"id": "demo-title", "type": "h1", "children": [{"text": "积石山县6.2级地震应急处置方案"}]},
-                    {"id": "demo-notice", "type": "callout", "children": [{"text": "验收演示数据，不代表实时灾情或正式指挥决定。"}]},
-                    {"id": "demo-assessment", "type": "h2", "children": [{"text": "一、灾情研判"}]},
-                    {"id": "demo-assessment-body", "type": "p", "children": [{"text": "本章节由已核验事实、确定性判据和规则推演共同支撑。"}]},
-                    {"id": "demo-response", "type": "h2", "children": [{"text": "二、应急保障"}]},
-                    {"id": "demo-response-body", "type": "p", "children": [{"text": "资源缺口和调度方案需要经过人工确认后写入正式版本。"}]},
-                ],
-            },
-        )]
-    else:
-        current = api.get(f"/writing/documents/{documents[0]['id']}")["current_version"]
-        if current["knowledge_product_release_id"] != release["id"]:
-            api.post(
-                f"/writing/documents/{documents[0]['id']}/versions",
-                {
-                    "content": current["content"],
-                    "change_summary": "绑定地震应急专属知识产品版本",
-                    "publish": False,
-                },
-            )
     summary = {
         "project_id": project["id"],
         "project": project["name"],
@@ -463,6 +607,7 @@ def main() -> None:
         "verified_facts": len([row for row in api.get(f"/writing/projects/{project['id']}/facts") if row["verification_status"] == "verified"]),
         "alternative_plans": len(plans),
         "documents": len(documents),
+        "review_ready_document": ready_document["title"],
         "knowledge_materials": len(materials),
         "graph_entities": graph["entities"],
         "graph_facts": graph["facts"],
