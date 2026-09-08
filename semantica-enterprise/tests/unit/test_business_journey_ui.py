@@ -12,7 +12,7 @@ def test_new_space_enters_its_document_list_with_a_real_next_action() -> None:
     assert "state.pendingSpaceCreatedId=saved.id" in APP
     assert "await go('documents',true,{space_created:saved.id,_skipCapture:true})" in APP
     assert "知识空间已创建，可以上传第一份文档" in APP
-    assert "这个知识空间还没有文档" in APP
+    assert "当前空间还没有文档" in APP
     assert "data-doc-upload-mode" in APP
 
 
@@ -57,10 +57,9 @@ def test_governance_overview_uses_real_backend_projection_state() -> None:
 
 def test_graph_empty_state_explains_projection_requirements() -> None:
     assert "当前空间还没有知识图谱" in APP
-    assert "上传并选择“仅图谱”" in APP
-    assert "上传并选择“检索 + 图谱”" in APP
-    assert "对现有文档补充图谱加工" in APP
-    assert "data-graph-view=\"jobs\"" in APP
+    assert "上传并生成图谱" in APP
+    assert "手工新增节点" in APP
+    assert "对现有文档补充图谱加工" not in APP
 
 
 def test_release_records_are_not_a_static_demo() -> None:

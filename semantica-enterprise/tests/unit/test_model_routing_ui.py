@@ -8,7 +8,7 @@ STYLE = (ROOT / "apps/api/static/style.css").read_text(encoding="utf-8")
 
 def test_configuration_center_exposes_model_routing_crud() -> None:
     assert "modelrouting:{title:'模型路由'" in APP
-    assert "['modelrouting','模型路由']" in APP
+    assert "view:'modelrouting',icon:'路',title:'模型路由'" in APP
     assert "renderModelRoutingPolicies" in APP
     assert "'/model-routing-policies'" in APP
     assert "新增路由策略" in APP

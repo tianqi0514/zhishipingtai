@@ -7,12 +7,14 @@ APP = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
 STYLE = (ROOT / "apps/api/static/style.css").read_text(encoding="utf-8")
 
 
-def test_application_builder_navigation_exposes_six_journey_steps() -> None:
+def test_application_builder_navigation_exposes_one_business_entry() -> None:
     group = INDEX.split('data-nav-group="applications"', 1)[1].split(
         'data-nav-group="configuration"', 1
     )[0]
-    for label in ("应用工作台", "知识供给", "能力场景", "上线测试", "接入发布", "运行反馈"):
-        assert label in group
+    assert "应用工作台" in group
+    for label in ("知识供给", "能力场景", "上线测试", "接入发布", "运行反馈"):
+        assert label not in group
+        assert f"title:'{label}'" in APP
 
 
 def test_application_workbench_uses_business_journey_and_readiness() -> None:
@@ -57,7 +59,7 @@ def test_product_release_and_scenario_version_actions_call_real_apis() -> None:
 
 
 def test_application_feedback_closes_through_governance_workbench() -> None:
-    assert "通过门禁的上线测试确认" in APP
+    assert "通过的上线测试" in APP
     assert "查看治理任务" in APP
     assert "runtime-feedback-curation" in APP
     assert "runtime-feedback-verify" in APP
@@ -74,5 +76,5 @@ def test_foundation_layout_has_bounded_master_detail_responsiveness() -> None:
     assert ".foundation-layout" in STYLE
     assert "max-height:calc(100vh - 155px)" in STYLE
     assert "@media(max-width:760px){.foundation-layout{grid-template-columns:1fr}" in STYLE
-    assert ".application-flow-tabs" in STYLE
+    assert ".application-context-bar" in STYLE
     assert ".application-journey" in STYLE

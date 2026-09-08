@@ -147,6 +147,7 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [UI 性能测试报告](docs/UI_PERFORMANCE_TEST_REPORT.md)
 - [业务旅程浏览器测试](docs/BUSINESS_JOURNEY_BROWSER_TEST.md)
 - [全局 UI/UX 重构与信息架构](docs/UI_UX_REDESIGN.md)
+- [UI/UX P0–P2 业务可用性收口](docs/UI_UX_P0_P2_DELIVERY.md)
 - [Docker 部署](docs/DEPLOYMENT.md)
 - [系统架构](docs/ARCHITECTURE.md)
 - [DeepSeek Harness 适配与升级](docs/DEEPSEEK_HARNESS.md)
