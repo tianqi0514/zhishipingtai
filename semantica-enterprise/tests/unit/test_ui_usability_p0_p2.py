@@ -106,3 +106,8 @@ def test_presentation_copy_is_not_persistently_shown() -> None:
         "当前文档加工方式与发布状态已同步",
     ):
         assert phrase not in APP
+
+
+def test_runtime_capability_uses_business_facing_engine_name() -> None:
+    assert "CAPABILITY_DISPLAY_NAMES={Semantica:'语义建模引擎'}" in APP
+    assert APP.count("capabilityDisplayName(x.name)") == 2
