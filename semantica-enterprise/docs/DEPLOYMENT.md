@@ -26,7 +26,8 @@ MINIO_CONSOLE_PORT=19001
 
 Dockerfile 默认使用 Debian 官方软件源。受限网络环境可以在生产覆盖下向 API
 和 ASR 构建传入 `DEBIAN_MIRROR`、`DEBIAN_SECURITY_MIRROR`、`PIP_INDEX_URL`
-和 `PYTORCH_CPU_INDEX_URL`。这些值已经由生产 Compose 作为构建参数传入，
+和 API/ASR 各自的 `API_PYTORCH_CPU_INDEX_URL`、
+`ASR_PYTORCH_CPU_INDEX_URL`。这些值已经由生产 Compose 作为构建参数传入，
 在 `.env` 中配置后仍可继续使用标准部署脚本；配置前应从目标服务器真实验证
 镜像完整性和连通性。例如：
 
@@ -34,9 +35,13 @@ Dockerfile 默认使用 Debian 官方软件源。受限网络环境可以在生�
 DEBIAN_MIRROR=https://mirrors.aliyun.com/debian
 DEBIAN_SECURITY_MIRROR=https://mirrors.aliyun.com/debian-security
 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
-PYTORCH_CPU_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cpu
+API_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+ASR_PYTORCH_CPU_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cpu
 scripts/deploy_server.sh build
 ```
+
+两个 PyTorch 索引需要分别验证：API 与 ASR 锁定的版本可能不同时出现在同一
+第三方镜像中，不能通过降低锁定版本规避构建失败。
 
 ## Secret 与环境
 

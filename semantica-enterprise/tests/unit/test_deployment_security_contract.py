@@ -61,14 +61,20 @@ def test_production_build_mirrors_are_explicit_and_apply_to_api_and_asr() -> Non
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
     assert production.count("PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}") == 2
-    assert production.count(
-        "PYTORCH_CPU_INDEX_URL: ${PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
-    ) == 2
+    assert (
+        "PYTORCH_CPU_INDEX_URL: ${API_PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+        in production
+    )
+    assert (
+        "PYTORCH_CPU_INDEX_URL: ${ASR_PYTORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+        in production
+    )
     assert "ARG PIP_INDEX_URL=https://pypi.org/simple" in asr_dockerfile
     assert "ARG PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in asr_dockerfile
     assert 'pip install --index-url "${PYTORCH_CPU_INDEX_URL}"' in asr_dockerfile
     assert "PIP_INDEX_URL=https://pypi.org/simple" in env_example
-    assert "PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in env_example
+    assert "API_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in env_example
+    assert "ASR_PYTORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu" in env_example
 
 
 def test_local_development_image_contains_demo_preflight_assets() -> None:
