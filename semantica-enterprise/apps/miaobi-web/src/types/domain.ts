@@ -40,6 +40,28 @@ export type WritingDocument = {
   current_version?: { id: string; version: number; content: PlateNode[]; content_hash: string };
 };
 
+export type CollaborationAccess = {
+  token: string;
+  room: string;
+  url: string;
+  expires_at: string;
+  role: 'viewer' | 'commenter' | 'editor' | 'reviewer' | 'publisher' | 'owner';
+  read_only: boolean;
+  user: { id: string; name: string };
+};
+
+export type WritingComment = {
+  id: string;
+  document_id: string;
+  thread_id: string;
+  parent_id?: string;
+  block_id?: string;
+  content: string;
+  status: 'open' | 'resolved';
+  created_at: string;
+  author: { id: string; name: string };
+};
+
 export type Fact = {
   id: string;
   fact_key: string;
@@ -132,11 +154,19 @@ export type AgentMessage = {
   error_message?: string;
 };
 
+export type AgentEvent = {
+  id?: string;
+  sequence?: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at?: string;
+};
+
 export type WritingAgentSession = {
   id: string;
   project_id: string;
   document_id?: string;
   conversation_id: string;
   status: string;
-  conversation?: { messages?: AgentMessage[]; events?: Array<{ event_type: string; payload: Record<string, unknown> }> };
+  conversation?: { messages?: AgentMessage[]; events?: AgentEvent[] };
 };

@@ -882,11 +882,14 @@ def agent_writing_context(
                 "name": row.name,
                 "objective": row.objective,
                 "status": row.status,
-                "result": row.result,
-                "unresolved_gaps": row.unresolved_gaps,
             }
             for row in plans
         ],
+        "alternative_plan_policy": {
+            "details_are_scope_restricted": True,
+            "details_tool": "writing_compare_alternative_plans",
+            "use_only_when_user_requests_plans_routes_or_dispatch": True,
+        },
         "policy": {
             "authoritative_numbers_require_computation_or_database": True,
             "inference_requires_semantica": True,

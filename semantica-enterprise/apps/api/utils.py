@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 import unicodedata
+import re
 
 from sqlalchemy import inspect
 
@@ -45,7 +46,8 @@ def apply_patch(row: Any, values: dict[str, Any], allowed: set[str]) -> None:
 def attachment_content_disposition(filename: str) -> str:
     """Build a safe RFC 5987 attachment header for Unicode filenames."""
     name = Path(str(filename or "download").replace("\r", "_").replace("\n", "_")).name
-    suffix = "".join(Path(name).suffixes)[-32:]
+    raw_suffix = Path(name).suffix
+    suffix = raw_suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,16}", raw_suffix) else ""
     stem = name[: -len(suffix)] if suffix else name
     ascii_stem = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode()
     ascii_stem = "".join(character for character in ascii_stem if character.isalnum() or character in "._-")

@@ -1802,6 +1802,24 @@ class WritingEventProjection(Base, TimestampMixin):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class WritingComment(Base, TimestampMixin):
+    __tablename__ = "writing_comments"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    thread_id: Mapped[str] = mapped_column(String(36), index=True)
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_comments.id"), nullable=True, index=True
+    )
+    block_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    resolved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ExportTemplate(Base, TimestampMixin):
     __tablename__ = "writing_export_templates"
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_writing_export_template_code"),)

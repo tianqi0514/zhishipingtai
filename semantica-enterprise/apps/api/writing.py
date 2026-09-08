@@ -32,11 +32,15 @@ from apps.api.writing_schemas import (
     WritingDocumentUpdate,
     WritingDocumentValidate,
     WritingDocumentVersionCreate,
+    WritingCommentCreate,
+    WritingCommentResolve,
+    WritingCommentUpdate,
     WritingMemberCreate,
     WritingKnowledgeSearch,
     WritingAgentMessageCreate,
     WritingAgentSessionCreate,
     WritingProjectCreate,
+    WritingProjectReleaseRebase,
     WritingProjectUpdate,
     WritingRecomputeRequest,
     WritingReasoningRequest,
@@ -72,6 +76,7 @@ from packages.platform.models import (
     WritingBlockBinding,
     WritingDocument,
     WritingDocumentVersion,
+    WritingComment,
     WritingProject,
     WritingProjectMember,
     WritingAgentSession,
@@ -88,9 +93,12 @@ from packages.platform.writing import (
     generate_alternative_plans,
     validate_plate_content,
     validate_scenario_contract,
+    walk_plate_nodes,
 )
 from packages.platform.writing_export import CONTENT_TYPES, build_export_artifact
 from packages.platform.storage import object_storage
+from packages.platform.config import get_settings
+from packages.platform.security import create_collaboration_access_token
 from packages.semantica_adapter.analyze import run_graph_inference
 from apps.api.conversations import (
     _cancel_runtime,
@@ -105,6 +113,7 @@ from apps.api.conversations import (
 
 router = APIRouter(prefix="/writing", tags=["miaobi-writing"])
 require_writing_admin = require_permission("writing.manage")
+settings = get_settings()
 
 ROLE_RANK = {"viewer": 1, "commenter": 2, "editor": 3, "reviewer": 4, "publisher": 5, "owner": 6}
 def _active(model: type) -> Any:
@@ -779,7 +788,7 @@ def create_writing_agent_session(
         )
         .order_by(WritingAgentSession.created_at.desc())
     )
-    if existing is not None:
+    if existing is not None and not payload.start_new:
         conversation = db.scalar(
             select(Conversation).where(
                 Conversation.harness_session_id == existing.harness_session_id,
@@ -793,6 +802,8 @@ def create_writing_agent_session(
                 "conversation": _conversation_payload(db, conversation, detail=True),
             }
         existing.status = "orphaned"
+    elif existing is not None:
+        existing.status = "archived"
 
     space_ids, knowledge_release_ids = _release_scope(db, project, user)
     harness_session_id = f"miaobi-{uuid.uuid4().hex}"
@@ -908,7 +919,9 @@ def send_writing_agent_message(
     _, assistant = _create_turn_messages(db, conversation, user, content)
     agent_content = (
         "[妙笔写作任务] 请使用 writing_get_project_context 获取当前方案任务，"
-        "并将权威事实、计算和规则结论与普通叙述严格区分。用户请求：\n" + content
+        "并将权威事实、计算和规则结论与普通叙述严格区分。"
+        "执行阶段仅写入 Session Event；最终答复不得输出工具名、检索尝试、自我对话或工作草稿，"
+        "应直接给出面向业务人员的修订建议、待确认事项和真实引用。用户请求：\n" + content
     )
     audit(
         db,
@@ -1024,6 +1037,56 @@ def update_project(
     audit(db, user.tenant_id, user.id, "writing.project.update", "writing_project", row.id)
     db.commit()
     return serialize_row(row)
+
+
+@router.post("/projects/{project_id}/knowledge-release")
+def rebase_project_knowledge_release(
+    project_id: str,
+    payload: WritingProjectReleaseRebase,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Explicitly rebase a non-published writing project onto an immutable knowledge release."""
+    row = _project(db, project_id, user, "owner")
+    if row.status == "published":
+        raise HTTPException(status_code=409, detail="已发布方案任务不能变更知识基线，请创建后续任务版本")
+    release = _release_for_user(db, payload.knowledge_product_release_id, user)
+    old_release_id = row.knowledge_product_release_id
+    if old_release_id == release.id:
+        return {**serialize_row(row), "unchanged": True}
+    row.knowledge_product_release_id = release.id
+    stale_bindings = list(
+        db.scalars(
+            select(WritingBlockBinding).where(
+                WritingBlockBinding.project_id == row.id,
+                WritingBlockBinding.freshness_status == "current",
+                _active(WritingBlockBinding),
+            )
+        )
+    )
+    for binding in stale_bindings:
+        binding.freshness_status = "stale"
+        binding.metadata_json = {
+            **(binding.metadata_json or {}),
+            "stale_reason": "knowledge_product_release_rebased",
+            "previous_knowledge_product_release_id": old_release_id,
+        }
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "writing.project.knowledge_release.rebase",
+        "writing_project",
+        row.id,
+        {
+            "previous_release_id": old_release_id,
+            "knowledge_product_release_id": release.id,
+            "stale_bindings": len(stale_bindings),
+            "reason": payload.reason,
+        },
+    )
+    db.commit()
+    return {**serialize_row(row), "unchanged": False, "stale_bindings": len(stale_bindings)}
 
 
 @router.delete("/projects/{project_id}")
@@ -1558,6 +1621,21 @@ def decide_gate(
     db.flush()
     gate.current_record_id = record.id
     gate.status = "confirmed" if payload.decision in {"confirm", "override"} else "rejected"
+    db.flush()
+    project = db.get(WritingProject, project_id)
+    pending_required = int(
+        db.scalar(
+            select(func.count()).select_from(DecisionGate).where(
+                DecisionGate.project_id == project_id,
+                DecisionGate.required.is_(True),
+                DecisionGate.status != "confirmed",
+                _active(DecisionGate),
+            )
+        )
+        or 0
+    )
+    if project is not None and pending_required == 0 and project.status not in {"published", "archived"}:
+        project.status = "ready"
     audit(db, user.tenant_id, user.id, "writing.decision.record", "writing_decision_gate", gate.id, {"decision": payload.decision, "reason": payload.reason})
     db.commit()
     return serialize_row(record)
@@ -1622,6 +1700,173 @@ def get_document(document_id: str, user: User = Depends(get_current_user), db: S
     return {**serialize_row(row), "role": _project_role(db, project, user), "current_version": serialize_row(current) if current else None}
 
 
+@router.post("/documents/{document_id}/collaboration-token")
+def collaboration_token(
+    document_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    document, project = _document(db, document_id, user, "viewer")
+    role = _project_role(db, project, user) or "viewer"
+    token, room, expires_at = create_collaboration_access_token(
+        document_id=document.id,
+        project_id=project.id,
+        user_id=user.id,
+        tenant_id=user.tenant_id,
+        role=role,
+    )
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "writing.collaboration.token.issue",
+        "writing_document",
+        document.id,
+        {"room": room, "role": role, "expires_at": expires_at.isoformat()},
+    )
+    db.commit()
+    public_url = settings.collaboration_public_url.strip()
+    if not public_url:
+        scheme = "wss" if request.url.scheme == "https" else "ws"
+        public_url = f"{scheme}://{request.url.hostname}:8092"
+    return {
+        "token": token,
+        "room": room,
+        "url": public_url,
+        "expires_at": expires_at,
+        "role": role,
+        "read_only": ROLE_RANK.get(role, 0) < ROLE_RANK["editor"],
+        "user": {"id": user.id, "name": user.display_name},
+    }
+
+
+def _comment_payload(db: Session, row: WritingComment) -> dict[str, Any]:
+    creator = db.get(User, row.created_by)
+    return {
+        **serialize_row(row),
+        "author": {
+            "id": row.created_by,
+            "name": creator.display_name if creator else "已停用用户",
+        },
+    }
+
+
+@router.get("/documents/{document_id}/comments")
+def list_document_comments(
+    document_id: str,
+    include_resolved: bool = True,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _document(db, document_id, user, "viewer")
+    query = select(WritingComment).where(
+        WritingComment.document_id == document_id,
+        _active(WritingComment),
+    )
+    if not include_resolved:
+        query = query.where(WritingComment.status == "open")
+    rows = list(db.scalars(query.order_by(WritingComment.created_at, WritingComment.id)))
+    return [_comment_payload(db, row) for row in rows]
+
+
+@router.post("/documents/{document_id}/comments")
+def create_document_comment(
+    document_id: str,
+    payload: WritingCommentCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    document, project = _document(db, document_id, user, "commenter")
+    current = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+    if payload.block_id:
+        available = {str(node.get("id")) for node in walk_plate_nodes((current.content if current else []) or []) if node.get("id")}
+        if payload.block_id not in available:
+            raise HTTPException(status_code=422, detail="评论对应的正文块不存在于当前版本")
+    parent = None
+    if payload.parent_id:
+        parent = _tenant_row(db, WritingComment, payload.parent_id, user.tenant_id, "上级评论")
+        if parent.document_id != document.id:
+            raise HTTPException(status_code=422, detail="不能回复其他文稿的评论")
+    row_id = str(uuid.uuid4())
+    thread_id = parent.thread_id if parent else (payload.thread_id or row_id)
+    if payload.thread_id and not parent:
+        root = db.scalar(
+            select(WritingComment).where(
+                WritingComment.document_id == document.id,
+                WritingComment.thread_id == payload.thread_id,
+                WritingComment.parent_id.is_(None),
+                _active(WritingComment),
+            )
+        )
+        if root is None:
+            raise HTTPException(status_code=422, detail="评论线程不存在")
+    row = WritingComment(
+        id=row_id,
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        document_id=document.id,
+        thread_id=thread_id,
+        parent_id=parent.id if parent else None,
+        block_id=payload.block_id if not parent else (payload.block_id or parent.block_id),
+        content=payload.content.strip(),
+        status="open",
+        created_by=user.id,
+    )
+    db.add(row)
+    audit(db, user.tenant_id, user.id, "writing.comment.create", "writing_comment", row.id, {"document_id": document.id, "thread_id": thread_id})
+    _commit(db)
+    return _comment_payload(db, row)
+
+
+@router.put("/comments/{comment_id}")
+def update_document_comment(
+    comment_id: str,
+    payload: WritingCommentUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _tenant_row(db, WritingComment, comment_id, user.tenant_id, "评论")
+    _document(db, row.document_id, user, "commenter")
+    if row.created_by != user.id and not user.is_admin:
+        raise HTTPException(status_code=403, detail="只能修改自己创建的评论")
+    if row.status != "open":
+        raise HTTPException(status_code=409, detail="已解决的评论不能修改")
+    row.content = payload.content.strip()
+    audit(db, user.tenant_id, user.id, "writing.comment.update", "writing_comment", row.id)
+    db.commit()
+    return _comment_payload(db, row)
+
+
+@router.post("/comments/{comment_id}/resolve")
+def resolve_document_comment(
+    comment_id: str,
+    payload: WritingCommentResolve,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = _tenant_row(db, WritingComment, comment_id, user.tenant_id, "评论")
+    _document(db, row.document_id, user, "reviewer")
+    status = "resolved" if payload.resolved else "open"
+    now = datetime.now(timezone.utc)
+    rows = list(
+        db.scalars(
+            select(WritingComment).where(
+                WritingComment.document_id == row.document_id,
+                WritingComment.thread_id == row.thread_id,
+                _active(WritingComment),
+            )
+        )
+    )
+    for item in rows:
+        item.status = status
+        item.resolved_by = user.id if payload.resolved else None
+        item.resolved_at = now if payload.resolved else None
+    audit(db, user.tenant_id, user.id, "writing.comment.resolve" if payload.resolved else "writing.comment.reopen", "writing_comment", row.id, {"thread_id": row.thread_id})
+    db.commit()
+    return [_comment_payload(db, item) for item in rows]
+
+
 @router.put("/documents/{document_id}")
 def update_document(
     document_id: str,
@@ -1636,6 +1881,34 @@ def update_document(
     audit(db, user.tenant_id, user.id, "writing.document.update", "writing_document", row.id)
     _commit(db, "同一方案任务中已存在同名文稿")
     return serialize_row(row)
+
+
+@router.delete("/documents/{document_id}")
+def delete_document(
+    document_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Soft-delete a draft document while retaining immutable versions and audit history."""
+    row, _ = _document(db, document_id, user, "editor")
+    if row.status == "published":
+        raise HTTPException(status_code=409, detail="已发布文稿不可直接删除，请先创建后续草稿或归档")
+    deleted_at = datetime.now(timezone.utc)
+    original_title = row.title
+    row.title = f"{original_title}（已删除-{row.id[:8]}）"
+    row.status = "archived"
+    row.deleted_at = deleted_at
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "writing.document.delete",
+        "writing_document",
+        row.id,
+        {"title": original_title, "deleted_at": deleted_at.isoformat()},
+    )
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/documents/{document_id}/versions")
@@ -1663,7 +1936,13 @@ def create_document_version(
             raise HTTPException(status_code=409, detail={"message": "文稿仍有不可发布的问题", "issues": blocking})
     next_hash = content_hash(payload.content)
     current = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
-    if current and current.content_hash == next_hash and not payload.publish:
+    if (
+        current
+        and current.content_hash == next_hash
+        and current.scenario_package_version_id == project.scenario_package_version_id
+        and current.knowledge_product_release_id == project.knowledge_product_release_id
+        and not payload.publish
+    ):
         return {**serialize_row(current), "issues": issues, "unchanged": True}
     number = int(db.scalar(select(func.max(WritingDocumentVersion.version)).where(WritingDocumentVersion.document_id == document.id)) or 0) + 1
     row = WritingDocumentVersion(
@@ -1721,6 +2000,12 @@ def upsert_binding(
         fact = _tenant_row(db, ProjectFact, payload.fact_id, user.tenant_id, "事实")
         if fact.project_id != project.id:
             raise HTTPException(status_code=403, detail="事实不属于当前方案任务")
+        if payload.block_type == "inference_conclusion" and (
+            fact.fact_type != "semantica_inference"
+            or fact.verification_status != "verified"
+            or fact.freshness_status != "current"
+        ):
+            raise HTTPException(status_code=409, detail="只能插入当前有效且已确认的规则推演结论")
     if payload.computation_run_id:
         run = _tenant_row(db, ComputationRun, payload.computation_run_id, user.tenant_id, "计算运行")
         if run.project_id != project.id:

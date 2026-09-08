@@ -12,6 +12,7 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
+    "@hocuspocus/provider": "3.4.4",
     "@platejs/ai": "53.3.12",
     "@platejs/basic-nodes": "53.0.0",
     "@platejs/callout": "53.0.0",
@@ -36,11 +37,14 @@
     "@platejs/table": "53.0.9",
     "@platejs/toc": "53.0.0",
     "@platejs/yjs": "53.2.0",
+    "@slate-yjs/react": "1.1.0",
     "lucide-react": "0.542.0",
     "platejs": "53.3.11",
     "react": "19.2.1",
     "react-dom": "19.2.1",
-    "yjs": "13.6.27"
+    "use-sync-external-store": "1.4.0",
+    "y-indexeddb": "9.0.12",
+    "yjs": "13.6.32"
   },
   "devDependencies": {
     "@playwright/test": "1.55.0",

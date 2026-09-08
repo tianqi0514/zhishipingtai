@@ -23,7 +23,11 @@ from packages.platform.models import (
     Document,
     DocumentVersion,
     Fact,
+    GraphRelease,
+    IndexRelease,
+    KnowledgeRelease,
     KnowledgeSpace,
+    ModelConfig,
     SpaceGrant,
     Tenant,
     User,
@@ -325,6 +329,93 @@ def test_fact_evidence_update_requires_write_permission_and_same_space(monkeypat
         )
         assert stale.status_code == 400
         assert stale.json()["detail"] == "证据片段不是文档当前版本"
+
+
+def test_superseded_fact_can_be_restored_without_losing_evidence(monkeypatch) -> None:
+    with fact_evidence_client(monkeypatch) as (client, db, tokens, fact, _correct, _sibling, _foreign):
+        fact.status = "superseded"
+        db.commit()
+        monkeypatch.setattr(
+            "apps.api.routes._publish_graph_snapshot",
+            lambda _db, _tenant_id, _space_id: SimpleNamespace(release_number=77),
+        )
+
+        restored = client.post(
+            "/api/v1/knowledge/facts",
+            headers=_auth(tokens["admin"]),
+            json={
+                "space_id": fact.space_id,
+                "subject_entity_id": fact.subject_entity_id,
+                "predicate": fact.predicate,
+                "object_entity_id": fact.object_entity_id,
+                "source_chunk_id": fact.source_chunk_id,
+                "confidence": 1,
+                "status": "published",
+            },
+        )
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["restored"] is True
+        assert restored.json()["graph_release"] == 77
+        db.expire_all()
+        assert db.get(Fact, fact.id).status == "published"
+        assert "knowledge.fact.restore" in set(db.scalars(select(AuditEvent.action)))
+
+
+def test_current_graph_and_index_can_be_published_as_one_immutable_release(monkeypatch) -> None:
+    with fact_evidence_client(monkeypatch) as (client, db, tokens, fact, _correct, _sibling, _foreign):
+        model = ModelConfig(
+            tenant_id=fact.tenant_id,
+            name="本地向量",
+            model_kind="embedding",
+            provider="bge",
+            model_name="fixture",
+            enabled=True,
+        )
+        db.add(model)
+        db.flush()
+        graph = GraphRelease(
+            tenant_id=fact.tenant_id,
+            space_id=fact.space_id,
+            release_number=1,
+            graph_name="fact-evidence-graph-1",
+            entity_count=2,
+            fact_count=1,
+            validation_report={"valid": True},
+        )
+        db.add(graph)
+        db.flush()
+        index = IndexRelease(
+            tenant_id=fact.tenant_id,
+            space_id=fact.space_id,
+            release_number=1,
+            opensearch_index="fact-evidence-index-1",
+            qdrant_collection="fact-evidence-vector-1",
+            graph_release_id=graph.id,
+            model_config_id=model.id,
+            embedding_dimension=8,
+            document_count=1,
+            chunk_count=2,
+            checksums={"chunks": "a" * 64},
+        )
+        db.add(index)
+        db.commit()
+
+        published = client.post(
+            f"/api/v1/knowledge/releases/publish?space_id={fact.space_id}",
+            headers=_auth(tokens["admin"]),
+        )
+        assert published.status_code == 200, published.text
+        assert published.json()["unchanged"] is False
+        assert published.json()["graph_release_id"] == graph.id
+        assert published.json()["index_release_id"] == index.id
+
+        repeated = client.post(
+            f"/api/v1/knowledge/releases/publish?space_id={fact.space_id}",
+            headers=_auth(tokens["admin"]),
+        )
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json()["unchanged"] is True
+        assert db.scalar(select(KnowledgeRelease).where(KnowledgeRelease.space_id == fact.space_id)) is not None
 
 
 def test_fact_evidence_update_is_audited_overlay_and_legacy_direction_is_soft_suppressed(

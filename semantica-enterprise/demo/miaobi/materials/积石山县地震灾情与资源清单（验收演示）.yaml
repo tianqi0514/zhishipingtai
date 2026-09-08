@@ -1,0 +1,22 @@
+disclaimer: 验收演示数据，不代表实时灾情或正式指挥决定
+event:
+  name: 积石山县6.2级地震
+  magnitude: 6.2
+  population_density_people_per_km2: 305.6
+resources:
+  rescue_personnel:
+    required: 500
+    available: 320
+  trauma_beds:
+    required: 330
+    county_available: 110
+    callable_total: 250
+  tents:
+    required: 7000
+    available: 5200
+verification:
+  status: verified_fixture
+  requires_human_confirmation:
+    - disaster_level
+    - response_level
+    - resource_gap

@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@hocuspocus/provider':
+        specifier: 3.4.4
+        version: 3.4.4(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32)
       '@platejs/ai':
         specifier: 53.3.12
         version: 53.3.12(platejs@53.3.11(@types/react@19.2.7)(immer@10.0.3)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(scheduler@0.27.0)(use-sync-external-store@1.4.0(react@19.2.1)))(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(supports-color@7.1.0)(typescript@5.9.3)
@@ -79,7 +82,10 @@ importers:
         version: 53.0.0(platejs@53.3.11(@types/react@19.2.7)(immer@10.0.3)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(scheduler@0.27.0)(use-sync-external-store@1.4.0(react@19.2.1)))(react-dom@19.2.1(react@19.2.1))(react@19.2.1)
       '@platejs/yjs':
         specifier: 53.2.0
-        version: 53.2.0(@hocuspocus/provider@3.4.4(y-protocols@1.0.7(yjs@13.6.27))(yjs@13.6.27))(platejs@53.3.11(@types/react@19.2.7)(immer@10.0.3)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(scheduler@0.27.0)(use-sync-external-store@1.4.0(react@19.2.1)))(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(slate@0.126.2)(y-webrtc@10.3.0(supports-color@7.1.0)(yjs@13.6.27))
+        version: 53.2.0(@hocuspocus/provider@3.4.4(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32))(platejs@53.3.11(@types/react@19.2.7)(immer@10.0.3)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(scheduler@0.27.0)(use-sync-external-store@1.4.0(react@19.2.1)))(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(slate@0.126.2)(y-webrtc@10.3.0(supports-color@7.1.0)(yjs@13.6.32))
+      '@slate-yjs/react':
+        specifier: 1.1.0
+        version: 1.1.0(@slate-yjs/core@1.0.2(slate@0.126.2)(yjs@13.6.32))(react@19.2.1)(slate-react@0.126.4(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(slate-dom@0.126.0(slate@0.126.2))(slate@0.126.2))(slate@0.126.2)(yjs@13.6.32)
       lucide-react:
         specifier: 0.542.0
         version: 0.542.0(react@19.2.1)
@@ -92,9 +98,15 @@ importers:
       react-dom:
         specifier: 19.2.1
         version: 19.2.1(react@19.2.1)
+      use-sync-external-store:
+        specifier: 1.4.0
+        version: 1.4.0(react@19.2.1)
+      y-indexeddb:
+        specifier: 9.0.12
+        version: 9.0.12(yjs@13.6.32)
       yjs:
-        specifier: 13.6.27
-        version: 13.6.27
+        specifier: 13.6.32
+        version: 13.6.32
     devDependencies:
       '@playwright/test':
         specifier: 1.55.0
@@ -918,6 +930,15 @@ packages:
     resolution: {integrity: sha512-X0hLFJbQu9c1ItWBaNuEn0pqcXYK76KCp8C4Gvy/VaTQVMo1VgAb2WiiJ0Je/AyuIYEPPSTNVOcyrGHwgA7e6Q==}
     peerDependencies:
       slate: '>=0.70.0'
+      yjs: ^13.5.29
+
+  '@slate-yjs/react@1.1.0':
+    resolution: {integrity: sha512-lGpEJLwThMPVZ+beqsoBowwBO2egu7K8ow+TOM4k2Liz9/dD1H9/ZNrdfZkPVSYT9NmgFm4dYc187t5GC4Wd6g==}
+    peerDependencies:
+      '@slate-yjs/core': ^1.0.0
+      react: '>=16.8.0'
+      slate: '>=0.70.0'
+      slate-react: '>=0.70.0'
       yjs: ^13.5.29
 
   '@standard-schema/spec@1.1.0':
@@ -2496,10 +2517,6 @@ packages:
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
-  yjs@13.6.27:
-    resolution: {integrity: sha512-OIDwaflOaq4wC6YlPBy2L6ceKeKuF7DeTxx+jPzv1FHn9tCZ0ZwSRnUBxD05E3yed46fv/FWJbvR+Ud7x0L7zw==}
-    engines: {node: '>=16.0.0', npm: '>=8.0.0'}
-
   yjs@13.6.32:
     resolution: {integrity: sha512-lfiJIIC4Xayt5ItynE407ehlE03pCjeOc4hkR4yxxvvNJ4kuiN25B0g+Qp8XagYz361LLL7DCzR5bvFJ81QKtQ==}
     engines: {node: '>=16.0.0', npm: '>=8.0.0'}
@@ -2799,14 +2816,14 @@ snapshots:
     dependencies:
       lib0: 0.2.117
 
-  '@hocuspocus/provider@3.4.4(y-protocols@1.0.7(yjs@13.6.27))(yjs@13.6.27)':
+  '@hocuspocus/provider@3.4.4(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32)':
     dependencies:
       '@hocuspocus/common': 3.4.4
       '@lifeomic/attempt': 3.1.0
       lib0: 0.2.117
       ws: 8.21.3
-      y-protocols: 1.0.7(yjs@13.6.27)
-      yjs: 13.6.27
+      y-protocols: 1.0.7(yjs@13.6.32)
+      yjs: 13.6.32
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -3187,9 +3204,9 @@ snapshots:
       - scheduler
       - use-sync-external-store
 
-  '@platejs/yjs@53.2.0(@hocuspocus/provider@3.4.4(y-protocols@1.0.7(yjs@13.6.27))(yjs@13.6.27))(platejs@53.3.11(@types/react@19.2.7)(immer@10.0.3)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(scheduler@0.27.0)(use-sync-external-store@1.4.0(react@19.2.1)))(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(slate@0.126.2)(y-webrtc@10.3.0(supports-color@7.1.0)(yjs@13.6.27))':
+  '@platejs/yjs@53.2.0(@hocuspocus/provider@3.4.4(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32))(platejs@53.3.11(@types/react@19.2.7)(immer@10.0.3)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(scheduler@0.27.0)(use-sync-external-store@1.4.0(react@19.2.1)))(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(slate@0.126.2)(y-webrtc@10.3.0(supports-color@7.1.0)(yjs@13.6.32))':
     dependencies:
-      '@hocuspocus/provider': 3.4.4(y-protocols@1.0.7(yjs@13.6.27))(yjs@13.6.27)
+      '@hocuspocus/provider': 3.4.4(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32)
       '@slate-yjs/core': 1.0.2(slate@0.126.2)(yjs@13.6.32)
       platejs: 53.3.11(@types/react@19.2.7)(immer@10.0.3)(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(scheduler@0.27.0)(use-sync-external-store@1.4.0(react@19.2.1))
       react: 19.2.1
@@ -3197,7 +3214,7 @@ snapshots:
       react-dom: 19.2.1(react@19.2.1)
       y-indexeddb: 9.0.12(yjs@13.6.32)
       y-protocols: 1.0.7(yjs@13.6.32)
-      y-webrtc: 10.3.0(supports-color@7.1.0)(yjs@13.6.27)
+      y-webrtc: 10.3.0(supports-color@7.1.0)(yjs@13.6.32)
       yjs: 13.6.32
     transitivePeerDependencies:
       - slate
@@ -3305,6 +3322,16 @@ snapshots:
   '@slate-yjs/core@1.0.2(slate@0.126.2)(yjs@13.6.32)':
     dependencies:
       slate: 0.126.2
+      y-protocols: 1.0.7(yjs@13.6.32)
+      yjs: 13.6.32
+
+  '@slate-yjs/react@1.1.0(@slate-yjs/core@1.0.2(slate@0.126.2)(yjs@13.6.32))(react@19.2.1)(slate-react@0.126.4(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(slate-dom@0.126.0(slate@0.126.2))(slate@0.126.2))(slate@0.126.2)(yjs@13.6.32)':
+    dependencies:
+      '@slate-yjs/core': 1.0.2(slate@0.126.2)(yjs@13.6.32)
+      react: 19.2.1
+      slate: 0.126.2
+      slate-react: 0.126.4(react-dom@19.2.1(react@19.2.1))(react@19.2.1)(slate-dom@0.126.0(slate@0.126.2))(slate@0.126.2)
+      use-sync-external-store: 1.4.0(react@19.2.1)
       y-protocols: 1.0.7(yjs@13.6.32)
       yjs: 13.6.32
 
@@ -5097,22 +5124,17 @@ snapshots:
       lib0: 0.2.117
       yjs: 13.6.32
 
-  y-protocols@1.0.7(yjs@13.6.27):
-    dependencies:
-      lib0: 0.2.117
-      yjs: 13.6.27
-
   y-protocols@1.0.7(yjs@13.6.32):
     dependencies:
       lib0: 0.2.117
       yjs: 13.6.32
 
-  y-webrtc@10.3.0(supports-color@7.1.0)(yjs@13.6.27):
+  y-webrtc@10.3.0(supports-color@7.1.0)(yjs@13.6.32):
     dependencies:
       lib0: 0.2.117
       simple-peer: 9.11.1(supports-color@7.1.0)
-      y-protocols: 1.0.7(yjs@13.6.27)
-      yjs: 13.6.27
+      y-protocols: 1.0.7(yjs@13.6.32)
+      yjs: 13.6.32
     optionalDependencies:
       ws: 8.21.3
     transitivePeerDependencies:
@@ -5121,10 +5143,6 @@ snapshots:
       - utf-8-validate
 
   yallist@3.1.1: {}
-
-  yjs@13.6.27:
-    dependencies:
-      lib0: 0.2.117
 
   yjs@13.6.32:
     dependencies:

@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     agent_service_secret_file: Path = Path("/run/secrets/agent_service_secret")
     agent_access_token_minutes: int = 5
     agent_request_timeout_seconds: int = 600
+    collaboration_secret_file: Path = Path("/run/secrets/agent_service_secret")
+    collaboration_token_minutes: int = 15
+    # Leave empty to derive ws(s)://<current-api-host>:8092 per request. A
+    # reverse proxy deployment can set an explicit public WebSocket endpoint.
+    collaboration_public_url: str = ""
 
     @property
     def effective_auth_cookie_secure(self) -> bool:

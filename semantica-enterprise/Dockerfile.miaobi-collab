@@ -1,0 +1,14 @@
+FROM node:24-alpine
+
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.19.0 --activate
+COPY apps/miaobi-collab/package.json apps/miaobi-collab/pnpm-lock.yaml apps/miaobi-collab/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+COPY apps/miaobi-collab/src ./src
+
+RUN addgroup -g 10002 collab && adduser -D -u 10002 -G collab collab \
+    && mkdir -p /var/lib/miaobi-collab && chown -R collab:collab /var/lib/miaobi-collab /app
+USER collab
+
+EXPOSE 8092 8093
+CMD ["node", "src/server.mjs"]

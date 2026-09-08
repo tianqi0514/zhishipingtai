@@ -797,6 +797,22 @@ _INTERNAL_UUID_PATTERN = re.compile(
 _RAW_RULE_LINE_PATTERN = re.compile(
     r"(?m)^\s*(?:[-*]\s*)?(?:\*{0,2})?形式化(?:表达)?(?:\*{0,2})?\s*[:：].*(?:\n|$)"
 )
+_PRIVATE_WORK_PREAMBLE_PATTERN = re.compile(
+    r"(?:\bLet me\b|\bI have\b|\bI need to\b|\bBased on the project context\b|"
+    r"让我(?:先|再|重新)?|我(?:现在)?需要(?:先|向用户)|我注意到|我进行了多次)",
+    re.IGNORECASE,
+)
+_FINAL_BUSINESS_MARKERS = (
+    "## 灾情研判草稿",
+    "## 方案",
+    "**灾情研判草稿",
+    "以下为**",
+    "以下为 **",
+    "以下为灾情",
+    "以下为方案",
+    "最终答复：",
+    "最终答复:",
+)
 
 
 def _sanitize_public_answer_text(content: str) -> tuple[str, list[str]]:
@@ -808,6 +824,15 @@ def _sanitize_public_answer_text(content: str) -> tuple[str, list[str]]:
     """
     value = str(content or "")
     removed: list[str] = []
+    # Some preview models narrate their scratch work despite the system
+    # contract.  DSH Session Events retain the verifiable tool execution; the
+    # user-facing answer must start at the model's final business section.
+    if _PRIVATE_WORK_PREAMBLE_PATTERN.search(value):
+        marker_positions = [value.rfind(marker) for marker in _FINAL_BUSINESS_MARKERS]
+        marker = max(marker_positions, default=-1)
+        if marker >= 0:
+            value = value[marker:]
+            removed.append("private_work_preamble")
     rewritten = _RAW_RULE_LINE_PATTERN.sub("", value)
     if rewritten != value:
         removed.append("raw_rule")
@@ -830,6 +855,14 @@ def _sanitize_public_answer_text(content: str) -> tuple[str, list[str]]:
         if rewritten != value:
             removed.append(pattern.pattern)
         value = rewritten
+    rewritten = re.sub(r"\bSemantica\b", "规则推演引擎", value, flags=re.IGNORECASE)
+    if rewritten != value:
+        removed.append("engine_brand")
+    value = rewritten
+    rewritten = re.sub(r"\bwriting_[a-z0-9_]+\b", "写作工具", value, flags=re.IGNORECASE)
+    if rewritten != value:
+        removed.append("writing_tool_name")
+    value = rewritten
     value = re.sub(r"\n{3,}", "\n\n", value).strip()
     return value, removed
 

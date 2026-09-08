@@ -73,6 +73,11 @@ class WritingProjectUpdate(StrictModel):
     config: dict[str, Any] | None = None
 
 
+class WritingProjectReleaseRebase(StrictModel):
+    knowledge_product_release_id: str
+    reason: str = Field(min_length=2, max_length=1000)
+
+
 class WritingMemberCreate(StrictModel):
     user_id: str
     role: Literal["viewer", "commenter", "editor", "reviewer", "publisher", "owner"] = "editor"
@@ -226,7 +231,9 @@ class WritingBlockBindingUpsert(StrictModel):
             "knowledge_citation": self.chunk_id,
             "verified_fact": self.fact_id,
             "computed_metric": self.computation_run_id,
-            "inference_conclusion": self.inferred_fact_id,
+            # 妙笔场景推演会先形成已确认 ProjectFact；知识分析发布后的
+            # 图谱推演仍可绑定平台 InferredFact。两者都是受控权威来源。
+            "inference_conclusion": self.inferred_fact_id or self.fact_id,
         }
         expected = mapping.get(self.block_type)
         if self.block_type in mapping and not expected:
@@ -243,6 +250,21 @@ class WritingDocumentValidate(StrictModel):
 
 class WritingRecomputeRequest(StrictModel):
     changed_fact_ids: list[str] = Field(min_length=1)
+
+
+class WritingCommentCreate(StrictModel):
+    content: str = Field(min_length=1, max_length=10_000)
+    thread_id: str | None = None
+    parent_id: str | None = None
+    block_id: str | None = Field(default=None, max_length=100)
+
+
+class WritingCommentUpdate(StrictModel):
+    content: str = Field(min_length=1, max_length=10_000)
+
+
+class WritingCommentResolve(StrictModel):
+    resolved: bool = True
 
 
 class WritingKnowledgeSearch(StrictModel):
@@ -263,6 +285,7 @@ class WritingKnowledgeSearch(StrictModel):
 
 class WritingAgentSessionCreate(StrictModel):
     document_id: str | None = None
+    start_new: bool = False
 
 
 class WritingAgentMessageCreate(StrictModel):

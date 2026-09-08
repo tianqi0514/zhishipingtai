@@ -41,6 +41,8 @@ x-app-environment: &app-environment
   MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
   AGENT_PUBLIC_URL: ${AGENT_PUBLIC_URL:-}
   AGENT_SERVICE_SECRET_FILE: /run/secrets/agent_service_secret
+  COLLABORATION_SECRET_FILE: /run/secrets/agent_service_secret
+  COLLABORATION_PUBLIC_URL: ${COLLABORATION_PUBLIC_URL:-}
 
 services:
   postgres:
@@ -283,6 +285,30 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  miaobi-collab:
+    build:
+      context: .
+      dockerfile: Dockerfile.miaobi-collab
+    image: chuanshen-miaobi-collab:1.0.0-rc1
+    environment:
+      PORT: "8092"
+      HEALTH_PORT: "8093"
+      COLLABORATION_STORAGE_PATH: /var/lib/miaobi-collab
+      COLLABORATION_SECRET_FILE: /run/secrets/agent_service_secret
+    secrets:
+      - agent_service_secret
+    volumes:
+      - collaboration-data:/var/lib/miaobi-collab
+    ports:
+      - "${COLLABORATION_BIND_ADDRESS:-127.0.0.1}:${COLLABORATION_PUBLISHED_PORT:-8092}:8092"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8093/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
   mcp-server:
     image: semantica-enterprise:0.10.0
     command: ["python", "-m", "apps.mcp.server"]
@@ -339,3 +365,4 @@ volumes:
   falkordb-data:
   harness-data:
   asr-model-cache:
+  collaboration-data:

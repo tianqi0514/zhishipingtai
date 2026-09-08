@@ -185,7 +185,10 @@ from packages.platform.curation_workbench import (
     curation_impacts,
     summarize_fields,
 )
-from packages.platform.index_release import publish_index_snapshot as publish_effective_index_snapshot
+from packages.platform.index_release import (
+    activate_knowledge_release,
+    publish_index_snapshot as publish_effective_index_snapshot,
+)
 from packages.platform.security import (
     create_access_token,
     decrypt_secret,
@@ -1246,7 +1249,11 @@ def delete_document(row_id: str, user: User = Depends(get_current_user), db: Ses
     )
     db.commit()
 
-    publication: dict[str, Any] = {"graph_release": None, "index_release": None}
+    publication: dict[str, Any] = {
+        "graph_release": None,
+        "index_release": None,
+        "knowledge_release": None,
+    }
     warnings: list[str] = []
     if had_graph_release or had_index_release:
         try:
@@ -1261,6 +1268,14 @@ def delete_document(row_id: str, user: User = Depends(get_current_user), db: Ses
                     graph_release=graph_release,
                 )
                 publication["index_release"] = index_release.release_number
+                knowledge_release = activate_knowledge_release(
+                    db,
+                    tenant_id=user.tenant_id,
+                    space_id=row.space_id,
+                    graph_release=graph_release,
+                    index_release=index_release,
+                )
+                publication["knowledge_release"] = knowledge_release.release_number
             audit(
                 db,
                 user.tenant_id,
@@ -4462,7 +4477,23 @@ def create_knowledge_fact(payload: KnowledgeFactCreate, user: User = Depends(get
         Fact.object_value == payload.object_value,
         _active(Fact),
     ))
-    if duplicate: raise HTTPException(409, "相同的知识关系已存在")
+    if duplicate:
+        effective = effective_fact(db, duplicate)
+        if duplicate.deleted_at is not None or effective.get("status") == "suppressed":
+            raise HTTPException(409, "相同的知识关系已由治理操作屏蔽，请先撤销治理决定")
+        if duplicate.status != "published":
+            duplicate.status = payload.status
+            duplicate.source_chunk_id = payload.source_chunk_id
+            duplicate.confidence = payload.confidence
+            duplicate.valid_from = payload.valid_from
+            duplicate.valid_to = payload.valid_to
+            audit(db, user.tenant_id, user.id, "knowledge.fact.restore", "fact", duplicate.id, {"space_id": duplicate.space_id})
+            release = _publish_graph_snapshot(db, user.tenant_id, duplicate.space_id)
+            _commit(db)
+            data = serialize_row(duplicate)
+            data.update({"graph_release": release.release_number, "restored": True})
+            return data
+        raise HTTPException(409, "相同的知识关系已存在")
     row = Fact(
         tenant_id=user.tenant_id,
         space_id=payload.space_id,
@@ -4593,6 +4624,68 @@ def list_releases(space_id: str, user: User = Depends(get_current_user), db: Ses
         "indexes": [serialize_row(row) for row in db.scalars(select(IndexRelease).where(IndexRelease.space_id == space_id, _active(IndexRelease)).order_by(IndexRelease.release_number.desc()))],
         "knowledge": [serialize_row(row) for row in db.scalars(select(KnowledgeRelease).where(KnowledgeRelease.space_id == space_id, _active(KnowledgeRelease)).order_by(KnowledgeRelease.release_number.desc()))],
     }
+
+
+@router.post("/knowledge/releases/publish")
+def publish_current_knowledge_release(
+    space_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Atomically pair the current graph and search snapshots.
+
+    Manual graph curation intentionally does not rebuild full-text and vector
+    indexes after every edited relation. This explicit publication boundary
+    makes the latest graph available to immutable knowledge products while
+    reusing the current, already validated index snapshot.
+    """
+    require_space_permission(db, user, space_id, "write")
+    graph_release = db.scalar(
+        select(GraphRelease).where(
+            GraphRelease.tenant_id == user.tenant_id,
+            GraphRelease.space_id == space_id,
+            GraphRelease.status == "published",
+            _active(GraphRelease),
+        ).order_by(GraphRelease.release_number.desc()).limit(1)
+    )
+    index_release = db.scalar(
+        select(IndexRelease).where(
+            IndexRelease.tenant_id == user.tenant_id,
+            IndexRelease.space_id == space_id,
+            IndexRelease.status == "published",
+            _active(IndexRelease),
+        ).order_by(IndexRelease.release_number.desc()).limit(1)
+    )
+    if graph_release is None or index_release is None:
+        raise HTTPException(409, "请先完成图谱和检索索引发布")
+    current = db.scalar(
+        select(KnowledgeRelease).where(
+            KnowledgeRelease.tenant_id == user.tenant_id,
+            KnowledgeRelease.space_id == space_id,
+            KnowledgeRelease.status == "published",
+            _active(KnowledgeRelease),
+        ).order_by(KnowledgeRelease.release_number.desc()).limit(1)
+    )
+    if current and current.graph_release_id == graph_release.id and current.index_release_id == index_release.id:
+        return {**serialize_row(current), "unchanged": True}
+    release = activate_knowledge_release(
+        db,
+        tenant_id=user.tenant_id,
+        space_id=space_id,
+        graph_release=graph_release,
+        index_release=index_release,
+    )
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "knowledge.release.publish",
+        "knowledge_release",
+        release.id,
+        {"space_id": space_id, "graph_release": graph_release.release_number, "index_release": index_release.release_number},
+    )
+    db.commit()
+    return {**serialize_row(release), "unchanged": False}
 
 
 @router.get("/knowledge/governance-overview")

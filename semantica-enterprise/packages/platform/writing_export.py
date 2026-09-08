@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import html
+import re
 import shutil
 import subprocess
 from functools import lru_cache
@@ -56,6 +58,19 @@ def _node_text(node: dict[str, Any]) -> str:
     if "text" in node:
         return str(node.get("text") or "")
     return "".join(_node_text(item) for item in (node.get("children") or []) if isinstance(item, dict))
+
+
+def _clean_citation_text(value: str, max_length: int = 420) -> str:
+    """Render retrieved Markdown as a compact, safe source excerpt."""
+    cleaned = html.unescape(value)
+    cleaned = re.sub(r"(^|[\s：])#{1,6}\s+", r"\1", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s{0,3}>\s?", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"(?:\*\*|__|`)(.*?)(?:\*\*|__|`)", r"\1", cleaned)
+    cleaned = re.sub(r"\[(.*?)\]\([^)]*\)", r"\1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > max_length:
+        return cleaned[: max_length - 1].rstrip() + "…"
+    return cleaned
 
 
 def _set_run_font(run, size: float = 11, bold: bool = False) -> None:
@@ -137,6 +152,8 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
     for node in content:
         node_type = str(node.get("type") or "p")
         text = _node_text(node).strip()
+        if node_type == "knowledge_citation":
+            text = _clean_citation_text(text)
         if node_type == "table":
             _add_table(document, node)
             continue

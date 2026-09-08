@@ -12,6 +12,7 @@ from apps.api.conversations import (
     _repair_internal_answer_details,
     _repair_unverifiable_citations,
     _reconcile_stale_turn,
+    _sanitize_public_answer_text,
     _validate_structured_citations,
 )
 from apps.api.structured_data import _next_structured_citation_number
@@ -192,6 +193,63 @@ def test_public_answer_guard_hides_internal_adapter_fields_without_touching_cita
         assert "本轮未启用图谱" in assistant.content
         assert "文档检索" in assistant.content
         assert "规则推演" in assistant.content
+
+
+def test_public_answer_guard_removes_model_work_scratch_before_final_business_answer() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000094",
+            harness_session_id="session-public-answer-scratch",
+            tenant_id="tenant",
+            user_id="user",
+            title="public answer scratch",
+        )
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000094",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="completed",
+            content=(
+                "I have the project context. Let me compose the draft.\n"
+                "让我重新整理一下。writing_get_project_context 返回了事实。\n\n"
+                "以下为**灾情研判草稿**：重大地震灾害（Ⅱ级）[1]，"
+                "该结论来自 Semantica 推演并需人工确认。"
+            ),
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+
+        repaired = _repair_internal_answer_details(db, assistant.id)
+
+        assert repaired is not None
+        assert assistant.content.startswith("**灾情研判草稿**")
+        assert "Let me" not in assistant.content
+        assert "writing_get_project_context" not in assistant.content
+        assert "Semantica" not in assistant.content
+        assert "规则推演引擎" in assistant.content
+        assert repaired["removed_internal_fields"] == [
+            "engine_brand",
+            "private_work_preamble",
+        ]
+
+
+def test_public_answer_guard_uses_last_markdown_business_draft() -> None:
+    raw = (
+        "I have the project context. Let me draft it.\n"
+        "**灾情研判草稿（中间稿）**\n中间内容[1]\n"
+        "Let me count characters and present the final answer.\n"
+        "## 灾情研判草稿（待确认）\n最终内容[1]"
+    )
+
+    sanitized, removed = _sanitize_public_answer_text(raw)
+
+    assert sanitized == "## 灾情研判草稿（待确认）\n最终内容[1]"
+    assert "private_work_preamble" in removed
 
 
 def test_followup_citation_is_inherited_from_latest_verified_message() -> None:

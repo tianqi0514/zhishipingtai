@@ -4,6 +4,7 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+import jwt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -24,6 +25,9 @@ from packages.platform.models import (
     Tenant,
     User,
     WritingAgentSession,
+    WritingDocument,
+    WritingDocumentVersion,
+    WritingProjectMember,
 )
 from packages.platform.security import create_access_token, hash_password
 
@@ -357,6 +361,7 @@ def test_publish_requires_all_decision_gates() -> None:
                 json={"decision": "confirm", "reason": "测试确认"},
             )
             assert decided.status_code == 200, decided.text
+        assert client.get(f"/api/v1/writing/projects/{project['id']}").json()["status"] == "ready"
         published = client.post(
             f"/api/v1/writing/documents/{document['id']}/versions",
             json={"content": [], "change_summary": "正式发布", "publish": True},
@@ -414,8 +419,16 @@ def test_writing_agent_session_is_idempotent_and_release_scoped() -> None:
         )
         assert second.status_code == 200, second.text
         assert second.json()["id"] == first.json()["id"]
-        session = db.get(WritingAgentSession, first.json()["id"])
-        conversation = db.get(Conversation, first.json()["conversation_id"])
+        fresh = client.post(
+            f"/api/v1/writing/projects/{project['id']}/agent-sessions",
+            json={"document_id": document["id"], "start_new": True},
+        )
+        assert fresh.status_code == 200, fresh.text
+        assert fresh.json()["id"] != first.json()["id"]
+        assert db.get(WritingAgentSession, first.json()["id"]).status == "archived"
+        assert fresh.json()["conversation"]["settings"]["knowledge_product_release_id"] == release.id
+        session = db.get(WritingAgentSession, fresh.json()["id"])
+        conversation = db.get(Conversation, fresh.json()["conversation_id"])
         assert session.harness_session_id == conversation.harness_session_id
         assert conversation.settings["kind"] == "writing"
         assert conversation.settings["knowledge_product_release_id"] == release.id
@@ -470,3 +483,280 @@ def test_project_earthquake_reasoning_uses_deterministic_criteria_and_semantica(
         assert conclusion["value"]["text"] == "重大地震灾害（Ⅱ级）"
         assert conclusion["verification_status"] == "unverified"
         assert reasoning.json()["requires_human_confirmation"] is True
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={
+                "project_id": project["id"],
+                "title": "推演绑定测试文稿",
+                "content": [{"id": "inference-block", "type": "inference_conclusion", "children": [{"text": "灾害等级：重大地震灾害（Ⅱ级）"}]}],
+            },
+        )
+        assert document.status_code == 200, document.text
+        unconfirmed = client.post(
+            f"/api/v1/writing/documents/{document.json()['id']}/bindings",
+            json={
+                "block_id": "inference-block",
+                "block_type": "inference_conclusion",
+                "source_type": "semantica_inference",
+                "fact_id": conclusion["id"],
+                "content_hash": "d" * 64,
+                "verification_status": "verified",
+            },
+        )
+        assert unconfirmed.status_code == 409
+        confirmed = client.post(
+            f"/api/v1/writing/projects/{project['id']}/facts/{conclusion['id']}/confirm",
+            json={"decision": "confirm", "reason": "已核验推演前提与规则"},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        binding = client.post(
+            f"/api/v1/writing/documents/{document.json()['id']}/bindings",
+            json={
+                "block_id": "inference-block",
+                "block_type": "inference_conclusion",
+                "source_type": "semantica_inference",
+                "source_id": confirmed.json()["source_id"],
+                "fact_id": confirmed.json()["id"],
+                "evidence_ids": [item["source_fact_id"] for item in confirmed.json()["source_locator"]["evidence"]],
+                "content_hash": "d" * 64,
+                "verification_status": "verified",
+            },
+        )
+        assert binding.status_code == 200, binding.text
+        assert binding.json()["fact_id"] == confirmed.json()["id"]
+
+
+def test_collaboration_token_is_short_lived_and_room_scoped(monkeypatch) -> None:
+    secret = "collaboration-test-secret-at-least-thirty-two-bytes"
+    monkeypatch.setattr("packages.platform.security._collaboration_secret", lambda: secret)
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={
+                "project_id": project["id"],
+                "title": "协同测试文稿",
+                "content": [{"id": "paragraph-1", "type": "p", "children": [{"text": "协同正文"}]}],
+            },
+        ).json()
+        response = client.post(f"/api/v1/writing/documents/{document['id']}/collaboration-token")
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        claims = jwt.decode(
+            payload["token"], secret, algorithms=["HS256"], audience="miaobi-collaboration"
+        )
+        assert claims["room"] == payload["room"]
+        assert claims["document_id"] == document["id"]
+        assert claims["project_id"] == project["id"]
+        assert claims["role"] == "owner"
+        assert payload["role"] == "owner"
+        assert payload["read_only"] is False
+        assert claims["exp"] - claims["iat"] == 15 * 60
+
+
+def test_document_comments_bind_to_real_blocks_and_resolve_threads() -> None:
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={
+                "project_id": project["id"],
+                "title": "评论测试文稿",
+                "content": [{"id": "paragraph-1", "type": "p", "children": [{"text": "需要复核"}]}],
+            },
+        ).json()
+        invalid = client.post(
+            f"/api/v1/writing/documents/{document['id']}/comments",
+            json={"block_id": "missing-block", "content": "不存在的正文块"},
+        )
+        assert invalid.status_code == 422
+        root = client.post(
+            f"/api/v1/writing/documents/{document['id']}/comments",
+            json={"block_id": "paragraph-1", "content": "请复核响应等级"},
+        )
+        assert root.status_code == 200, root.text
+        reply = client.post(
+            f"/api/v1/writing/documents/{document['id']}/comments",
+            json={"parent_id": root.json()["id"], "content": "已核对来源"},
+        )
+        assert reply.status_code == 200, reply.text
+        assert reply.json()["thread_id"] == root.json()["thread_id"]
+        rows = client.get(f"/api/v1/writing/documents/{document['id']}/comments").json()
+        assert [row["content"] for row in rows] == ["请复核响应等级", "已核对来源"]
+        resolved = client.post(
+            f"/api/v1/writing/comments/{root.json()['id']}/resolve",
+            json={"resolved": True},
+        )
+        assert resolved.status_code == 200, resolved.text
+        assert {row["status"] for row in resolved.json()} == {"resolved"}
+        assert client.get(
+            f"/api/v1/writing/documents/{document['id']}/comments?include_resolved=false"
+        ).json() == []
+
+
+def test_collaboration_roles_enforce_read_only_comment_and_review_boundaries(monkeypatch) -> None:
+    secret = "collaboration-role-secret-at-least-thirty-two-bytes"
+    monkeypatch.setattr("packages.platform.security._collaboration_secret", lambda: secret)
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={
+                "project_id": project["id"],
+                "title": "角色权限测试",
+                "content": [{"id": "paragraph-1", "type": "p", "children": [{"text": "受控正文"}]}],
+            },
+        ).json()
+        tenant_id = db.get(KnowledgeProductRelease, release.id).tenant_id
+        admin_id = db.query(User).filter(User.tenant_id == tenant_id, User.is_admin.is_(True)).one().id
+        roles = {}
+        for role in ("viewer", "commenter", "editor", "reviewer"):
+            user = User(
+                tenant_id=tenant_id,
+                username=f"writing-{role}",
+                password_hash=hash_password("RoleBoundary@123"),
+                display_name=f"{role}用户",
+                is_admin=False,
+                enabled=True,
+            )
+            db.add(user)
+            db.flush()
+            db.add(WritingProjectMember(
+                tenant_id=tenant_id,
+                project_id=project["id"],
+                user_id=user.id,
+                role=role,
+                created_by=admin_id,
+            ))
+            roles[role] = {"Authorization": f"Bearer {create_access_token(user.id, tenant_id, False)}"}
+        stranger = User(
+            tenant_id=tenant_id,
+            username="writing-stranger",
+            password_hash=hash_password("RoleBoundary@123"),
+            display_name="无权限用户",
+            is_admin=False,
+            enabled=True,
+        )
+        db.add(stranger)
+        db.commit()
+        stranger_headers = {"Authorization": f"Bearer {create_access_token(stranger.id, tenant_id, False)}"}
+
+        viewer_access = client.post(
+            f"/api/v1/writing/documents/{document['id']}/collaboration-token", headers=roles["viewer"]
+        )
+        assert viewer_access.status_code == 200
+        assert viewer_access.json()["read_only"] is True
+        assert client.post(
+            f"/api/v1/writing/documents/{document['id']}/comments",
+            headers=roles["viewer"],
+            json={"content": "越权评论"},
+        ).status_code == 403
+
+        commenter_access = client.post(
+            f"/api/v1/writing/documents/{document['id']}/collaboration-token", headers=roles["commenter"]
+        )
+        assert commenter_access.status_code == 200
+        assert commenter_access.json()["read_only"] is True
+        comment = client.post(
+            f"/api/v1/writing/documents/{document['id']}/comments",
+            headers=roles["commenter"],
+            json={"block_id": "paragraph-1", "content": "请复核正文"},
+        )
+        assert comment.status_code == 200
+        assert client.post(
+            f"/api/v1/writing/comments/{comment.json()['id']}/resolve",
+            headers=roles["commenter"],
+            json={"resolved": True},
+        ).status_code == 403
+
+        editor_access = client.post(
+            f"/api/v1/writing/documents/{document['id']}/collaboration-token", headers=roles["editor"]
+        )
+        assert editor_access.status_code == 200
+        assert editor_access.json()["read_only"] is False
+        assert client.post(
+            f"/api/v1/writing/comments/{comment.json()['id']}/resolve",
+            headers=roles["editor"],
+            json={"resolved": True},
+        ).status_code == 403
+        assert client.post(
+            f"/api/v1/writing/comments/{comment.json()['id']}/resolve",
+            headers=roles["reviewer"],
+            json={"resolved": True},
+        ).status_code == 200
+        assert client.post(
+            f"/api/v1/writing/documents/{document['id']}/collaboration-token", headers=stranger_headers
+        ).status_code == 403
+
+
+def test_document_delete_is_soft_and_releases_the_business_title() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        payload = {
+            "project_id": project["id"],
+            "title": "可回收文稿",
+            "content": [{"id": "paragraph-1", "type": "p", "children": [{"text": "需要保留版本"}]}],
+        }
+        document = client.post("/api/v1/writing/documents", json=payload).json()
+        deleted = client.delete(f"/api/v1/writing/documents/{document['id']}")
+        assert deleted.status_code == 200, deleted.text
+        assert client.get(f"/api/v1/writing/documents/{document['id']}").status_code == 404
+        assert client.get(f"/api/v1/writing/projects/{project['id']}/documents").json() == []
+        retained = db.get(WritingDocument, document["id"])
+        assert retained is not None and retained.deleted_at is not None
+        assert db.get(WritingDocumentVersion, document["current_version"]["id"]) is not None
+        recreated = client.post("/api/v1/writing/documents", json=payload)
+        assert recreated.status_code == 200, recreated.text
+
+
+def test_draft_project_can_explicitly_rebase_to_a_new_immutable_knowledge_release() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={
+                "project_id": project["id"],
+                "title": "知识基线切换",
+                "content": [{"id": "paragraph-1", "type": "p", "children": [{"text": "受控正文"}]}],
+            },
+        ).json()
+        old_version = document["current_version"]
+        new_release = KnowledgeProductRelease(
+            tenant_id=release.tenant_id,
+            product_id=release.product_id,
+            version=2,
+            manifest={},
+            checksum="c" * 64,
+            status="published",
+            created_by=release.created_by,
+        )
+        db.add(new_release)
+        db.flush()
+        source_item = db.query(KnowledgeProductReleaseItem).filter(
+            KnowledgeProductReleaseItem.product_release_id == release.id
+        ).one()
+        db.add(
+            KnowledgeProductReleaseItem(
+                tenant_id=release.tenant_id,
+                product_release_id=new_release.id,
+                space_id=source_item.space_id,
+                knowledge_release_id="knowledge-release-v2",
+                checksum="d" * 64,
+            )
+        )
+        db.commit()
+
+        rebased = client.post(
+            f"/api/v1/writing/projects/{project['id']}/knowledge-release",
+            json={"knowledge_product_release_id": new_release.id, "reason": "采用最新已发布应急知识"},
+        )
+        assert rebased.status_code == 200, rebased.text
+        assert rebased.json()["knowledge_product_release_id"] == new_release.id
+        version = client.post(
+            f"/api/v1/writing/documents/{document['id']}/versions",
+            json={"content": old_version["content"], "change_summary": "更新知识基线"},
+        )
+        assert version.status_code == 200, version.text
+        assert version.json()["version"] == 2
+        assert version.json()["knowledge_product_release_id"] == new_release.id
+        assert db.get(WritingDocumentVersion, old_version["id"]).knowledge_product_release_id == release.id

@@ -142,7 +142,7 @@ case "$action" in
     "${compose[@]}" config --quiet
     ;;
   build)
-    "${compose[@]}" build api agent-runtime opensearch asr-runtime
+    "${compose[@]}" build api agent-runtime miaobi-collab opensearch asr-runtime
     ;;
   up)
     "${compose[@]}" config --quiet
@@ -151,10 +151,10 @@ case "$action" in
     ;;
   upgrade)
     "${compose[@]}" config --quiet
-    "${compose[@]}" build api agent-runtime
+    "${compose[@]}" build api agent-runtime miaobi-collab
     "${compose[@]}" up -d --no-deps --force-recreate --wait \
       --wait-timeout "${DEPLOY_WAIT_SECONDS:-1200}" \
-      api worker scheduler mcp-server agent-runtime
+      api worker scheduler mcp-server agent-runtime miaobi-collab
     "${compose[@]}" ps
     ;;
   check)

@@ -171,6 +171,48 @@ def decode_agent_access_token(token: str) -> dict:
     )
 
 
+def _collaboration_secret() -> str:
+    path = get_settings().collaboration_secret_file
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError("协同编辑服务密钥不可用") from exc
+    if len(value) < 32:
+        raise RuntimeError("协同编辑服务密钥长度不足")
+    return value
+
+
+def create_collaboration_access_token(
+    *,
+    document_id: str,
+    project_id: str,
+    user_id: str,
+    tenant_id: str,
+    role: str,
+) -> tuple[str, str, datetime]:
+    settings = get_settings()
+    issued = datetime.now(timezone.utc)
+    expires = issued + timedelta(minutes=settings.collaboration_token_minutes)
+    room = f"writing-{tenant_id}-{document_id}"
+    payload = {
+        "sub": user_id,
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "document_id": document_id,
+        "room": room,
+        "role": role,
+        "aud": "miaobi-collaboration",
+        "jti": uuid.uuid4().hex,
+        "iat": issued,
+        "exp": expires,
+    }
+    return (
+        jwt.encode(payload, _collaboration_secret(), algorithm="HS256"),
+        room,
+        expires,
+    )
+
+
 def _fernet() -> Fernet:
     secret = get_settings().app_secret_key.encode("utf-8")
     key = base64.urlsafe_b64encode(hashlib.sha256(secret).digest())

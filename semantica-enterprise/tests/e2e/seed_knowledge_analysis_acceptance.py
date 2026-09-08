@@ -77,11 +77,19 @@ def _get_or_create_space(db, admin: User) -> tuple[KnowledgeSpace, bool]:
         select(KnowledgeSpace).where(
             KnowledgeSpace.tenant_id == admin.tenant_id,
             KnowledgeSpace.code == SPACE_CODE,
-            KnowledgeSpace.deleted_at.is_(None),
         )
     )
     if space:
-        return space, False
+        restored = space.deleted_at is not None
+        if restored:
+            # The production uniqueness boundary intentionally survives soft
+            # deletion.  This deterministic acceptance fixture owns its code,
+            # so reruns restore the archived row instead of creating a second
+            # knowledge space or deleting unrelated data.
+            space.deleted_at = None
+            space.enabled = True
+            space.owner_id = admin.id
+        return space, restored
     space = KnowledgeSpace(
         tenant_id=admin.tenant_id,
         code=SPACE_CODE,

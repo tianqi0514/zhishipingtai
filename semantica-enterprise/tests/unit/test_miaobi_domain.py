@@ -18,7 +18,7 @@ from packages.platform.writing import (
     validate_scenario_contract,
     validate_scenario_input,
 )
-from packages.platform.writing_export import build_export_artifact
+from packages.platform.writing_export import _clean_citation_text, build_export_artifact
 from packages.semantica_adapter.analyze import run_graph_inference
 
 
@@ -216,3 +216,15 @@ def test_production_export_builds_real_docx_xlsx_json_and_geojson() -> None:
         assert zipfile.is_zipfile(root / "artifact.xlsx")
         assert json.loads((root / "artifact.json").read_text(encoding="utf-8"))["title"] == "积石山县地震应急处置方案"
         assert json.loads((root / "artifact.geojson").read_text(encoding="utf-8"))["features"][0]["geometry"]["type"] == "LineString"
+
+
+def test_export_citation_cleans_markdown_entities_and_limits_length() -> None:
+    cleaned = _clean_citation_text("地震应急预案：# 地震预案\n&gt; **响应要求** [来源](https://example.test) " + "处置" * 300)
+    assert not cleaned.startswith("#")
+    assert "：#" not in cleaned
+    assert "&gt;" not in cleaned
+    assert "**" not in cleaned
+    assert "https://" not in cleaned
+    assert "响应要求" in cleaned
+    assert cleaned.endswith("…")
+    assert len(cleaned) == 420
