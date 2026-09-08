@@ -54,5 +54,6 @@ artifacts/
 /.codex-finalizer-receipts/
 /.demo-build/
 /marketing-materials/
+/plate/
 /semantica-enterprise/.demo-build/
 /semantica-enterprise/uv.lock

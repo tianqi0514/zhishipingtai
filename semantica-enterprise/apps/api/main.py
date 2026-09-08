@@ -16,6 +16,7 @@ from apps.api.application_foundation import router as application_foundation_rou
 from apps.api.application_quality import router as application_quality_router
 from apps.api.structured_data import router as structured_data_router
 from apps.api.media import router as media_router
+from apps.api.writing import router as writing_router
 from packages.platform.bootstrap import bootstrap
 from packages.platform.config import get_settings
 from packages.platform.database import SessionLocal, init_db
@@ -50,6 +51,7 @@ app.include_router(application_foundation_router, prefix=settings.api_prefix)
 app.include_router(application_quality_router, prefix=settings.api_prefix)
 app.include_router(structured_data_router, prefix=settings.api_prefix)
 app.include_router(media_router, prefix=settings.api_prefix)
+app.include_router(writing_router, prefix=settings.api_prefix)
 
 
 @app.get("/health/live")

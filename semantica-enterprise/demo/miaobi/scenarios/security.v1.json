@@ -1,0 +1,11 @@
+{
+  "code": "security-response-plan", "name": "反恐维稳保障方案", "disaster_type": "security", "status": "draft",
+  "input_schema": {"type": "object", "required": ["event_name", "incident_type", "affected_area"], "properties": {"event_name": {"type": "string"}, "incident_type": {"type": "string"}, "affected_area": {"type": "string"}, "casualty_count": {"type": "integer"}}},
+  "ontology_mapping": {"event_name": "SecurityIncident.name", "incident_type": "SecurityIncident.type", "affected_area": "Location.name"},
+  "rule_set_ids": ["security-response-tasks"], "formula_ids": ["resource-gap", "vehicle-trips"], "tool_ids": ["TrafficStatusMCP", "MapRoutingMCP", "HospitalCapacityMCP"],
+  "chapter_template": {"chapters": [{"key": "general", "title": "总则"}, {"key": "assessment", "title": "情况研判"}, {"key": "organization", "title": "组织体系"}, {"key": "response", "title": "应急保障"}, {"key": "appendix", "title": "附则"}]},
+  "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]}, "review_rules": {"require_citations": true, "restricted_distribution": true},
+  "decision_gates": [{"key": "information_scope", "name": "信息范围确认", "required": true}, {"key": "publish", "name": "正式发布确认", "required": true}],
+  "comparison_dimensions": [{"key": "response_time", "name": "响应时间", "direction": "min"}, {"key": "public_risk", "name": "公共安全风险", "direction": "min"}],
+  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"}
+}

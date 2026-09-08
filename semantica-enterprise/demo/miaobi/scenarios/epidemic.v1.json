@@ -1,0 +1,11 @@
+{
+  "code": "epidemic-response-plan", "name": "疫情防控保障方案", "disaster_type": "epidemic", "status": "draft",
+  "input_schema": {"type": "object", "required": ["event_name", "case_count", "population"], "properties": {"event_name": {"type": "string"}, "case_count": {"type": "integer"}, "population": {"type": "integer"}, "medical_capacity": {"type": "integer"}}},
+  "ontology_mapping": {"event_name": "EpidemicEvent.name", "case_count": "EpidemicEvent.caseCount", "medical_capacity": "MedicalResource.capacity"},
+  "rule_set_ids": ["epidemic-response-tasks"], "formula_ids": ["resource-gap", "medical-pressure"], "tool_ids": ["HospitalCapacityMCP", "ResourceInventoryMCP"],
+  "chapter_template": {"chapters": [{"key": "general", "title": "总则"}, {"key": "assessment", "title": "疫情研判"}, {"key": "organization", "title": "组织体系"}, {"key": "response", "title": "防疫与医疗保障"}, {"key": "appendix", "title": "附则"}]},
+  "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]}, "review_rules": {"require_citations": true},
+  "decision_gates": [{"key": "case_definition", "name": "病例口径确认", "required": true}, {"key": "publish", "name": "正式发布确认", "required": true}],
+  "comparison_dimensions": [{"key": "medical_pressure", "name": "医疗压力", "direction": "min"}, {"key": "supply_gap", "name": "物资缺口", "direction": "min"}],
+  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "pending_customer_confirmation"}
+}

@@ -1,0 +1,21 @@
+{
+  "scenario": "earthquake-response-plan",
+  "disclaimer": "验收数据来源于用户提供的客户材料，仅用于软件验收，不代表实时灾情。",
+  "facts": {
+    "magnitude": {"value": 6.2, "unit": "级", "source": "客户推演数据表"},
+    "population_density": {"value": 305.6, "unit": "人/km²", "source": "客户推演数据表"},
+    "disaster_grade": {"value": "重大地震灾害（Ⅱ级）", "source": "临夏州地震应急预案 3.1"},
+    "rescue_required": {"value": 500, "unit": "人"},
+    "rescue_available": {"value": 320, "unit": "人"},
+    "rescue_gap": {"value": 180, "unit": "人"},
+    "trauma_beds_required": {"value": 330, "unit": "张"},
+    "county_trauma_beds": {"value": 110, "unit": "张"},
+    "callable_trauma_beds": {"value": 250, "unit": "张"},
+    "county_bed_gap": {"value": 220, "unit": "张"},
+    "all_area_bed_gap": {"value": 80, "unit": "张"},
+    "tents_required": {"value": 7000, "unit": "顶"},
+    "tents_available": {"value": 5200, "unit": "顶"},
+    "tents_gap": {"value": 1800, "unit": "顶"}
+  },
+  "change_case": {"fact": "rescue_available", "before": 320, "after": 400, "gap_before": 180, "gap_after": 100}
+}

@@ -1,0 +1,60 @@
+{
+  "code": "earthquake-response-plan",
+  "name": "地震应急处置方案",
+  "disaster_type": "earthquake",
+  "status": "active",
+  "input_schema": {
+    "type": "object",
+    "required": ["event_name", "magnitude", "population_density", "rescue_required", "rescue_available"],
+    "properties": {
+      "event_name": {"type": "string"},
+      "magnitude": {"type": "number", "minimum": 0, "maximum": 10, "unit": "级"},
+      "population_density": {"type": "number", "minimum": 0, "unit": "人/km²"},
+      "rescue_required": {"type": "integer", "minimum": 0, "unit": "人"},
+      "rescue_available": {"type": "integer", "minimum": 0, "unit": "人"},
+      "trauma_beds_required": {"type": "integer", "minimum": 0, "unit": "张"},
+      "county_trauma_beds": {"type": "integer", "minimum": 0, "unit": "张"},
+      "callable_trauma_beds": {"type": "integer", "minimum": 0, "unit": "张"},
+      "tents_required": {"type": "integer", "minimum": 0, "unit": "顶"},
+      "tents_available": {"type": "integer", "minimum": 0, "unit": "顶"},
+      "route_graph": {"type": "object"},
+      "route_start": {"type": "string"},
+      "route_target": {"type": "string"}
+    }
+  },
+  "ontology_mapping": {
+    "event_name": "EarthquakeEvent.name",
+    "magnitude": "EarthquakeEvent.magnitude",
+    "population_density": "AffectedArea.populationDensity",
+    "rescue_required": "ResourceDemand.required",
+    "rescue_available": "ResourceInventory.available"
+  },
+  "rule_set_ids": ["earthquake-grade", "earthquake-response-tasks"],
+  "formula_ids": ["resource-gap", "water-demand", "vehicle-trips", "medical-pressure", "route-utility"],
+  "tool_ids": ["ResourceInventoryMCP", "HospitalCapacityMCP", "TrafficStatusMCP", "MapRoutingMCP", "WeatherMCP"],
+  "chapter_template": {
+    "chapters": [
+      {"key": "general", "title": "总则"},
+      {"key": "assessment", "title": "灾情研判"},
+      {"key": "organization", "title": "组织体系"},
+      {"key": "response", "title": "应急保障"},
+      {"key": "appendix", "title": "附则"}
+    ]
+  },
+  "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]},
+  "review_rules": {"require_citations": true, "reject_stale_blocks": true, "reject_unconfirmed_gates": true},
+  "decision_gates": [
+    {"key": "critical_facts", "name": "关键事实确认", "required": true},
+    {"key": "disaster_grade", "name": "灾害等级确认", "required": true},
+    {"key": "response_level", "name": "响应等级建议确认", "required": true},
+    {"key": "resource_gap", "name": "资源缺口确认", "required": true},
+    {"key": "alternative_plan", "name": "备选方案选择", "required": true},
+    {"key": "publish", "name": "正式发布确认", "required": true}
+  ],
+  "comparison_dimensions": [
+    {"key": "response_time", "name": "响应时间", "direction": "min"},
+    {"key": "safety_risk", "name": "安全风险", "direction": "min"},
+    {"key": "unmet_demand", "name": "未满足需求", "direction": "min"}
+  ],
+  "config": {"minimum_plan_count": 2, "default_plan_count": 3, "business_validation": "accepted"}
+}

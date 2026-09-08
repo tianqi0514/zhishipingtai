@@ -287,4 +287,9 @@ def bootstrap(db: Session) -> None:
         ]:
             db.add(OntologyTerm(ontology_id=ontology.id, code=code, label=label, term_type=term_type))
 
+    db.flush()
+    from .writing_bootstrap import bootstrap_writing
+
+    bootstrap_writing(db, tenant_id=tenant.id, actor_id=admin.id)
+
     db.commit()

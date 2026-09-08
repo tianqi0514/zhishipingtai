@@ -1447,3 +1447,382 @@ class ApplicationInvocation(Base, TimestampMixin):
     error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# ---- Miaobi writing execution domain -----------------------------------------------
+
+
+class ScenarioPackage(Base, TimestampMixin):
+    __tablename__ = "scenario_packages"
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_scenario_package_code"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    code: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(200))
+    disaster_type: Mapped[str] = mapped_column(String(64), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ScenarioPackageVersion(Base, TimestampMixin):
+    __tablename__ = "scenario_package_versions"
+    __table_args__ = (
+        UniqueConstraint("scenario_package_id", "version", name="uq_scenario_package_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    scenario_package_id: Mapped[str] = mapped_column(ForeignKey("scenario_packages.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    input_schema: Mapped[dict] = mapped_column(JSON, default=dict)
+    ontology_mapping: Mapped[dict] = mapped_column(JSON, default=dict)
+    rule_set_ids: Mapped[list] = mapped_column(JSON, default=list)
+    formula_ids: Mapped[list] = mapped_column(JSON, default=list)
+    tool_ids: Mapped[list] = mapped_column(JSON, default=list)
+    chapter_template: Mapped[dict] = mapped_column(JSON, default=dict)
+    output_schema: Mapped[dict] = mapped_column(JSON, default=dict)
+    review_rules: Mapped[dict] = mapped_column(JSON, default=dict)
+    decision_gates: Mapped[list] = mapped_column(JSON, default=list)
+    comparison_dimensions: Mapped[list] = mapped_column(JSON, default=list)
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+
+
+class WritingProject(Base, TimestampMixin):
+    __tablename__ = "writing_projects"
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_writing_project_code"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    code: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(300))
+    application_id: Mapped[str | None] = mapped_column(ForeignKey("applications.id"), nullable=True, index=True)
+    scenario_package_version_id: Mapped[str] = mapped_column(
+        ForeignKey("scenario_package_versions.id"), index=True
+    )
+    knowledge_product_release_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_product_releases.id"), index=True
+    )
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class WritingProjectMember(Base, TimestampMixin):
+    __tablename__ = "writing_project_members"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_writing_project_member"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(32), default="editor")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class WritingDocument(Base, TimestampMixin):
+    __tablename__ = "writing_documents"
+    __table_args__ = (UniqueConstraint("project_id", "title", name="uq_writing_document_title"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    title: Mapped[str] = mapped_column(String(500))
+    document_type: Mapped[str] = mapped_column(String(64), default="response_plan")
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+
+
+class WritingDocumentVersion(Base, TimestampMixin):
+    __tablename__ = "writing_document_versions"
+    __table_args__ = (
+        UniqueConstraint("document_id", "version", name="uq_writing_document_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[list] = mapped_column(JSON, default=list)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    scenario_package_version_id: Mapped[str] = mapped_column(
+        ForeignKey("scenario_package_versions.id"), index=True
+    )
+    knowledge_product_release_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_product_releases.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="immutable", index=True)
+    change_summary: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WritingBlockBinding(Base, TimestampMixin):
+    __tablename__ = "writing_block_bindings"
+    __table_args__ = (
+        UniqueConstraint("document_id", "block_id", name="uq_writing_document_block"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    block_id: Mapped[str] = mapped_column(String(100), index=True)
+    block_type: Mapped[str] = mapped_column(String(64), index=True)
+    source_type: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    source_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    knowledge_product_release_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_product_releases.id"), nullable=True, index=True
+    )
+    chunk_id: Mapped[str | None] = mapped_column(ForeignKey("chunks.id"), nullable=True, index=True)
+    fact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_project_facts.id"), nullable=True, index=True
+    )
+    inferred_fact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("inferred_facts.id"), nullable=True, index=True
+    )
+    query_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("structured_query_runs.id"), nullable=True, index=True
+    )
+    computation_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("computation_runs.id"), nullable=True, index=True
+    )
+    tool_run_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    evidence_ids: Mapped[list] = mapped_column(JSON, default=list)
+    data_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    verification_status: Mapped[str] = mapped_column(String(32), default="unverified", index=True)
+    freshness_status: Mapped[str] = mapped_column(String(32), default="current", index=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ProjectFact(Base, TimestampMixin):
+    __tablename__ = "writing_project_facts"
+    __table_args__ = (
+        UniqueConstraint("project_id", "fact_key", "version", name="uq_writing_project_fact_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    fact_key: Mapped[str] = mapped_column(String(160), index=True)
+    label: Mapped[str] = mapped_column(String(300))
+    fact_type: Mapped[str] = mapped_column(String(64), index=True)
+    value: Mapped[dict] = mapped_column(JSON, default=dict)
+    unit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    source_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_locator: Mapped[dict] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    verification_status: Mapped[str] = mapped_column(String(32), default="unverified", index=True)
+    freshness_status: Mapped[str] = mapped_column(String(32), default="current", index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    confirmed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FactConflict(Base, TimestampMixin):
+    __tablename__ = "writing_fact_conflicts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    fact_key: Mapped[str] = mapped_column(String(160), index=True)
+    candidate_fact_ids: Mapped[list] = mapped_column(JSON, default=list)
+    conflict_type: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    resolution: Mapped[dict] = mapped_column(JSON, default=dict)
+    resolved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ComputationDefinition(Base, TimestampMixin):
+    __tablename__ = "computation_definitions"
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_computation_definition_code"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    code: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ComputationDefinitionVersion(Base, TimestampMixin):
+    __tablename__ = "computation_definition_versions"
+    __table_args__ = (
+        UniqueConstraint("definition_id", "version", name="uq_computation_definition_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    definition_id: Mapped[str] = mapped_column(ForeignKey("computation_definitions.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    operation: Mapped[str] = mapped_column(String(64))
+    expression: Mapped[str] = mapped_column(String(1000))
+    input_schema: Mapped[dict] = mapped_column(JSON, default=dict)
+    output_schema: Mapped[dict] = mapped_column(JSON, default=dict)
+    unit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rounding: Mapped[dict] = mapped_column(JSON, default=dict)
+    default_parameters: Mapped[dict] = mapped_column(JSON, default=dict)
+    tests: Mapped[list] = mapped_column(JSON, default=list)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class ComputationRun(Base, TimestampMixin):
+    __tablename__ = "computation_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    definition_version_id: Mapped[str] = mapped_column(
+        ForeignKey("computation_definition_versions.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="succeeded", index=True)
+    inputs: Mapped[dict] = mapped_column(JSON, default=dict)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    input_fact_ids: Mapped[list] = mapped_column(JSON, default=list)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class DecisionGate(Base, TimestampMixin):
+    __tablename__ = "writing_decision_gates"
+    __table_args__ = (UniqueConstraint("project_id", "gate_key", name="uq_writing_decision_gate"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    gate_key: Mapped[str] = mapped_column(String(100), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    current_record_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class DecisionRecord(Base, TimestampMixin):
+    __tablename__ = "writing_decision_records"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    gate_id: Mapped[str] = mapped_column(ForeignKey("writing_decision_gates.id"), index=True)
+    decision: Mapped[str] = mapped_column(String(64))
+    original_value: Mapped[dict] = mapped_column(JSON, default=dict)
+    new_value: Mapped[dict] = mapped_column(JSON, default=dict)
+    reason: Mapped[str] = mapped_column(Text)
+    decided_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+
+
+class AlternativePlan(Base, TimestampMixin):
+    __tablename__ = "writing_alternative_plans"
+    __table_args__ = (UniqueConstraint("project_id", "plan_key", "version", name="uq_writing_plan_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    plan_key: Mapped[str] = mapped_column(String(100), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    objective: Mapped[str] = mapped_column(String(64), index=True)
+    weights: Mapped[dict] = mapped_column(JSON, default=dict)
+    inputs: Mapped[dict] = mapped_column(JSON, default=dict)
+    constraints: Mapped[list] = mapped_column(JSON, default=list)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    algorithm: Mapped[dict] = mapped_column(JSON, default=dict)
+    unresolved_gaps: Mapped[list] = mapped_column(JSON, default=list)
+    risks: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
+    selected_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ReviewIssue(Base, TimestampMixin):
+    __tablename__ = "writing_review_issues"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    block_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    issue_type: Mapped[str] = mapped_column(String(64), index=True)
+    severity: Mapped[str] = mapped_column(String(32), default="warning", index=True)
+    message: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    resolved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WritingAgentSession(Base, TimestampMixin):
+    __tablename__ = "writing_agent_sessions"
+    __table_args__ = (UniqueConstraint("project_id", "harness_session_id", name="uq_writing_harness_session"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str | None] = mapped_column(ForeignKey("writing_documents.id"), nullable=True, index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    harness_session_id: Mapped[str] = mapped_column(String(200), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+
+
+class WritingEventProjection(Base, TimestampMixin):
+    __tablename__ = "writing_event_projections"
+    __table_args__ = (UniqueConstraint("session_id", "sequence", name="uq_writing_event_sequence"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("writing_agent_sessions.id"), index=True)
+    sequence: Mapped[int] = mapped_column(BigInteger)
+    event_type: Mapped[str] = mapped_column(String(100), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ExportTemplate(Base, TimestampMixin):
+    __tablename__ = "writing_export_templates"
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_writing_export_template_code"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    code: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(200))
+    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ExportTemplateVersion(Base, TimestampMixin):
+    __tablename__ = "writing_export_template_versions"
+    __table_args__ = (UniqueConstraint("template_id", "version", name="uq_writing_export_template_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    template_id: Mapped[str] = mapped_column(ForeignKey("writing_export_templates.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    format_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    object_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class ExportJob(Base, TimestampMixin):
+    __tablename__ = "writing_export_jobs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    document_version_id: Mapped[str] = mapped_column(ForeignKey("writing_document_versions.id"), index=True)
+    template_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_export_template_versions.id"), nullable=True, index=True
+    )
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    output_format: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    object_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
