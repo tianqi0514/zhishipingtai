@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import semantica
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -27,20 +32,26 @@ from apps.api.writing_schemas import (
     WritingDocumentVersionCreate,
     WritingMemberCreate,
     WritingKnowledgeSearch,
+    WritingAgentMessageCreate,
+    WritingAgentSessionCreate,
     WritingProjectCreate,
     WritingProjectUpdate,
     WritingRecomputeRequest,
+    WritingReasoningRequest,
 )
 from packages.platform.audit import audit
 from packages.platform.curation import effective_chunk_text
 from packages.platform.database import get_db
 from packages.platform.knowledge_search import execute_hybrid_search
 from packages.platform.models import (
+    AgentEventProjection,
     AlternativePlan,
     Application,
     ComputationDefinition,
     ComputationDefinitionVersion,
     ComputationRun,
+    Conversation,
+    ConversationMessage,
     Chunk,
     DecisionGate,
     DecisionRecord,
@@ -58,15 +69,30 @@ from packages.platform.models import (
     WritingDocumentVersion,
     WritingProject,
     WritingProjectMember,
+    WritingAgentSession,
+    WritingEventProjection,
+    WritingReasoningRun,
 )
 from packages.platform.writing import (
     BUILTIN_FORMULAS,
     affected_dependency_ids,
     content_hash,
     execute_formula,
+    evaluate_earthquake_criteria,
+    earthquake_reasoning_payload,
     generate_alternative_plans,
     validate_plate_content,
     validate_scenario_contract,
+)
+from packages.semantica_adapter.analyze import run_graph_inference
+from apps.api.conversations import (
+    _cancel_runtime,
+    _conversation_payload,
+    _create_retry_assistant,
+    _create_turn_messages,
+    _project_event,
+    _stream_turn,
+    _turn_retrieval_settings,
 )
 
 
@@ -117,6 +143,27 @@ def _project(db: Session, project_id: str, user: User, minimum_role: str = "view
 def _document(db: Session, document_id: str, user: User, minimum_role: str = "viewer") -> tuple[WritingDocument, WritingProject]:
     document = _tenant_row(db, WritingDocument, document_id, user.tenant_id, "文稿")
     return document, _project(db, document.project_id, user, minimum_role)
+
+
+def _writing_session(
+    db: Session,
+    session_id: str,
+    user: User,
+    minimum_role: str = "viewer",
+) -> tuple[WritingAgentSession, WritingProject, Conversation]:
+    session = _tenant_row(db, WritingAgentSession, session_id, user.tenant_id, "妙笔助手会话")
+    if session.user_id != user.id or session.status != "active":
+        raise HTTPException(status_code=404, detail="妙笔助手会话不存在")
+    project = _project(db, session.project_id, user, minimum_role)
+    conversation = db.scalar(
+        select(Conversation).where(
+            Conversation.harness_session_id == session.harness_session_id,
+            Conversation.status != "deleted",
+        )
+    )
+    if conversation is None or conversation.user_id != user.id or conversation.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=409, detail="妙笔助手会话映射不可用")
+    return session, project, conversation
 
 
 def _release_for_user(db: Session, release_id: str, user: User) -> KnowledgeProductRelease:
@@ -226,6 +273,62 @@ def _ensure_formula_version(db: Session, user: User, operation: str) -> Computat
         db.flush()
         definition.current_version_id = version.id
     return version
+
+
+def _upsert_generated_fact(
+    db: Session,
+    *,
+    project: WritingProject,
+    user: User,
+    fact_key: str,
+    label: str,
+    fact_type: str,
+    value: dict[str, Any],
+    source_type: str,
+    source_id: str,
+    source_locator: dict[str, Any],
+    verification_status: str,
+    unit: str | None = None,
+) -> ProjectFact:
+    current = db.scalar(
+        select(ProjectFact).where(
+            ProjectFact.project_id == project.id,
+            ProjectFact.fact_key == fact_key,
+            ProjectFact.active.is_(True),
+            _active(ProjectFact),
+        ).order_by(ProjectFact.version.desc())
+    )
+    if current is not None and current.value == value and current.source_locator == source_locator:
+        return current
+    version = current.version + 1 if current else 1
+    if current is not None:
+        current.active = False
+        current.freshness_status = "superseded"
+        db.query(WritingBlockBinding).filter(
+            WritingBlockBinding.fact_id == current.id,
+            _active(WritingBlockBinding),
+        ).update({"freshness_status": "stale"})
+    row = ProjectFact(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        fact_key=fact_key,
+        label=label,
+        fact_type=fact_type,
+        value=value,
+        unit=unit,
+        source_type=source_type,
+        source_id=source_id,
+        source_locator=source_locator,
+        confidence=1.0,
+        verification_status=verification_status,
+        freshness_status="current",
+        version=version,
+        active=True,
+        created_by=user.id,
+    )
+    db.add(row)
+    db.flush()
+    return row
 
 
 # Scenario packages are administrator-managed executable contracts.
@@ -556,6 +659,267 @@ def get_project_fragment(
     }
 
 
+# DSH remains the authoritative Agent event log.  A hidden business
+# conversation supplies the existing short-lived credential and SSE bridge;
+# its events are mirrored into WritingEventProjection by conversations.py.
+
+
+@router.post("/projects/{project_id}/agent-sessions")
+def create_writing_agent_session(
+    project_id: str,
+    payload: WritingAgentSessionCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _project(db, project_id, user, "editor")
+    if payload.document_id:
+        document, _ = _document(db, payload.document_id, user, "editor")
+        if document.project_id != project.id:
+            raise HTTPException(status_code=404, detail="文稿不属于当前方案任务")
+    existing = db.scalar(
+        select(WritingAgentSession)
+        .where(
+            WritingAgentSession.project_id == project.id,
+            WritingAgentSession.document_id == payload.document_id,
+            WritingAgentSession.user_id == user.id,
+            WritingAgentSession.status == "active",
+            _active(WritingAgentSession),
+        )
+        .order_by(WritingAgentSession.created_at.desc())
+    )
+    if existing is not None:
+        conversation = db.scalar(
+            select(Conversation).where(
+                Conversation.harness_session_id == existing.harness_session_id,
+                Conversation.status != "deleted",
+            )
+        )
+        if conversation is not None:
+            return {
+                **serialize_row(existing),
+                "conversation_id": conversation.id,
+                "conversation": _conversation_payload(db, conversation, detail=True),
+            }
+        existing.status = "orphaned"
+
+    space_ids, knowledge_release_ids = _release_scope(db, project, user)
+    harness_session_id = f"miaobi-{uuid.uuid4().hex}"
+    session = WritingAgentSession(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        document_id=payload.document_id,
+        user_id=user.id,
+        harness_session_id=harness_session_id,
+        status="active",
+    )
+    db.add(session)
+    db.flush()
+    conversation = Conversation(
+        harness_session_id=harness_session_id,
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        title=f"妙笔 · {project.name}",
+        settings={
+            "kind": "writing",
+            "writing_session_id": session.id,
+            "writing_project_id": project.id,
+            "writing_document_id": payload.document_id,
+            "knowledge_product_release_id": project.knowledge_product_release_id,
+            "knowledge_release_ids": knowledge_release_ids,
+            "space_ids": space_ids,
+            "use_keyword": True,
+            "use_vector": True,
+            "use_graph": True,
+            "use_reranker": False,
+            "top_k": 8,
+        },
+    )
+    db.add(conversation)
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "writing.agent_session.create",
+        "writing_agent_session",
+        session.id,
+        {"project_id": project.id, "document_id": payload.document_id},
+    )
+    db.commit()
+    db.refresh(session)
+    return {
+        **serialize_row(session),
+        "conversation_id": conversation.id,
+        "conversation": _conversation_payload(db, conversation, detail=True),
+    }
+
+
+@router.get("/projects/{project_id}/agent-sessions")
+def list_writing_agent_sessions(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _project(db, project_id, user)
+    sessions = list(
+        db.scalars(
+            select(WritingAgentSession).where(
+                WritingAgentSession.project_id == project_id,
+                WritingAgentSession.user_id == user.id,
+                _active(WritingAgentSession),
+            ).order_by(WritingAgentSession.updated_at.desc())
+        )
+    )
+    conversations = {
+        row.harness_session_id: row
+        for row in db.scalars(
+            select(Conversation).where(
+                Conversation.harness_session_id.in_([item.harness_session_id for item in sessions])
+            )
+        )
+    } if sessions else {}
+    return [
+        {
+            **serialize_row(item),
+            "conversation_id": conversations[item.harness_session_id].id
+            if item.harness_session_id in conversations else None,
+        }
+        for item in sessions
+    ]
+
+
+@router.get("/agent-sessions/{session_id}")
+def get_writing_agent_session(
+    session_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session, _, conversation = _writing_session(db, session_id, user)
+    return {
+        **serialize_row(session),
+        "conversation_id": conversation.id,
+        "conversation": _conversation_payload(db, conversation, detail=True),
+    }
+
+
+@router.post("/agent-sessions/{session_id}/messages")
+def send_writing_agent_message(
+    session_id: str,
+    payload: WritingAgentMessageCreate,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session, project, conversation = _writing_session(db, session_id, user, "editor")
+    if conversation.status == "generating":
+        raise HTTPException(status_code=409, detail="妙笔助手正在生成")
+    content = payload.content.strip()
+    _, assistant = _create_turn_messages(db, conversation, user, content)
+    agent_content = (
+        "[妙笔写作任务] 请使用 writing_get_project_context 获取当前方案任务，"
+        "并将权威事实、计算和规则结论与普通叙述严格区分。用户请求：\n" + content
+    )
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "writing.agent.turn.start",
+        "writing_agent_session",
+        session.id,
+        {"project_id": project.id, "document_id": session.document_id},
+    )
+    db.commit()
+    return StreamingResponse(
+        _stream_turn(
+            request,
+            conversation.id,
+            conversation.harness_session_id,
+            assistant.id,
+            agent_content,
+            _turn_retrieval_settings(conversation),
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/agent-sessions/{session_id}/events")
+def list_writing_agent_events(
+    session_id: str,
+    after_sequence: int = Query(0, ge=0),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session, _, _ = _writing_session(db, session_id, user)
+    return {
+        "items": [
+            serialize_row(row)
+            for row in db.scalars(
+                select(WritingEventProjection).where(
+                    WritingEventProjection.session_id == session.id,
+                    WritingEventProjection.sequence > after_sequence,
+                ).order_by(WritingEventProjection.sequence)
+            )
+        ]
+    }
+
+
+@router.post("/agent-sessions/{session_id}/cancel")
+def cancel_writing_agent(
+    session_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session, _, conversation = _writing_session(db, session_id, user, "editor")
+    assistant = db.scalar(
+        select(ConversationMessage).where(
+            ConversationMessage.conversation_id == conversation.id,
+            ConversationMessage.role == "assistant",
+            ConversationMessage.status == "generating",
+            _active(ConversationMessage),
+        ).order_by(ConversationMessage.sequence.desc()).limit(1)
+    )
+    if assistant is not None:
+        _project_event(db, conversation.id, assistant.id, "turn_cancelled", {"reason": "user_cancelled"})
+    conversation.status = "active"
+    audit(db, user.tenant_id, user.id, "writing.agent.cancel", "writing_agent_session", session.id)
+    db.commit()
+    _cancel_runtime(conversation.harness_session_id)
+    return {"ok": True}
+
+
+@router.post("/agent-sessions/{session_id}/messages/{message_id}/retry")
+def retry_writing_agent_message(
+    session_id: str,
+    message_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _, _, conversation = _writing_session(db, session_id, user, "editor")
+    failed = db.get(ConversationMessage, message_id)
+    if (
+        failed is None or failed.conversation_id != conversation.id
+        or failed.role != "assistant" or failed.status not in {"failed", "cancelled"}
+    ):
+        raise HTTPException(status_code=409, detail="只能重试失败或已取消的生成")
+    parent = db.get(ConversationMessage, failed.parent_message_id) if failed.parent_message_id else None
+    if parent is None:
+        raise HTTPException(status_code=409, detail="找不到原始写作请求")
+    assistant = _create_retry_assistant(db, conversation, user, parent, failed)
+    return StreamingResponse(
+        _stream_turn(
+            request,
+            conversation.id,
+            conversation.harness_session_id,
+            assistant.id,
+            "[妙笔写作任务] " + parent.content,
+            _turn_retrieval_settings(conversation),
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.put("/projects/{project_id}")
 def update_project(
     project_id: str,
@@ -689,6 +1053,143 @@ def confirm_fact(
     audit(db, user.tenant_id, user.id, f"writing.fact.{payload.decision}", "writing_project_fact", row.id, {"reason": payload.reason})
     db.commit()
     return serialize_row(row)
+
+
+@router.post("/projects/{project_id}/criteria/evaluate")
+def evaluate_project_criteria(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _project(db, project_id, user, "editor")
+    scenario = _tenant_row(
+        db,
+        ScenarioPackageVersion,
+        project.scenario_package_version_id,
+        user.tenant_id,
+        "场景包版本",
+    )
+    package = _tenant_row(db, ScenarioPackage, scenario.scenario_package_id, user.tenant_id, "场景包")
+    if package.disaster_type != "earthquake":
+        raise HTTPException(status_code=409, detail="当前仅地震场景具备已验收的确定性等级判据")
+    rows = list(
+        db.scalars(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.active.is_(True),
+                ProjectFact.verification_status == "verified",
+                _active(ProjectFact),
+            )
+        )
+    )
+    values = {row.fact_key: row.value for row in rows}
+    try:
+        criteria = evaluate_earthquake_criteria(values)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"无法执行判据：{exc}") from exc
+    created = [
+        _upsert_generated_fact(
+            db,
+            project=project,
+            user=user,
+            fact_key=item["fact_key"],
+            label=item["label"],
+            fact_type="deterministic_computation",
+            value=item["value"],
+            unit=item["unit"],
+            source_type="computation",
+            source_id=f"criteria:{package.code}:v{scenario.version}",
+            source_locator={"formula": item["formula"], "input_fact_keys": item["inputs"]},
+            verification_status="verified",
+        )
+        for item in criteria
+    ]
+    audit(db, user.tenant_id, user.id, "writing.criteria.evaluate", "writing_project", project.id, {"scenario": package.code, "criteria": len(created)})
+    db.commit()
+    return {"items": [serialize_row(row) for row in created], "engine": "deterministic-criteria", "scenario_version": scenario.version}
+
+
+@router.post("/projects/{project_id}/reason")
+def reason_project(
+    project_id: str,
+    payload: WritingReasoningRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _project(db, project_id, user, "editor")
+    scenario = _tenant_row(db, ScenarioPackageVersion, project.scenario_package_version_id, user.tenant_id, "场景包版本")
+    package = _tenant_row(db, ScenarioPackage, scenario.scenario_package_id, user.tenant_id, "场景包")
+    if package.disaster_type != "earthquake":
+        raise HTTPException(status_code=409, detail="该灾种规则包尚待业务确认，不能生成正式推演结论")
+    current = list(db.scalars(select(ProjectFact).where(ProjectFact.project_id == project.id, ProjectFact.active.is_(True), _active(ProjectFact))))
+    by_key = {row.fact_key: row for row in current}
+    required = {"criterion_major_magnitude", "criterion_high_population_density"}
+    if any(key not in by_key or by_key[key].verification_status != "verified" for key in required):
+        raise HTTPException(status_code=409, detail="请先完成地震等级确定性判据计算")
+    event_fact = by_key.get("event_name")
+    event_name = str(((event_fact.value if event_fact else {}) or {}).get("text") or project.name)
+    criteria = [serialize_row(by_key[key]) for key in sorted(required)]
+    facts, rules = earthquake_reasoning_payload(project_id=project.id, event_name=event_name, criteria=criteria)
+    started = datetime.now(timezone.utc)
+    checksum = content_hash({"facts": facts, "rules": rules, "scenario": scenario.checksum})
+    run = WritingReasoningRun(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        status="running",
+        mode=payload.mode,
+        engine="semantica-datalog",
+        engine_version=getattr(semantica, "__version__", "unknown"),
+        input_fact_ids=[by_key[key].id for key in sorted(required)],
+        rule_manifest=rules,
+        result={},
+        proof={},
+        checksum=checksum,
+        started_at=started,
+        created_by=user.id,
+    )
+    db.add(run)
+    db.flush()
+    try:
+        inference = run_graph_inference(facts=facts, rules=rules, max_results=20)
+    except Exception as exc:
+        run.status = "failed"
+        run.result = {"error_type": type(exc).__name__}
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=422, detail=f"规则推演失败：{type(exc).__name__}") from exc
+    run.status = "succeeded"
+    run.result = {"items": inference["items"], "metrics": inference["metrics"]}
+    run.proof = {"engine": "Semantica DatalogReasoner", "items": [item.get("proof") or {} for item in inference["items"]]}
+    run.finished_at = datetime.now(timezone.utc)
+    conclusions = []
+    for item in inference["items"]:
+        row = _upsert_generated_fact(
+            db,
+            project=project,
+            user=user,
+            fact_key="disaster_grade",
+            label="灾害等级",
+            fact_type="semantica_inference",
+            value={"text": item.get("object_value")},
+            source_type="semantica_inference",
+            source_id=run.id,
+            source_locator={"rule_id": item.get("rule_id"), "proof": item.get("proof"), "evidence": item.get("evidence")},
+            verification_status="unverified" if payload.mode == "preview" else "verified",
+        )
+        conclusions.append(row)
+    audit(db, user.tenant_id, user.id, "writing.reason.execute", "writing_reasoning_run", run.id, {"mode": payload.mode, "results": len(conclusions), "engine_version": run.engine_version})
+    db.commit()
+    return {"run": serialize_row(run), "conclusions": [serialize_row(row) for row in conclusions], "requires_human_confirmation": payload.mode == "preview"}
+
+
+@router.get("/projects/{project_id}/reasoning-runs")
+def list_project_reasoning_runs(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _project(db, project_id, user)
+    return [serialize_row(row) for row in db.scalars(select(WritingReasoningRun).where(WritingReasoningRun.project_id == project_id, _active(WritingReasoningRun)).order_by(WritingReasoningRun.created_at.desc()))]
 
 
 @router.post("/projects/{project_id}/compute")
@@ -998,6 +1499,11 @@ def upsert_binding(
             raise HTTPException(status_code=403, detail="计算运行不属于当前方案任务")
     row = db.scalar(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, WritingBlockBinding.block_id == payload.block_id))
     values = payload.model_dump(exclude={"metadata"})
+    if payload.block_type == "knowledge_citation":
+        # Knowledge-search QueryRun and structured-SQL QueryRun are separate,
+        # intentionally typed audit trails. Keep the public request contract
+        # stable while persisting the retrieval FK in its dedicated column.
+        values["retrieval_query_run_id"] = values.pop("query_run_id", None)
     values["metadata_json"] = payload.metadata
     if row:
         row.deleted_at = None

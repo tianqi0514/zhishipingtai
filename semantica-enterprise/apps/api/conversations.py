@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from apps.api.deps import get_current_user, has_space_permission
@@ -29,6 +29,8 @@ from packages.platform.models import (
     StructuredQueryCitation,
     StructuredQueryRun,
     User,
+    WritingAgentSession,
+    WritingEventProjection,
 )
 
 
@@ -241,11 +243,15 @@ def list_conversations(
 ):
     rows = list(
         db.scalars(
-            select(Conversation).where(
-                Conversation.tenant_id == user.tenant_id,
-                Conversation.user_id == user.id,
-                Conversation.status != "deleted",
-            ).order_by(Conversation.last_message_at.desc().nullslast(), Conversation.created_at.desc())
+        select(Conversation).where(
+            Conversation.tenant_id == user.tenant_id,
+            Conversation.user_id == user.id,
+            Conversation.status != "deleted",
+            or_(
+                Conversation.settings["kind"].as_string().is_(None),
+                Conversation.settings["kind"].as_string() != "writing",
+            ),
+        ).order_by(Conversation.last_message_at.desc().nullslast(), Conversation.created_at.desc())
             .offset(offset)
             .limit(limit)
         )
@@ -555,6 +561,32 @@ def _project_event(
             payload=payload,
         )
     )
+    writing_session = db.scalar(
+        select(WritingAgentSession).where(
+            WritingAgentSession.harness_session_id == conversation.harness_session_id,
+            WritingAgentSession.status == "active",
+            _active(WritingAgentSession),
+        )
+    )
+    if writing_session is not None:
+        existing_writing_event = db.scalar(
+            select(WritingEventProjection).where(
+                WritingEventProjection.session_id == writing_session.id,
+                WritingEventProjection.sequence == sequence + 1,
+            )
+        )
+        if existing_writing_event is None:
+            db.add(
+                WritingEventProjection(
+                    tenant_id=writing_session.tenant_id,
+                    project_id=writing_session.project_id,
+                    session_id=writing_session.id,
+                    sequence=sequence + 1,
+                    event_type=event_type,
+                    payload=dict(payload),
+                    occurred_at=datetime.now(timezone.utc),
+                )
+            )
     if assistant is None:
         return
     if event_type == "answer_delta":

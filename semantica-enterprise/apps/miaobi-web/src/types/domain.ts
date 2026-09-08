@@ -83,3 +83,20 @@ export type KnowledgeSearchResponse = {
   warnings: string[];
   trace_summary: Record<string, unknown>;
 };
+
+export type AgentMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  status: string;
+  error_message?: string;
+};
+
+export type WritingAgentSession = {
+  id: string;
+  project_id: string;
+  document_id?: string;
+  conversation_id: string;
+  status: string;
+  conversation?: { messages?: AgentMessage[]; events?: Array<{ event_type: string; payload: Record<string, unknown> }> };
+};

@@ -149,6 +149,10 @@ class AlternativePlanSelect(StrictModel):
     reason: str = Field(min_length=2, max_length=4000)
 
 
+class WritingReasoningRequest(StrictModel):
+    mode: Literal["preview", "publish"] = "preview"
+
+
 class WritingDocumentCreate(StrictModel):
     project_id: str
     title: str = Field(min_length=1, max_length=500)
@@ -247,6 +251,46 @@ class WritingKnowledgeSearch(StrictModel):
         if not (self.use_keyword or self.use_vector or self.use_graph):
             raise ValueError("至少启用一种知识检索方式")
         return self
+
+
+class WritingAgentSessionCreate(StrictModel):
+    document_id: str | None = None
+
+
+class WritingAgentMessageCreate(StrictModel):
+    content: str = Field(min_length=1, max_length=20_000)
+
+
+class AgentWritingRequest(StrictModel):
+    conversation_id: str
+
+
+class AgentWritingOutlineDraftRequest(AgentWritingRequest):
+    title: str | None = Field(default=None, max_length=500)
+
+
+class AgentWritingSectionDraftRequest(AgentWritingRequest):
+    section_key: str = Field(min_length=1, max_length=100)
+    instruction: str = Field(default="", max_length=4000)
+
+
+class AgentWritingBindEvidenceRequest(AgentWritingRequest):
+    block_id: str = Field(min_length=1, max_length=100)
+    query_run_id: str
+    chunk_id: str
+    content_hash: str = Field(min_length=64, max_length=64)
+
+
+class AgentWritingValidateRequest(AgentWritingRequest):
+    for_publish: bool = False
+
+
+class AgentWritingRecomputeRequest(AgentWritingRequest):
+    changed_fact_ids: list[str] = Field(min_length=1)
+
+
+class AgentWritingPrepareExportRequest(AgentWritingRequest):
+    output_format: Literal["docx", "pdf", "json", "xlsx", "geojson"]
 
 
 class DecisionRecordCreate(StrictModel):

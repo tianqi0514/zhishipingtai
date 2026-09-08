@@ -27,6 +27,8 @@ test('runtime projects observable event time and turn duration without exposing 
     'structured_query_finished',
     'structured_query_failed',
     'structured_query_cancelled',
+    'writing_stage_started',
+    'writing_stage_finished',
   ]) {
     assert.match(source, new RegExp(`['\"]${eventType}['\"]`))
   }

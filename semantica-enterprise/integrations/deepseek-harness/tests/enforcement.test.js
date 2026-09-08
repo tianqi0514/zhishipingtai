@@ -40,6 +40,16 @@ test('registers typed knowledge tools and turn enforcement', () => {
     'structured_inspect_values',
     'structured_execute_query',
     'knowledge_list_spaces',
+    'writing_get_project_context',
+    'writing_get_document_outline',
+    'writing_create_outline_draft',
+    'writing_generate_section_draft',
+    'writing_bind_evidence',
+    'writing_validate_document',
+    'writing_get_stale_blocks',
+    'writing_recompute_impacts',
+    'writing_compare_alternative_plans',
+    'writing_prepare_export',
   ])
   assert.equal(typeof listeners.get('agent/turn-stopping'), 'function')
   assert.equal(typeof listeners.get('agent/request'), 'function')
@@ -70,6 +80,9 @@ test('structured execute schema is aligned with the strict platform Plan and IR 
   assert.match(tools.find(item => item.name === 'structured_get_object').description, /required_relationships/)
   assert.match(tool.description, /固定筛选同时写入 Plan filters 和 IR where/)
   assert.match(tool.description, /关联 EXISTS/)
+  assert.match(sections[1].text, /writing_get_project_context/)
+  assert.match(sections[1].text, /修订建议/)
+  assert.ok(tools.find(item => item.name === 'writing_bind_evidence').parameters.required.includes('query_run_id'))
 })
 
 
@@ -246,8 +259,8 @@ test('does not force retrieval for a direct identity question', () => {
 
 test('unloads every tool, prompt section and event listener', () => {
   const installed = fixture()
-  assert.equal(installed.tools.length, 11)
-  assert.equal(installed.sections.length, 1)
+  assert.equal(installed.tools.length, 21)
+  assert.equal(installed.sections.length, 2)
   assert.equal(installed.listeners.size, 2)
   installed.dispose()
   assert.equal(installed.tools.length, 0)

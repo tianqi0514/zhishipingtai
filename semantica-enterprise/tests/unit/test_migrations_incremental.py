@@ -37,6 +37,8 @@ def test_schema_migrations_are_repeatable_on_fresh_database() -> None:
         "0019_multimodal_media",
         "0020_model_routing_policies",
         "0021_media_policy_reusable_versions",
+        "0022_miaobi_writing_domain",
+        "0023_miaobi_reasoning_runs",
     ]
     assert profile_table == "document_profiles"
 

@@ -11,14 +11,18 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from apps.api.writing import router
+from apps.api.agent_internal import agent_writing_context, agent_writing_document_outline
+from apps.api.writing_schemas import AgentWritingRequest
 from packages.platform.database import Base, get_db
 from packages.platform.models import (
+    Conversation,
     KnowledgeProduct,
     KnowledgeProductRelease,
     KnowledgeProductReleaseItem,
     KnowledgeSpace,
     Tenant,
     User,
+    WritingAgentSession,
 )
 from packages.platform.security import create_access_token, hash_password
 
@@ -319,3 +323,79 @@ def test_plan_profiles_are_not_language_only_variants() -> None:
         assert len(plans) == 3
         assert plans[0]["result"]["route"]["path"] != plans[1]["result"]["route"]["path"]
         assert all(item["unresolved_gaps"][0]["gap"] == 180 for item in plans)
+
+
+def test_writing_agent_session_is_idempotent_and_release_scoped() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={"project_id": project["id"], "title": "助手测试文稿", "content": []},
+        ).json()
+        first = client.post(
+            f"/api/v1/writing/projects/{project['id']}/agent-sessions",
+            json={"document_id": document["id"]},
+        )
+        assert first.status_code == 200, first.text
+        second = client.post(
+            f"/api/v1/writing/projects/{project['id']}/agent-sessions",
+            json={"document_id": document["id"]},
+        )
+        assert second.status_code == 200, second.text
+        assert second.json()["id"] == first.json()["id"]
+        session = db.get(WritingAgentSession, first.json()["id"])
+        conversation = db.get(Conversation, first.json()["conversation_id"])
+        assert session.harness_session_id == conversation.harness_session_id
+        assert conversation.settings["kind"] == "writing"
+        assert conversation.settings["knowledge_product_release_id"] == release.id
+        assert conversation.settings["knowledge_release_ids"]
+        claims = {
+            "conversation_id": conversation.id,
+            "harness_session_id": conversation.harness_session_id,
+            "tenant_id": conversation.tenant_id,
+            "sub": conversation.user_id,
+        }
+        context = agent_writing_context(
+            AgentWritingRequest(conversation_id=conversation.id), claims=claims, db=db
+        )
+        assert context["project"]["knowledge_product_release_id"] == release.id
+        outline = agent_writing_document_outline(
+            AgentWritingRequest(conversation_id=conversation.id), claims=claims, db=db
+        )
+        assert outline["document_title"] == "助手测试文稿"
+
+
+def test_project_earthquake_reasoning_uses_deterministic_criteria_and_semantica() -> None:
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        for key, label, value, unit in [
+            ("event_name", "事件名称", {"text": "积石山县6.2级地震"}, None),
+            ("magnitude", "震级", {"number": 6.2}, "级"),
+            ("population_density", "人口密度", {"number": 305.6}, "人/km²"),
+        ]:
+            response = client.post(
+                f"/api/v1/writing/projects/{project['id']}/facts",
+                json={
+                    "fact_key": key,
+                    "label": label,
+                    "fact_type": "official_brief",
+                    "value": value,
+                    "unit": unit,
+                    "source_type": "official_brief",
+                    "source_id": "brief-ground-truth",
+                    "verification_status": "verified",
+                },
+            )
+            assert response.status_code == 200, response.text
+        criteria = client.post(f"/api/v1/writing/projects/{project['id']}/criteria/evaluate")
+        assert criteria.status_code == 200, criteria.text
+        assert all(item["value"]["boolean"] for item in criteria.json()["items"])
+        reasoning = client.post(
+            f"/api/v1/writing/projects/{project['id']}/reason", json={"mode": "preview"}
+        )
+        assert reasoning.status_code == 200, reasoning.text
+        assert reasoning.json()["run"]["engine"] == "semantica-datalog"
+        conclusion = reasoning.json()["conclusions"][0]
+        assert conclusion["value"]["text"] == "重大地震灾害（Ⅱ级）"
+        assert conclusion["verification_status"] == "unverified"
+        assert reasoning.json()["requires_human_confirmation"] is True

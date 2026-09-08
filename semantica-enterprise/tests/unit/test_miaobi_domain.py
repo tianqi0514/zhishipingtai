@@ -10,10 +10,13 @@ from packages.platform.writing import (
     affected_dependency_ids,
     execute_formula,
     generate_alternative_plans,
+    evaluate_earthquake_criteria,
+    earthquake_reasoning_payload,
     validate_plate_content,
     validate_scenario_contract,
     validate_scenario_input,
 )
+from packages.semantica_adapter.analyze import run_graph_inference
 
 
 SCENARIO_ROOT = Path("demo/miaobi/scenarios")
@@ -155,3 +158,23 @@ def test_dependency_impact_is_local_to_changed_fact() -> None:
     )
     assert result["computation_run_ids"] == ["run-rescue"]
     assert result["block_ids"] == ["rescue-gap"]
+
+
+def test_earthquake_numeric_criteria_feed_real_semantica_datalog() -> None:
+    criteria = evaluate_earthquake_criteria(
+        {"magnitude": {"number": 6.2}, "population_density": {"number": 305.6}}
+    )
+    assert all(item["value"]["boolean"] is True for item in criteria)
+    facts, rules = earthquake_reasoning_payload(
+        project_id="project-earthquake",
+        event_name="积石山县6.2级地震",
+        criteria=criteria,
+    )
+    result = run_graph_inference(facts=facts, rules=rules, max_results=10)
+    assert result["metrics"]["derived_ground_facts"] >= 1
+    assert any(
+        item["predicate"] == "灾害等级"
+        and item["object_value"] == "重大地震灾害（Ⅱ级）"
+        for item in result["items"]
+    )
+    assert len(result["items"][0]["evidence"]) == 2

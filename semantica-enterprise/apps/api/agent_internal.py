@@ -22,6 +22,15 @@ from apps.api.structured_schemas import (
     AgentStructuredSchemaSearchRequest,
     StructuredExecuteRequest,
 )
+from apps.api.writing_schemas import (
+    AgentWritingBindEvidenceRequest,
+    AgentWritingOutlineDraftRequest,
+    AgentWritingPrepareExportRequest,
+    AgentWritingRecomputeRequest,
+    AgentWritingRequest,
+    AgentWritingSectionDraftRequest,
+    AgentWritingValidateRequest,
+)
 from apps.api.utils import serialize_row
 from packages.platform.audit import audit
 from packages.platform.database import get_db
@@ -52,6 +61,18 @@ from packages.platform.models import (
     SemanticMappingVersion,
     SourceConnector,
     User,
+    AlternativePlan,
+    ComputationRun,
+    DecisionGate,
+    KnowledgeProductRelease,
+    ProjectFact,
+    QueryRun,
+    ScenarioPackageVersion,
+    WritingAgentSession,
+    WritingBlockBinding,
+    WritingDocument,
+    WritingDocumentVersion,
+    WritingProject,
 )
 from packages.platform.structured_data import (
     StructuredDataError,
@@ -71,6 +92,10 @@ from packages.platform.security import (
     verify_agent_service_secret,
 )
 from packages.semantica_adapter.extract import _effective_temperature
+from packages.platform.writing import (
+    affected_dependency_ids,
+    validate_plate_content,
+)
 
 
 router = APIRouter(prefix="/internal/agent", tags=["agent-internal"])
@@ -213,6 +238,41 @@ def _conversation_tool_settings(
     }
 
 
+def _writing_tool_context(
+    db: Session,
+    claims: dict[str, Any],
+    conversation_id: str,
+    *,
+    require_document: bool = False,
+) -> tuple[WritingAgentSession, WritingProject, WritingDocument | None]:
+    _require_conversation(claims, conversation_id)
+    session = db.scalar(
+        select(WritingAgentSession).where(
+            WritingAgentSession.harness_session_id == claims.get("harness_session_id"),
+            WritingAgentSession.user_id == claims.get("sub"),
+            WritingAgentSession.tenant_id == claims.get("tenant_id"),
+            WritingAgentSession.status == "active",
+            _active(WritingAgentSession),
+        )
+    )
+    if session is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "当前 Harness 会话不是妙笔方案会话")
+    project = db.get(WritingProject, session.project_id)
+    if (
+        project is None or project.deleted_at is not None
+        or project.tenant_id != claims.get("tenant_id")
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "方案任务不存在")
+    document = db.get(WritingDocument, session.document_id) if session.document_id else None
+    if document is not None and (
+        document.deleted_at is not None or document.project_id != project.id
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, "妙笔文稿映射不可用")
+    if require_document and document is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "当前妙笔助手会话尚未绑定文稿")
+    return session, project, document
+
+
 @router.post("/credentials")
 def issue_credential(
     payload: AgentCredentialRequest,
@@ -352,6 +412,16 @@ def agent_knowledge_search(
         use_reranker=tool_settings["use_reranker"],
         filters=payload.filters,
         audit_action="agent.knowledge.search",
+        knowledge_release_ids=dict(
+            (claims["conversation"].settings or {}).get("knowledge_release_ids") or {}
+        ) or None,
+        retrieval_context={
+            "conversation_id": payload.conversation_id,
+            "writing_project_id": (claims["conversation"].settings or {}).get("writing_project_id"),
+            "knowledge_product_release_id": (
+                claims["conversation"].settings or {}
+            ).get("knowledge_product_release_id"),
+        },
     )
     metadata = dict(assistant.message_metadata or {})
     first_citation_number = max(
@@ -746,6 +816,346 @@ def agent_list_spaces(
         )
     ) if space_ids else []
     return [{"id": row.id, "code": row.code, "name": row.name} for row in rows]
+
+
+@router.post("/writing/context")
+def agent_writing_context(
+    payload: AgentWritingRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    session, project, document = _writing_tool_context(db, claims, payload.conversation_id)
+    facts = list(
+        db.scalars(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.active.is_(True),
+                _active(ProjectFact),
+            ).order_by(ProjectFact.fact_key)
+        )
+    )
+    gates = list(
+        db.scalars(
+            select(DecisionGate).where(
+                DecisionGate.project_id == project.id,
+                _active(DecisionGate),
+            ).order_by(DecisionGate.created_at)
+        )
+    )
+    plans = list(
+        db.scalars(
+            select(AlternativePlan).where(
+                AlternativePlan.project_id == project.id,
+                _active(AlternativePlan),
+            ).order_by(AlternativePlan.created_at.desc())
+        )
+    )
+    audit(db, claims["tenant_id"], claims["sub"], "agent.writing.context", "writing_agent_session", session.id)
+    db.commit()
+    return {
+        "project": {
+            "name": project.name,
+            "status": project.status,
+            "knowledge_product_release_id": project.knowledge_product_release_id,
+        },
+        "document": {"title": document.title, "status": document.status} if document else None,
+        "facts": [
+            {
+                "fact_id": row.id,
+                "key": row.fact_key,
+                "label": row.label,
+                "value": row.value,
+                "unit": row.unit,
+                "source_type": row.source_type,
+                "verification_status": row.verification_status,
+                "freshness_status": row.freshness_status,
+            }
+            for row in facts
+        ],
+        "decision_gates": [
+            {"key": row.gate_key, "name": row.name, "required": row.required, "status": row.status}
+            for row in gates
+        ],
+        "alternative_plans": [
+            {
+                "plan_id": row.id,
+                "name": row.name,
+                "objective": row.objective,
+                "status": row.status,
+                "result": row.result,
+                "unresolved_gaps": row.unresolved_gaps,
+            }
+            for row in plans
+        ],
+        "policy": {
+            "authoritative_numbers_require_computation_or_database": True,
+            "inference_requires_semantica": True,
+            "unverified_facts_must_be_disclosed": True,
+            "model_may_not_silently_overwrite_document": True,
+        },
+    }
+
+
+@router.post("/writing/document-outline")
+def agent_writing_document_outline(
+    payload: AgentWritingRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, _, document = _writing_tool_context(db, claims, payload.conversation_id, require_document=True)
+    version = db.get(WritingDocumentVersion, document.current_version_id) if document else None
+    headings: list[dict[str, Any]] = []
+    for node in (version.content if version else []):
+        node_type = str(node.get("type") or "")
+        if node_type not in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            continue
+        text = "".join(str(item.get("text") or "") for item in node.get("children") or [] if isinstance(item, dict))
+        headings.append({"block_id": node.get("id"), "level": int(node_type[1]), "title": text})
+    return {
+        "document_title": document.title,
+        "document_version": version.version if version else None,
+        "headings": headings,
+        "content_hash": version.content_hash if version else None,
+    }
+
+
+@router.post("/writing/outline-draft")
+def agent_writing_outline_draft(
+    payload: AgentWritingOutlineDraftRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, _ = _writing_tool_context(db, claims, payload.conversation_id)
+    scenario = db.get(ScenarioPackageVersion, project.scenario_package_version_id)
+    chapters = list((scenario.chapter_template or {}).get("chapters") or []) if scenario else []
+    return {
+        "title": payload.title or project.name,
+        "nodes": [
+            {
+                "id": f"outline-{index + 1}-{str(item.get('key') or 'section')}",
+                "type": "h1",
+                "section_key": str(item.get("key") or f"section-{index + 1}"),
+                "children": [{"text": str(item.get("title") or f"第 {index + 1} 章")}],
+            }
+            for index, item in enumerate(chapters)
+        ],
+        "source": "activated_scenario_package",
+        "requires_user_acceptance": True,
+    }
+
+
+@router.post("/writing/section-draft")
+def agent_writing_section_draft(
+    payload: AgentWritingSectionDraftRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, _ = _writing_tool_context(db, claims, payload.conversation_id)
+    scenario = db.get(ScenarioPackageVersion, project.scenario_package_version_id)
+    chapter = next(
+        (
+            item for item in ((scenario.chapter_template or {}).get("chapters") or [])
+            if str(item.get("key") or "") == payload.section_key
+        ),
+        None,
+    ) if scenario else None
+    if chapter is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "当前场景包没有该章节")
+    facts = list(
+        db.scalars(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.active.is_(True),
+                ProjectFact.verification_status == "verified",
+                _active(ProjectFact),
+            ).order_by(ProjectFact.fact_key)
+        )
+    )
+    return {
+        "section": chapter,
+        "instruction": payload.instruction,
+        "verified_facts": [
+            {"fact_id": row.id, "label": row.label, "value": row.value, "unit": row.unit, "source_type": row.source_type}
+            for row in facts
+        ],
+        "draft_policy": {
+            "return_as_suggestion": True,
+            "cite_every_authoritative_claim": True,
+            "do_not_invent_missing_facts": True,
+            "do_not_replace_document": True,
+        },
+    }
+
+
+@router.post("/writing/bind-evidence")
+def agent_writing_bind_evidence(
+    payload: AgentWritingBindEvidenceRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id, require_document=True)
+    run = db.get(QueryRun, payload.query_run_id)
+    policy = dict(run.retrieval_policy or {}) if run else {}
+    item = next(
+        (item for item in (run.results or []) if str(item.get("chunk_id") or "") == payload.chunk_id),
+        None,
+    ) if run else None
+    if (
+        run is None or run.tenant_id != claims.get("tenant_id") or run.user_id != claims.get("sub")
+        or policy.get("writing_project_id") != project.id
+        or policy.get("knowledge_product_release_id") != project.knowledge_product_release_id
+        or item is None
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "证据不属于当前方案任务的检索记录")
+    row = db.scalar(
+        select(WritingBlockBinding).where(
+            WritingBlockBinding.document_id == document.id,
+            WritingBlockBinding.block_id == payload.block_id,
+        )
+    )
+    values = {
+        "tenant_id": claims["tenant_id"],
+        "project_id": project.id,
+        "document_id": document.id,
+        "block_id": payload.block_id,
+        "block_type": "knowledge_citation",
+        "source_type": "policy_document",
+        "source_id": item.get("document_id"),
+        "source_version": item.get("version_id"),
+        "knowledge_product_release_id": project.knowledge_product_release_id,
+        "chunk_id": payload.chunk_id,
+        "retrieval_query_run_id": run.id,
+        "evidence_ids": [payload.chunk_id],
+        "content_hash": payload.content_hash,
+        "verification_status": "verified",
+        "freshness_status": "current",
+        "metadata_json": {"rank": item.get("rank"), "channels": item.get("channels") or []},
+    }
+    if row is None:
+        row = WritingBlockBinding(**values)
+        db.add(row)
+    else:
+        for key, value in values.items():
+            if key not in {"tenant_id", "project_id", "document_id", "block_id"}:
+                setattr(row, key, value)
+        row.deleted_at = None
+    audit(db, claims["tenant_id"], claims["sub"], "agent.writing.bind_evidence", "writing_document", document.id, {"block_id": payload.block_id})
+    db.commit()
+    return {"binding_id": row.id, "block_id": row.block_id, "verified": True, "requires_user_acceptance": True}
+
+
+@router.post("/writing/validate-document")
+def agent_writing_validate_document(
+    payload: AgentWritingValidateRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id, require_document=True)
+    version = db.get(WritingDocumentVersion, document.current_version_id) if document else None
+    bindings = {
+        row.block_id: serialize_row(row)
+        for row in db.scalars(
+            select(WritingBlockBinding).where(
+                WritingBlockBinding.document_id == document.id,
+                _active(WritingBlockBinding),
+            )
+        )
+    }
+    issues = validate_plate_content(version.content if version else [], bindings)
+    pending = int(
+        db.scalar(
+            select(func.count()).select_from(DecisionGate).where(
+                DecisionGate.project_id == project.id,
+                DecisionGate.required.is_(True),
+                DecisionGate.status != "confirmed",
+                _active(DecisionGate),
+            )
+        ) or 0
+    )
+    return {
+        "ok": not issues and (not payload.for_publish or pending == 0),
+        "issues": issues,
+        "pending_decision_gate_count": pending,
+        "for_publish": payload.for_publish,
+    }
+
+
+@router.post("/writing/stale-blocks")
+def agent_writing_stale_blocks(
+    payload: AgentWritingRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, _, document = _writing_tool_context(db, claims, payload.conversation_id, require_document=True)
+    rows = list(
+        db.scalars(
+            select(WritingBlockBinding).where(
+                WritingBlockBinding.document_id == document.id,
+                WritingBlockBinding.freshness_status != "current",
+                _active(WritingBlockBinding),
+            ).order_by(WritingBlockBinding.updated_at.desc())
+        )
+    )
+    return {"items": [{"block_id": row.block_id, "block_type": row.block_type, "status": row.freshness_status} for row in rows]}
+
+
+@router.post("/writing/recompute-impacts")
+def agent_writing_recompute_impacts(
+    payload: AgentWritingRecomputeRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id, require_document=True)
+    facts = list(db.scalars(select(ProjectFact).where(ProjectFact.id.in_(payload.changed_fact_ids), ProjectFact.project_id == project.id, _active(ProjectFact))))
+    if len(facts) != len(set(payload.changed_fact_ids)):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "变更事实不属于当前方案任务")
+    keys = {row.fact_key for row in facts}
+    historical_ids = set(db.scalars(select(ProjectFact.id).where(ProjectFact.project_id == project.id, ProjectFact.fact_key.in_(keys), _active(ProjectFact))))
+    runs = [serialize_row(row) for row in db.scalars(select(ComputationRun).where(ComputationRun.project_id == project.id, _active(ComputationRun)))]
+    bindings = [serialize_row(row) for row in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, _active(WritingBlockBinding)))]
+    impact = affected_dependency_ids(historical_ids, runs, bindings)
+    if impact["block_ids"]:
+        db.query(WritingBlockBinding).filter(
+            WritingBlockBinding.document_id == document.id,
+            WritingBlockBinding.block_id.in_(impact["block_ids"]),
+            _active(WritingBlockBinding),
+        ).update({"freshness_status": "stale"}, synchronize_session=False)
+    audit(db, claims["tenant_id"], claims["sub"], "agent.writing.recompute_impacts", "writing_document", document.id, impact)
+    db.commit()
+    return {**impact, "automatic_overwrite": False, "requires_user_acceptance": True}
+
+
+@router.post("/writing/alternative-plans")
+def agent_writing_alternative_plans(
+    payload: AgentWritingRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, _ = _writing_tool_context(db, claims, payload.conversation_id)
+    rows = list(db.scalars(select(AlternativePlan).where(AlternativePlan.project_id == project.id, _active(AlternativePlan)).order_by(AlternativePlan.plan_key, AlternativePlan.version.desc())))
+    return {"items": [{"plan_id": row.id, "name": row.name, "objective": row.objective, "weights": row.weights, "result": row.result, "unresolved_gaps": row.unresolved_gaps, "status": row.status} for row in rows]}
+
+
+@router.post("/writing/prepare-export")
+def agent_writing_prepare_export(
+    payload: AgentWritingPrepareExportRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id, require_document=True)
+    version = db.get(WritingDocumentVersion, document.current_version_id) if document else None
+    bindings = {row.block_id: serialize_row(row) for row in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, _active(WritingBlockBinding)))}
+    issues = validate_plate_content(version.content if version else [], bindings)
+    pending = int(db.scalar(select(func.count()).select_from(DecisionGate).where(DecisionGate.project_id == project.id, DecisionGate.required.is_(True), DecisionGate.status != "confirmed", _active(DecisionGate))) or 0)
+    return {
+        "ready": not issues and pending == 0,
+        "output_format": payload.output_format,
+        "document_version_id": version.id if version else None,
+        "knowledge_product_release_id": project.knowledge_product_release_id,
+        "issues": issues,
+        "pending_decision_gate_count": pending,
+        "instruction": "准备完成后仍需用户在审校发布页确认并创建真实导出任务",
+    }
 
 
 def _agent_mapping_version(

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   BookOpenCheck,
@@ -14,13 +14,15 @@ import {
   RefreshCw,
   Save,
   Search,
+  Send,
   Settings2,
   ShieldCheck,
   Sparkles,
+  Square,
 } from 'lucide-react';
 import { api, ApiError } from './api';
 import { MiaobiEditor } from './editor/MiaobiEditor';
-import type { AlternativePlan, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingDocument } from './types/domain';
+import type { AgentMessage, AlternativePlan, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
 
 type Product = { id: string; name: string; code: string };
 type Release = { id: string; version: number; status: string };
@@ -63,6 +65,20 @@ export function App() {
     setProjectId(next);
   };
 
+  const loadProjectDetails = async (id: string) => {
+    const [detail, factRows, planRows, documentRows] = await Promise.all([
+      api<Project>(`/writing/projects/${id}`),
+      api<Fact[]>(`/writing/projects/${id}/facts`),
+      api<AlternativePlan[]>(`/writing/projects/${id}/plans`),
+      api<WritingDocument[]>(`/writing/projects/${id}/documents`),
+    ]);
+    setProject(detail);
+    setFacts(factRows);
+    setPlans(planRows);
+    setDocuments(documentRows);
+    setDocument(documentRows.length ? await api<WritingDocument>(`/writing/documents/${documentRows[0].id}`) : null);
+  };
+
   useEffect(() => {
     Promise.all([api<User>('/me'), loadProjects()])
       .then(([me]) => setUser(me))
@@ -76,22 +92,7 @@ export function App() {
       return;
     }
     sessionStorage.setItem('miaobi-project', projectId);
-    Promise.all([
-      api<Project>(`/writing/projects/${projectId}`),
-      api<Fact[]>(`/writing/projects/${projectId}/facts`),
-      api<AlternativePlan[]>(`/writing/projects/${projectId}/plans`),
-      api<WritingDocument[]>(`/writing/projects/${projectId}/documents`),
-    ]).then(async ([detail, factRows, planRows, documentRows]) => {
-      setProject(detail);
-      setFacts(factRows);
-      setPlans(planRows);
-      setDocuments(documentRows);
-      if (documentRows.length) {
-        setDocument(await api<WritingDocument>(`/writing/documents/${documentRows[0].id}`));
-      } else {
-        setDocument(null);
-      }
-    }).catch((reason) => setError(reason instanceof Error ? reason.message : '方案任务加载失败'));
+    loadProjectDetails(projectId).catch((reason) => setError(reason instanceof Error ? reason.message : '方案任务加载失败'));
   }, [projectId]);
 
   const createDocument = async () => {
@@ -141,7 +142,7 @@ export function App() {
             {tab !== 'writing' && <PageHeader project={selected} tab={tab} />}
             {tab === 'overview' && <Overview project={project || selected} facts={facts} plans={plans} documents={documents} onContinue={(next) => setTab(next)} />}
             {tab === 'facts' && <Facts facts={facts} />}
-            {tab === 'reasoning' && <Reasoning project={selected} />}
+            {tab === 'reasoning' && <Reasoning project={selected} facts={facts} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
             {tab === 'plans' && <Plans projectId={selected.id} rows={plans} onChanged={setPlans} onError={setError} />}
             {tab === 'writing' && (
               <div className="writing-layout">
@@ -199,8 +200,20 @@ function Facts({ facts }: { facts: Fact[] }) {
   return <div className="content-card"><div className="card-toolbar"><div className="search"><Search size={16} /><input placeholder="搜索事实" value={query} onChange={(event) => setQuery(event.target.value)} /></div><button type="button" className={pendingOnly ? 'primary compact' : 'secondary'} onClick={() => setPendingOnly((value) => !value)}>{pendingOnly ? '显示全部事实' : '只看待确认'}</button></div><table><thead><tr><th>事实</th><th>当前值</th><th>来源</th><th>状态</th></tr></thead><tbody>{visible.map((fact) => <tr key={fact.id}><td><b>{fact.label}</b><small>{fact.fact_key}</small></td><td>{formatValue(fact.value)} {fact.unit || ''}</td><td>{sourceLabel(fact.source_type)}</td><td><span className={`status ${fact.verification_status}`}>{fact.verification_status === 'verified' ? '已核验' : '待确认'}</span></td></tr>)}</tbody></table>{!visible.length && <div className="empty-table">没有符合当前条件的事实</div>}</div>;
 }
 
-function Reasoning({ project }: { project: Project }) {
-  return <div className="two-columns"><section className="content-card"><span className="eyebrow">业务推演</span><h2>从已核验事实形成可解释结论</h2><div className="reason-flow"><span>确定性判据</span><ChevronRight /><span>语义规则推演</span><ChevronRight /><span>证据链</span><ChevronRight /><span>人工确认</span></div><div className="notice"><ShieldCheck /><div><b>模型不负责正式结论</b><p>数值条件先由确定性判据服务计算，再由 Semantica 规则引擎基于事实进行推演。</p></div></div><p className="availability">当前阶段：{project.status === 'reasoning' ? '推演任务执行中' : '等待已核验事实和规则集准备完成'}</p></section><section className="content-card"><h3>执行过程</h3><div className="timeline"><p><i className="done" />检查事实完整性</p><p><i />等待开始推演</p><p><i />生成证据链</p></div></section></div>;
+function Reasoning({ project, facts, onChanged, onError }: { project: Project; facts: Fact[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
+  const [running, setRunning] = useState<'criteria' | 'reason' | ''>('');
+  const criteria = facts.filter((item) => item.fact_key.startsWith('criterion_'));
+  const conclusion = facts.find((item) => item.fact_key === 'disaster_grade');
+  const run = async (step: 'criteria' | 'reason') => {
+    if (running) return;
+    setRunning(step);
+    try {
+      await api(step === 'criteria' ? `/writing/projects/${project.id}/criteria/evaluate` : `/writing/projects/${project.id}/reason`, { method: 'POST', body: step === 'reason' ? { mode: 'preview' } : undefined });
+      await onChanged();
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '规则推演失败'); }
+    finally { setRunning(''); }
+  };
+  return <div className="two-columns"><section className="content-card"><span className="eyebrow">业务推演</span><h2>从已核验事实形成可解释结论</h2><div className="reason-flow"><span>确定性判据</span><ChevronRight /><span>语义规则推演</span><ChevronRight /><span>证据链</span><ChevronRight /><span>人工确认</span></div><div className="notice"><ShieldCheck /><div><b>模型不负责正式结论</b><p>数值条件先由确定性判据服务计算，再由规则推演引擎基于事实形成结论。</p></div></div><div className="reason-actions"><button type="button" className="secondary" disabled={!!running} onClick={() => void run('criteria')}>{running === 'criteria' ? '判据计算中…' : criteria.length ? '重新计算判据' : '计算等级判据'}</button><button type="button" className="primary" disabled={!!running || criteria.length < 2} onClick={() => void run('reason')}>{running === 'reason' ? '推演中…' : '预览推演结论'}</button></div></section><section className="content-card"><h3>执行结果</h3><div className="timeline"><p><i className={criteria.length >= 2 ? 'done' : ''} />确定性判据 {criteria.length >= 2 ? '已完成' : '待执行'}</p><p><i className={conclusion ? 'done' : ''} />规则推演 {conclusion ? '已完成' : '待执行'}</p><p><i className={conclusion?.verification_status === 'verified' ? 'done' : ''} />人工确认 {conclusion ? (conclusion.verification_status === 'verified' ? '已确认' : '待确认') : '待推演'}</p></div>{criteria.map((item) => <div className="reason-result" key={item.id}><b>{item.label}</b><span>{item.value.boolean ? '成立' : '不成立'}</span></div>)}{conclusion && <div className="reason-conclusion"><small>推演结论</small><b>{formatValue(conclusion.value)}</b><span>需要业务人员确认后才能作为正式方案依据</span></div>}</section></div>;
 }
 
 function Plans({ projectId, rows, onChanged, onError }: { projectId: string; rows: AlternativePlan[]; onChanged: (rows: AlternativePlan[]) => void; onError: (message: string) => void }) {
@@ -237,7 +250,110 @@ function AssistantPanel({ tab, project, document, facts, plans, onInsert, onErro
   if (tab === 'evidence') return <EvidencePanel project={project} document={document} onInsert={onInsert} onError={onError} />;
   if (tab === 'calculation') return <div className="assistant-content"><h3>计算与推演</h3><p>已核验事实 {facts.filter((item) => item.verification_status === 'verified').length} 条，备选方案 {plans.length} 套。</p><div className="empty-mini">选择测算值或推演结论查看输入、公式、规则和证据。</div></div>;
   if (tab === 'review') return <div className="assistant-content"><h3>审校问题</h3><div className="empty-mini">执行审校后按严重程度列出事实、引用、结构和表述问题。</div></div>;
-  return <div className="assistant-content"><h3>妙笔助手</h3><div className="notice compact"><Sparkles size={16} /><div><b>知识 Agent 接入中</b><p>工具注册和证据绑定完成前，这里不会提供假生成按钮。</p></div></div><small>后续生成内容将以修订建议插入，不会静默覆盖正文。</small></div>;
+  return <WritingAssistant project={project} document={document} onInsert={onInsert} onError={onError} />;
+}
+
+function WritingAssistant({ project, document, onInsert, onError }: { project: Project; document: WritingDocument | null; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
+  const [session, setSession] = useState<WritingAgentSession | null>(null);
+  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [input, setInput] = useState('请根据当前场景包和已核验事实，为我生成方案目录草稿。');
+  const [running, setRunning] = useState(false);
+  const [stage, setStage] = useState('等待指令');
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    abortRef.current?.abort();
+    setSession(null);
+    setMessages([]);
+    api<WritingAgentSession>(`/writing/projects/${project.id}/agent-sessions`, {
+      method: 'POST', body: { document_id: document?.id || null },
+    }).then((value) => {
+      setSession(value);
+      setMessages(value.conversation?.messages || []);
+    }).catch((reason) => onError(reason instanceof Error ? reason.message : '妙笔助手会话加载失败'));
+    return () => abortRef.current?.abort();
+  }, [project.id, document?.id]);
+
+  const send = async () => {
+    if (!session || !input.trim() || running) return;
+    const prompt = input.trim();
+    setInput('');
+    setRunning(true);
+    setStage('正在连接知识 Agent');
+    setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', content: prompt, status: 'completed' }, { id: 'streaming', role: 'assistant', content: '', status: 'generating' }]);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const response = await fetch(`/api/v1/writing/agent-sessions/${session.id}/messages`, {
+        method: 'POST', credentials: 'same-origin', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: prompt }),
+      });
+      if (!response.ok || !response.body) throw new Error(String((await response.json().catch(() => ({})))?.detail || '妙笔助手请求失败'));
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finished = false;
+      while (!finished) {
+        const read = await reader.read();
+        finished = read.done;
+        buffer += decoder.decode(read.value || new Uint8Array(), { stream: !finished });
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() || '';
+        for (const frame of frames) {
+          let event = 'message';
+          const data: string[] = [];
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            if (line.startsWith('data:')) data.push(line.slice(5).trim());
+          }
+          const payload = JSON.parse(data.join('\n') || '{}') as Record<string, unknown>;
+          if (event === 'answer_delta') {
+            setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, content: item.content + String(payload.text || '') } : item));
+            setStage('正在生成修订建议');
+          } else if (event === 'tool_started' || event === 'writing_stage_started') {
+            setStage(writingStage(String(payload.name || '')));
+          } else if (event === 'turn_completed') {
+            setStage('已完成');
+            setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, status: 'completed' } : item));
+          } else if (event === 'turn_failed') {
+            setStage('生成失败');
+            setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, status: 'failed', error_message: String(payload.message || payload.reason || '生成失败') } : item));
+          } else if (event === 'turn_cancelled') {
+            setStage('已停止');
+            setMessages((current) => current.map((item) => item.id === 'streaming' ? { ...item, status: 'cancelled' } : item));
+          }
+        }
+      }
+      const restored = await api<WritingAgentSession>(`/writing/agent-sessions/${session.id}`);
+      setSession(restored);
+      setMessages(restored.conversation?.messages || []);
+    } catch (reason) {
+      if (!controller.signal.aborted) onError(reason instanceof Error ? reason.message : '妙笔助手生成失败');
+    } finally {
+      abortRef.current = null;
+      setRunning(false);
+    }
+  };
+
+  const stop = async () => {
+    if (!session || !running) return;
+    await api(`/writing/agent-sessions/${session.id}/cancel`, { method: 'POST' }).catch(() => undefined);
+    abortRef.current?.abort();
+    setRunning(false);
+    setStage('已停止');
+  };
+
+  const latest = [...messages].reverse().find((item) => item.role === 'assistant' && item.content.trim());
+  const insertSuggestion = () => {
+    if (!latest) return;
+    onInsert({ id: crypto.randomUUID(), type: 'p', suggestion: true, suggestion_status: 'pending', children: [{ text: latest.content }] });
+  };
+
+  return <div className="assistant-content writing-agent"><div className="assistant-title"><h3>妙笔助手</h3><span className={running ? 'agent-status running' : 'agent-status'}>{stage}</span></div><div className="agent-messages">{messages.filter((item) => item.content || item.status !== 'completed').map((item, index) => <article key={`${item.id}-${index}`} className={item.role}><b>{item.role === 'user' ? '我' : '妙笔'}</b><p>{item.content || (item.status === 'generating' ? '正在组织内容…' : item.error_message || '未生成内容')}</p>{item.status !== 'completed' && <small>{item.status === 'generating' ? '生成中' : item.status === 'cancelled' ? '已停止' : '失败'}</small>}</article>)}{!messages.length && <div className="empty-mini">助手将调用真实知识、推演和计算工具，输出只作为待确认的修订建议。</div>}</div>{latest && !running && <button type="button" className="insert-suggestion" onClick={insertSuggestion}>插入为修订建议</button>}<div className="agent-input"><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="说明希望撰写或修改的内容" /><button type="button" disabled={!session || (!running && !input.trim())} onClick={() => running ? void stop() : void send()}>{running ? <Square size={16} /> : <Send size={16} />}{running ? '停止' : '发送'}</button></div></div>;
+}
+
+function writingStage(tool: string) {
+  return ({ writing_get_project_context: '正在读取任务资料', writing_get_document_outline: '正在检查文稿目录', writing_create_outline_draft: '正在生成目录草稿', writing_generate_section_draft: '正在组织章节依据', writing_bind_evidence: '正在绑定来源', writing_validate_document: '正在检查文稿', writing_get_stale_blocks: '正在检查过期内容', writing_recompute_impacts: '正在分析变更影响', writing_compare_alternative_plans: '正在比较备选方案', writing_prepare_export: '正在准备导出', knowledge_search: '正在检索知识', knowledge_reason: '正在执行规则推演', structured_execute_query: '正在查询业务数据' } as Record<string,string>)[tool] || '正在执行知识工具';
 }
 
 function EvidencePanel({ project, document, onInsert, onError }: { project: Project; document: WritingDocument | null; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {

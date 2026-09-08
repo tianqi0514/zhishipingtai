@@ -180,6 +180,11 @@ function normalizePublicError(value) {
 
 function safeToolArguments(name, value) {
   const args = parsedJson(value, {}) || {}
+  if (name === 'writing_bind_evidence') return {
+    block_id: args.block_id,
+    query_run_id: args.query_run_id,
+    chunk_id: args.chunk_id,
+  }
   if (name !== 'structured_execute_query') return args
   return {
     mapping_version_id: args.mapping_version_id,
@@ -227,6 +232,9 @@ function normalizeEvent(event, toolStarts, turnState) {
           ['structured_plan_started', payload],
           ['structured_query_started', payload],
         ]
+      }
+      if (String(data.name || '').startsWith('writing_')) {
+        return [['tool_started', payload], ['writing_stage_started', payload]]
       }
       return [['tool_started', payload]]
     }
@@ -285,6 +293,9 @@ function normalizeEvent(event, toolStarts, turnState) {
             source_citations: structured?.source_citations || [],
           }],
         ]
+      }
+      if (String(started?.name || '').startsWith('writing_')) {
+        return [['tool_finished', payload], ['writing_stage_finished', payload]]
       }
       return [['tool_finished', payload]]
     }

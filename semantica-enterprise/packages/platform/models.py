@@ -1584,6 +1584,9 @@ class WritingBlockBinding(Base, TimestampMixin):
     query_run_id: Mapped[str | None] = mapped_column(
         ForeignKey("structured_query_runs.id"), nullable=True, index=True
     )
+    retrieval_query_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("query_runs.id"), nullable=True, index=True
+    )
     computation_run_id: Mapped[str | None] = mapped_column(
         ForeignKey("computation_runs.id"), nullable=True, index=True
     )
@@ -1635,6 +1638,25 @@ class FactConflict(Base, TimestampMixin):
     resolution: Mapped[dict] = mapped_column(JSON, default=dict)
     resolved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WritingReasoningRun(Base, TimestampMixin):
+    __tablename__ = "writing_reasoning_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    mode: Mapped[str] = mapped_column(String(32), default="preview", index=True)
+    engine: Mapped[str] = mapped_column(String(100), default="semantica-datalog")
+    engine_version: Mapped[str] = mapped_column(String(100), default="")
+    input_fact_ids: Mapped[list] = mapped_column(JSON, default=list)
+    rule_manifest: Mapped[list] = mapped_column(JSON, default=list)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    proof: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
 
 
 class ComputationDefinition(Base, TimestampMixin):

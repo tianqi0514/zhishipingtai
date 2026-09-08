@@ -312,6 +312,76 @@ def generate_alternative_plans(inputs: dict[str, Any], count: int = 3) -> list[d
     return results
 
 
+def evaluate_earthquake_criteria(facts: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Evaluate numeric thresholds before Datalog; no numeric comparison is faked in rules."""
+    magnitude = _number({"magnitude": (facts.get("magnitude") or {}).get("number")}, "magnitude")
+    density = _number(
+        {"population_density": (facts.get("population_density") or {}).get("number")},
+        "population_density",
+    )
+    return [
+        {
+            "fact_key": "criterion_major_magnitude",
+            "label": "重大震级判据",
+            "value": {"boolean": Decimal("6.0") <= magnitude < Decimal("7.0")},
+            "unit": None,
+            "formula": "6.0 <= magnitude < 7.0",
+            "inputs": ["magnitude"],
+        },
+        {
+            "fact_key": "criterion_high_population_density",
+            "label": "高人口密度判据",
+            "value": {"boolean": density > Decimal("200")},
+            "unit": None,
+            "formula": "population_density > 200",
+            "inputs": ["population_density"],
+        },
+    ]
+
+
+def earthquake_reasoning_payload(
+    *, project_id: str, event_name: str, criteria: Iterable[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    true_criteria = {str(item["fact_key"]): item for item in criteria if (item.get("value") or {}).get("boolean") is True}
+    predicate_by_key = {
+        "criterion_major_magnitude": "满足重大震级判据",
+        "criterion_high_population_density": "满足高人口密度判据",
+    }
+    facts = [
+        {
+            "id": item.get("id") or key,
+            "space_id": "writing-project",
+            "subject_entity_id": project_id,
+            "subject_name": event_name,
+            "predicate": predicate_by_key[key],
+            "object_entity_id": None,
+            "object_value": "成立",
+            "source_chunk_id": None,
+            "confidence": 1.0,
+        }
+        for key, item in true_criteria.items()
+    ]
+    rules = [
+        {
+            "id": "earthquake-grade-major-v1",
+            "version_id": "earthquake-grade-major-v1",
+            "definition": {
+                "conditions": [
+                    {"predicate": "满足重大震级判据", "subject": "Event", "object": "成立"},
+                    {"predicate": "满足高人口密度判据", "subject": "Event", "object": "成立"},
+                ],
+                "conclusion": {
+                    "predicate": "灾害等级",
+                    "subject": "Event",
+                    "object": "重大地震灾害（Ⅱ级）",
+                },
+            },
+            "confidence": 1.0,
+        }
+    ]
+    return facts, rules
+
+
 def walk_plate_nodes(nodes: Iterable[dict[str, Any]]) -> Iterable[dict[str, Any]]:
     for node in nodes:
         if not isinstance(node, dict):
