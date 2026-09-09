@@ -97,3 +97,19 @@ test('separates platform retrieval settings from the user question', () => {
     ['knowledge_search'],
   )
 })
+
+
+test('uses writing evidence tools for formal reports without inventing a database requirement', () => {
+  const prompt = '[妙笔正式报告生成]\n九章正文不少于 8462 字，包含资源数量、金额和完成率。'
+  assert.deepEqual(evidenceRequirements(prompt), [
+    'writing_get_project_context',
+    'knowledge_search',
+    'writing_create_outline_draft',
+    'writing_generate_section_draft',
+  ])
+  assert.equal(evidenceRequirements(prompt).includes('structured_execute_query'), false)
+  assert.deepEqual(
+    evidenceRequirements('[妙笔写作任务] 请将选中段落改写得更正式。'),
+    ['writing_get_project_context'],
+  )
+})

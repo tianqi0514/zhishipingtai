@@ -30,6 +30,11 @@ export type Project = {
   facts?: number;
   pending_gates?: number;
   config?: Record<string, unknown>;
+  input_contract?: {
+    required: string[];
+    properties: Record<string, { type?: string; title?: string; unit?: string; minimum?: number; maximum?: number }>;
+    chapters: Array<{ key: string; title: string }>;
+  };
 };
 
 export type KnowledgeContextSpace = {
@@ -71,7 +76,51 @@ export type WritingDocument = {
   project_id: string;
   title: string;
   status: string;
-  current_version?: { id: string; version: number; content: PlateNode[]; content_hash: string };
+  current_version?: {
+    id: string;
+    version: number;
+    content: PlateNode[];
+    content_hash: string;
+    change_summary?: string;
+  };
+};
+
+export type WritingGenerationRun = {
+  id: string;
+  project_id: string;
+  document_id: string;
+  status: 'queued' | 'running' | 'awaiting_agent' | 'agent_running' | 'completed' | 'agent_failed' | 'quality_failed' | 'cancelled';
+  stage: string;
+  progress: number;
+  toolbox_result?: {
+    criteria?: { items?: Fact[] };
+    reasoning?: { conclusions?: Fact[]; requires_human_confirmation?: boolean };
+    computations?: Array<ComputationRun & { generated_fact?: Fact }>;
+    plans?: AlternativePlan[];
+    selected_plan_id?: string;
+  };
+  quality_report?: {
+    ok?: boolean;
+    issues?: Array<{ code: string; severity: string; message: string }>;
+    metrics?: Record<string, unknown>;
+  };
+  error_message?: string;
+  document?: WritingDocument;
+  agent_session?: WritingAgentSession;
+};
+
+export type WritingInputChange = {
+  id: string;
+  project_id: string;
+  document_id: string;
+  status: 'preview' | 'applied' | 'cancelled' | 'superseded';
+  changes: Array<{ fact_key: string; label: string; old_value: Record<string, unknown>; new_value: Record<string, unknown>; unit?: string }>;
+  impact: {
+    calculations?: Array<{ result_key: string; label: string; old_value: number; new_value: number; unit?: string }>;
+    report_blocks?: Array<{ block_id: string; section: string }>;
+    unaffected_results?: Array<{ result_key: string; label: string; value: number; unit?: string }>;
+    automatic_overwrite?: boolean;
+  };
 };
 
 export type CollaborationAccess = {
@@ -137,7 +186,7 @@ export type DecisionGate = {
 
 export type ExportJob = {
   id: string;
-  output_format: 'docx' | 'pdf' | 'json' | 'xlsx' | 'geojson';
+  output_format: 'docx' | 'evidence_docx' | 'pdf' | 'json' | 'xlsx' | 'geojson';
   status: string;
   progress: number;
   checksum?: string;

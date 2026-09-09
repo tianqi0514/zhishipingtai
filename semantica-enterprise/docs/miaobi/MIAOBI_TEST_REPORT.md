@@ -1,104 +1,134 @@
-# 妙笔测试报告
+# 妙笔简洁写作闭环测试报告
 
-测试日期：2026-09-09（Asia/Shanghai）
+测试日期：2026-09-10（Asia/Shanghai）
 
-测试分支：`codex/miaobi-production`
+测试分支：`codex/miaobi-simple-writing-flow`
 
-最终功能验证提交：`2ab3477592cb3fa7d64ecd77eb530c31ed3d3a4a`
+Plate 能力基线：`8f65d77f8b4709833436e63661e4d061f709258f`
 
-内网应用镜像：`semantica-enterprise:0.10.0`（`sha256:3e4148adce41…`，运行用户 `app`）
+## 验收结论
 
-Plate 锁定提交：`8f65d77f8b4709833436e63661e4d061f709258f`
+本轮把旧版“模块很多、操作像配置后台”的妙笔收敛为两个一级入口和三步业务流程：
 
-## 汇总
+`方案任务 → 报告编辑`
 
-| 测试层 | 成功 | 失败 | 跳过 | 说明 |
+`输入确认 → 分析计算 → 报告编辑`
+
+客户样本盲测已达到 100/100。系统从 7 份隔离客户材料、587 个真实知识片段开始，由 DeepSeek Harness 生成九章报告；正式正文共 8,985 个可见字符、70 个 Plate 顶层节点、111 个正文引用标记、4 个确定性测算块和 1 个 Semantica 推演块。没有将最终样稿、下发件或推演依据成品作为检索来源。
+
+## 自动化测试
+
+| 测试层 | 成功 | 失败 | 跳过 | 真实验证内容 |
 |---|---:|---:|---:|---|
-| Python 单元测试 | 530 | 0 | 0 | 当前工作区全部单元测试 |
-| Semantica 合约 | 19 | 0 | 0 | 真实 DatalogReasoner、证据、预览、发布/撤回 |
-| DeepSeek Harness 合约 | 20 | 0 | 0 | Runtime、Cordis 工具、事件、取消和恢复 |
-| 结构化数据库集成 | 11 | 0 | 0 | MySQL/PostgreSQL 实库与 PostgreSQL Fact 幂等 |
-| Plate 组件 | 9 | 0 | 0 | 编辑、可信块、引用定位、HTTP 内网协同兼容、1000 流式增量 |
-| 协同安全 | 2 | 0 | 0 | Token、房间和权限 |
-| 六灾种 API E2E | 6 | 0 | 0 | 独立场景的完整技术链路 |
-| 地震 Ground Truth | 14 | 0 | 0 | 事实、公式、局部重算 |
+| Python 单元测试 | 550 | 0 | 0 | 写作流程、版本、权限、导出、计算、影响更新及知识底座回归 |
+| Semantica 合约 | 19 | 0 | 0 | DatalogReasoner、证据链、预览、发布和撤回 |
+| MySQL/PostgreSQL 实库集成 | 10 | 0 | 0 | Schema、实时预览、只读限制、参数化查询和漂移 |
+| API E2E | 3 | 0 | 0 | 知识分析、业务推演、结构化语义查询；临时数据已清理 |
+| DeepSeek Harness 合约 | 22 | 0 | 0 | 插件、工具策略、多步骤、事件、取消与 Session 恢复 |
+| Plate 组件 | 14 | 0 | 0 | 完整编辑器、可信节点、引用、协同值替换和 1000 个增量 |
+| TypeScript / 生产构建 | 2 | 0 | 0 | `tsc -b` 与 Vite production build |
+| 客户样本质量门禁 | 19 | 0 | 0 | 100/100；长度、章节、重复、引用、可信块与 A4 全通过 |
 
-## 真实运行结果
+全量 Python 单元与 Semantica 合约共 569 项一次通过。结构化数据库 E2E 首次被私网访问策略拒绝；给本机隔离 fixture 显式加载测试白名单后通过，生产默认私网策略未放宽。
 
-### 地震主场景
+## 客户样本盲测
 
-- 震级 6.2、人口密度 305.6 人/km²通过确定性判据形成 Semantica 输入事实。
-- Semantica Datalog 推导“重大地震灾害（Ⅱ级）”，证明链包含两个前提。
-- 搜救人员 500−320=180；输入改为 400 后局部重算为 100，未关联块不受影响。
-- 三套方案分别走快速、安全和综合路线，优化目标、权重、路线、时长和风险真实不同。
-- 当前知识产品 Release 绑定真实检索记录、文档 Chunk、推演事实和计算运行。
-- DSH 写作 Turn 完成 139 个原始 Session Event，服务重启后仍恢复消息、事件和最终回答。
+| 指标 | 结果 |
+|---|---:|
+| 隔离输入材料 | 7 份 |
+| 知识片段 | 587 个 |
+| DSH 真实生成耗时 | 171.62 秒 |
+| 正文章节 | 9/9 |
+| 可见字符 | 8,985 |
+| 客户参考稿字符 | 10,849 |
+| 长度比 | 82.8% |
+| Plate 顶层节点 | 70 |
+| 正文引用标记 | 111 |
+| 引用证据行 | 46 |
+| 证据来源文档 | 6 份 |
+| 确定性测算块 | 4 个 |
+| Semantica 推演块 | 1 个 |
+| 重复长句 | 0 |
+| 工作草稿/平台提示泄漏 | 0 |
+| 最终评分 | 100/100 |
 
-### 六类扩展场景
+正式结论来自三条不同能力链：叙述由 DSH 基于当前知识产品 Release 撰写；资源缺口由确定性计算生成；灾害等级由 Semantica 规则推演生成。模型不能把自由文本直接标记成测算值或正式推演结论。
 
-`tests/e2e/miaobi_multiscenario_live.py` 通过公开 API 逐一创建临时任务，完成输入验证、3 个核验事实、确定性缺口计算、两个可信业务块、文稿审校和 JSON 导出，随后只软删除测试任务：
+## 输入变化与影响更新
 
-| 场景 | 确定性结果 | 技术链路 | 业务状态 |
-|---|---:|---|---|
-| 洪涝 | 舟艇缺口 12 艘 | 通过 | 模板待客户确认 |
-| 火灾 | 消防车辆缺口 8 辆 | 通过 | 模板待客户确认 |
-| 地质灾害 | 转移车辆缺口 6 辆 | 通过 | 模板待客户确认 |
-| 雨雪冰冻 | 除冰车辆缺口 8 辆 | 通过 | 模板待客户确认 |
-| 疫情 | 隔离床位缺口 60 张 | 通过 | 模板待客户确认 |
-| 反恐维稳 | 巡控小组缺口 4 组 | 通过 | 模板待客户确认 |
+真实浏览器连续执行：
 
-### 导出与协同
+1. 可用搜救人员 `320 → 400`。
+2. 预览显示搜救人员缺口 `180 → 100`，并定位 1 个正文可信内容。
+3. 点击“应用更新”后，Plate 正文变为 100，协同状态为“已同步”。
+4. 再执行 `400 → 320`，预览显示 `100 → 180`，正文恢复为 180。
+5. 页面和 API/Worker/协同/Agent 服务重启后，输入版本 9 的 320、计算结果版本 4 的 180、70 个正文节点和协同内容继续存在。
 
-- DOCX、PDF、JSON、XLSX、GeoJSON 均由真实导出接口生成，下载文件 Checksum 与服务端记录一致。
-- DOCX/PDF 使用渲染工具实际转为页面图片检查；两页中文、分页、表格和页码无裁切。
-- XLSX 包含“已核验事实”“确定性计算”“备选方案”三个真实工作表。
-- GeoJSON 使用选中方案路径与项目坐标生成真实 LineString；缺失坐标时返回错误，不生成假路线。
-- 5 个协同客户端连接同一 Hocuspocus 房间并同步不同改动；服务重启后快照恢复。
-- 内网仅 HTTP 地址不提供浏览器 Secure Context；启动兼容层只补齐 Plate/Yjs 用于确定性初始状态的 SHA-256 摘要，不替代随机数、鉴权、服务端可信哈希或生产 TLS。真实浏览器在该地址已显示“协同已同步”。
+该测试发现并修复三类生产问题：历史计算运行错误覆盖当前事实、旧计算绑定无法定位同一逻辑指标、服务端权威更新没有通过 Slate 操作发布到 Yjs。回归测试新增了多次往返修改和旧绑定场景。
 
-### 内网服务器与重启恢复
+## 浏览器验证
 
-- 部署地址：`http://10.5.113.232:9002/`，妙笔入口：`/miaobi/`。
-- 服务器：x86_64、32 vCPU、251 GiB 内存、879 GiB 系统盘（验收时可用约 792 GiB）。
-- 14 个 Compose 服务全部 `running/healthy`；API、Worker、Scheduler、Agent Runtime、MCP、协同、ASR 和全部中间件均位于服务器，不依赖本机。
-- 不删除 Volume 完整停止并重启服务后，严格预检仍为 `ready=true`：Ground Truth 14/14、3 套方案、15 条图谱事实、三路检索命中正常。
-- 重启后同一 DSH Session 继续追问“其中搜救人员缺口是如何计算出来的”，真实执行任务资料读取与知识检索，回答 500−320=180，并恢复上一轮消息、事件时间线和已插入修订内容。
-- 本机 16 个项目与结构化测试容器全部正常停止且未删除 Volume；本机 `8080` 已不可访问时，内网 `/health/ready` 仍返回 HTTP 200，浏览器中的 Plate、协同和历史会话继续正常工作。
-- 服务器没有 NVIDIA GPU，因此未在该主机部署 Qwen3.8-27B-NVFP4；模型推理继续调用已配置且真实可用的独立推理服务。
+真实浏览器完成：
 
-### 性能
+- 首次进入默认看到“输入确认”，不是技术配置页。
+- 9 项关键输入、来源、版本和确认状态可见。
+- 分析计算显示输入、公式、输出和 Semantica 推演依据。
+- 报告编辑使用 Plate 53.3.11，`/` 指令、工具栏、右侧助手、引用依据、计算与推演均为真实入口。
+- 正文中只使用轻量 `[n]`、`测算`、`推演` 标记，详细依据在右侧展示。
+- 重启后刷新恢复当前任务、文稿、引用、320 人与 180 人缺口。
+- 1280×720 无整体横向溢出，正文和右栏独立滚动。
 
-- 10 个并发工作区请求全部成功，中位延迟 1016 ms，P95 1040 ms。
-- 100 块文稿保存并审校 31 ms。
-- 1000 个流式 `answer_delta` 通过动画帧缓冲一次提交，避免逐 Token 重绘。
-- Plate 初始应用包 249.80 kB（gzip 80.10 kB）；完整编辑器延迟块 1,154.02 kB（gzip 341.93 kB）。
+当前浏览器控制工具未提供独立 Console 日志接口，因此本轮只记录“页面无可见错误、服务日志无 Traceback/Unhandled/CRITICAL/FATAL”。不将无法直接读取的 Console 结果写成 0 error。
 
-## 关键执行命令
+## 导出验收
+
+最终 V16 产物：
+
+- 正式报告 DOCX：7 页渲染检查。
+- 生成依据 DOCX：2 页渲染检查，输入为 320、结果为 180。
+- PDF：8 页、A4、未加密，实际渲染检查。
+- JSON：事实、推演、计算、方案与正文均可机器核验。
+- XLSX：`已核验事实`、`确定性计算`、`备选方案` 3 个工作表。
+
+DOCX 和 XLSX 均通过 ZIP 完整性检查；PDF 经 `pdfinfo` 验证为 A4。旧的 V14 产物包含修复前的过期测算记录，不作为交付物。
+
+## Docker 与日志
+
+本机必需服务均为 `running/healthy`：API、Worker、Scheduler、Agent Runtime、MCP、妙笔协同、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant 和 FalkorDB。迁移表当前到 `0027_miaobi_agent_session_purpose`。
+
+在不删除 Volume 的前提下重启 API、Worker、Scheduler、Agent Runtime、MCP 与妙笔协同后，项目、事实、当前文稿版本与协同状态恢复。最终服务日志未发现 Traceback、Unhandled、CRITICAL、FATAL 或 ERROR。
+
+## 验证命令
 
 ```bash
-docker run --rm -v "/Users/tianqi/Documents/828semantic:/repo" \
-  -w /repo/semantica-enterprise semantica-enterprise:0.10.0 \
-  pytest tests/unit -q
+# Python 单元与 Semantica 合约
+docker run --rm -v "$(cd .. && pwd):/workspace" \
+  -w /workspace/semantica-enterprise -e PYTHONPATH=/workspace/semantica-enterprise \
+  --entrypoint pytest semantica-enterprise:0.10.0 -q tests/unit tests/contract
 
+# MySQL/PostgreSQL 隔离 fixture
 docker run --rm --network semantica-enterprise_default \
-  -v "/Users/tianqi/Documents/828semantic:/repo" \
-  -w /repo/semantica-enterprise semantica-enterprise:0.10.0 \
-  pytest tests/contract/test_semantica_adapter.py -q
+  -v "$(cd .. && pwd):/workspace" -w /workspace/semantica-enterprise \
+  -e PYTHONPATH=/workspace/semantica-enterprise -e RUN_STRUCTURED_DB_TESTS=1 \
+  -e SOURCE_PRIVATE_HOST_ALLOWLIST=structured-postgres,structured-mysql,postgres \
+  --entrypoint pytest semantica-enterprise:0.10.0 \
+  -q tests/integration/test_structured_databases.py
 
-docker compose exec -T -e MIAOBI_REPO_ROOT=/app \
-  -e MIAOBI_DEMO_URL=http://127.0.0.1:8080 api \
-  python /tmp/miaobi_multiscenario_live.py
+# 完整 Plate 前端
+cd apps/miaobi-web
+npm test -- --run
+npm run typecheck
+npm run build
 
-cd apps/miaobi-web && pnpm test && pnpm typecheck && pnpm build
-COLLABORATION_CLIENTS=5 node apps/miaobi-collab/tests/live-collaboration.mjs
+# DSH 插件
 docker compose exec -T agent-runtime npm test
 ```
 
-管理员密码、模型密钥、数据库密码和内部服务 Token 均通过运行时环境或 Secret 注入，本报告未记录其值。
+管理员密码、模型密钥、数据库密码和内部服务 Token 只通过运行环境或 Secret 注入，本报告不记录其值。
 
 ## 分级结论
 
-1. 已真实运行验证：地震主闭环、六场景技术闭环、Semantica、DSH、结构化实库、Plate、协同、导出、浏览器和不删卷恢复。
-2. 协议级自动化验证：模型 429、服务超时、跨租户与注入防护等故障边界。
-3. 尚需外部联调：商业 GIS、实时交通、真实医院/库存系统和客户公文模板。
-4. 尚需业务确认：除地震外六类灾种的正式规则、阈值、参数和决策权限。
+1. 已真实运行验证：客户样本盲测、DSH 写作、Semantica 推演、确定性测算、输入影响更新、Plate/Yjs 同步、MySQL/PostgreSQL、导出与不删卷恢复。
+2. 协议级自动化验证：越权、注入、超时、取消、模型 429、服务失败和敏感信息脱敏。
+3. 仍需客户确认：正式灾情事实、响应权限、业务公式参数、公文模板和最终发布责任。
+4. 非本轮目标：用音视频强行丰富地震报告；本轮未让无业务价值的音视频进入写作主链。

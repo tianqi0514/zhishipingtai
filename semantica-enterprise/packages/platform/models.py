@@ -1786,6 +1786,10 @@ class WritingAgentSession(Base, TimestampMixin):
     document_id: Mapped[str | None] = mapped_column(ForeignKey("writing_documents.id"), nullable=True, index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     harness_session_id: Mapped[str] = mapped_column(String(200), index=True)
+    # Report generation and interactive editing intentionally keep separate
+    # Harness histories.  A formal report response is strict JSON and must
+    # never reappear as a user-facing editor conversation.
+    purpose: Mapped[str] = mapped_column(String(32), default="editing", index=True)
     status: Mapped[str] = mapped_column(String(32), default="active", index=True)
 
 
@@ -1800,6 +1804,82 @@ class WritingEventProjection(Base, TimestampMixin):
     event_type: Mapped[str] = mapped_column(String(100), index=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class WritingGenerationRun(Base, TimestampMixin):
+    """One auditable input -> toolbox -> DSH -> Plate generation attempt."""
+
+    __tablename__ = "writing_generation_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    agent_session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_agent_sessions.id"), nullable=True, index=True
+    )
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(64), default="input_validation", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    input_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    toolbox_result: Mapped[dict] = mapped_column(JSON, default=dict)
+    section_plan: Mapped[list] = mapped_column(JSON, default=list)
+    assistant_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversation_messages.id"), nullable=True, index=True
+    )
+    quality_report: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WritingInputChange(Base, TimestampMixin):
+    """A persisted, non-mutating impact preview until the user applies it."""
+
+    __tablename__ = "writing_input_changes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="preview", index=True)
+    changes: Mapped[list] = mapped_column(JSON, default=list)
+    impact: Mapped[dict] = mapped_column(JSON, default=dict)
+    preview_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    applied_document_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_document_versions.id"), nullable=True, index=True
+    )
+    applied_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WritingAgentEdit(Base, TimestampMixin):
+    """DSH-backed text revision proposal; it never mutates the document directly."""
+
+    __tablename__ = "writing_agent_edits"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("writing_document_versions.id"), index=True
+    )
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    block_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    instruction: Mapped[str] = mapped_column(Text, default="")
+    original_text: Mapped[str] = mapped_column(Text)
+    suggested_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="requested", index=True)
+    agent_session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_agent_sessions.id"), nullable=True, index=True
+    )
+    assistant_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversation_messages.id"), nullable=True, index=True
+    )
+    decided_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class WritingComment(Base, TimestampMixin):

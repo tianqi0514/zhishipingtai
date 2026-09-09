@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.shared import Mm
+from openpyxl import load_workbook
 
 from apps.api.writing_schemas import WritingBlockBindingUpsert
 from packages.platform.writing import (
@@ -20,7 +22,11 @@ from packages.platform.writing import (
     validate_scenario_contract,
     validate_scenario_input,
 )
-from packages.platform.writing_export import _clean_citation_text, build_export_artifact
+from packages.platform.writing_export import (
+    _clean_citation_text,
+    _display_source_locator,
+    build_export_artifact,
+)
 from packages.semantica_adapter.analyze import run_graph_inference
 
 
@@ -80,7 +86,15 @@ def test_scenario_input_validation_reports_missing_unknown_and_type_errors() -> 
     findings = validate_scenario_input(schema, {"magnitude": "6.2", "unexpected": 1})
     assert {item["code"] for item in findings} == {"required", "type", "unknown"}
     assert {item["field"] for item in findings if item["code"] == "required"} == {
-        "event_name", "population_density", "rescue_required", "rescue_available"
+        "event_name",
+        "population_density",
+        "rescue_required",
+        "rescue_available",
+        "trauma_beds_required",
+        "county_trauma_beds",
+        "callable_trauma_beds",
+        "tents_required",
+        "tents_available",
     }
 
 
@@ -194,6 +208,32 @@ def test_plate_content_validation_rejects_modified_canonical_trusted_block() -> 
     assert [item["code"] for item in issues] == ["trusted_block_modified"]
 
 
+def test_plate_content_validation_accepts_browser_normalized_semantica_confidence() -> None:
+    original = {
+        "id": "inference-1",
+        "type": "inference_conclusion",
+        "source_locator": {"evidence": [{"confidence": 1.0, "predicate": "满足判据"}]},
+        "children": [{"text": "灾害等级为重大地震灾害（Ⅱ级）。"}],
+    }
+    browser_round_trip = {
+        **original,
+        "source_locator": {"evidence": [{"confidence": 1, "predicate": "满足判据"}]},
+    }
+    issues = validate_plate_content(
+        [browser_round_trip],
+        {
+            "inference-1": {
+                "source_type": "semantica_inference",
+                "verification_status": "verified",
+                "freshness_status": "current",
+                "content_hash": content_hash(original),
+                "metadata": {"content_hash_algorithm": "canonical-json-v1"},
+            }
+        },
+    )
+    assert issues == []
+
+
 def test_dependency_impact_is_local_to_changed_fact() -> None:
     result = affected_dependency_ids(
         {"fact-rescue-available"},
@@ -257,6 +297,12 @@ def test_production_export_builds_real_docx_xlsx_json_and_geojson() -> None:
             assert target.stat().st_size > 0
         assert zipfile.is_zipfile(root / "artifact.docx")
         assert zipfile.is_zipfile(root / "artifact.xlsx")
+        workbook = load_workbook(root / "artifact.xlsx", data_only=False)
+        assert workbook["已核验事实"]["D2"].value == "官方简报"
+        assert workbook["确定性计算"]["D2"].value == "缺口 = max(需求量 − 可用量, 0)"
+        assert workbook["备选方案"]["B2"].value == "综合平衡"
+        assert workbook["备选方案"]["F2"].value == "已采用"
+        assert workbook["备选方案"].page_setup.fitToWidth == 1
         assert json.loads((root / "artifact.json").read_text(encoding="utf-8"))["title"] == "积石山县地震应急处置方案"
         assert json.loads((root / "artifact.geojson").read_text(encoding="utf-8"))["features"][0]["geometry"]["type"] == "LineString"
 
@@ -295,6 +341,78 @@ def test_formal_export_removes_workspace_title_suffix_and_duplicate_heading() ->
         assert paragraphs[0] == "积石山县6.2级地震应急处置方案"
         assert paragraphs.count("积石山县6.2级地震应急处置方案") == 1
         assert "w:pBdr" not in exported.paragraphs[0]._p.xml
+        assert abs(exported.sections[0].page_width - Mm(210)) < 1000
+        assert abs(exported.sections[0].page_height - Mm(297)) < 1000
+        assert "生成依据摘要" not in paragraphs
+
+
+def test_formal_export_renders_visible_inline_citation_and_separate_evidence_report() -> None:
+    content = [
+        {
+            "id": "body",
+            "type": "p",
+            "children": [
+                {"text": "依据预案启动响应"},
+                {"id": "citation-1", "type": "knowledge_citation", "citation_label": "[1]", "children": [{"text": ""}]},
+                {"text": "。"},
+            ],
+        }
+    ]
+    bindings = [
+        {
+            "block_type": "knowledge_citation",
+            "metadata_json": {"citation_number": 1, "source_title": "临夏州地震应急预案", "page_number": 8},
+        }
+    ]
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        formal = root / "formal.docx"
+        evidence = root / "evidence.docx"
+        build_export_artifact(
+            formal,
+            output_format="docx",
+            title="应急处置方案",
+            content=content,
+            facts=[],
+            computations=[],
+            plans=[],
+            audit_summary={},
+            bindings=bindings,
+        )
+        build_export_artifact(
+            evidence,
+            output_format="evidence_docx",
+            title="应急处置方案",
+            content=content,
+            facts=[],
+            computations=[],
+            plans=[],
+            audit_summary={"knowledge_product_release": 2, "scenario_package_version": 1},
+            bindings=bindings,
+        )
+        formal_text = "\n".join(paragraph.text for paragraph in Document(formal).paragraphs)
+        evidence_text = "\n".join(paragraph.text for paragraph in Document(evidence).paragraphs)
+        assert "依据预案启动响应[1]。" in formal_text
+        assert "生成依据" not in formal_text
+        assert "临夏州地震应急预案" in evidence_text
+        assert "第 8 页" in evidence_text
+
+
+def test_formal_title_removes_blind_acceptance_timestamp() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "formal.docx"
+        build_export_artifact(
+            target,
+            output_format="docx",
+            title="积石山县6.2级地震应急处置方案（盲测-20260909181815）",
+            content=[],
+            facts=[],
+            computations=[],
+            plans=[],
+            audit_summary={},
+        )
+        document = Document(target)
+        assert document.paragraphs[0].text == "积石山县6.2级地震应急处置方案"
 
 
 def test_export_citation_cleans_markdown_entities_and_limits_length() -> None:
@@ -307,3 +425,44 @@ def test_export_citation_cleans_markdown_entities_and_limits_length() -> None:
     assert "响应要求" in cleaned
     assert cleaned.endswith("…")
     assert len(cleaned) == 420
+
+
+def test_display_source_locator_hides_parser_internal_paths() -> None:
+    assert _display_source_locator(3, "paragraphs/88") == "第 3 页"
+    assert _display_source_locator(None, "paragraphs/88") == "正文第 89 段"
+    assert _display_source_locator(None, "sheets/R03_资源需求缺口总表") == "工作表“R03_资源需求缺口总表”"
+    assert _display_source_locator(None, "document") == "文档正文"
+
+
+def test_evidence_export_lists_each_visible_citation_once() -> None:
+    bindings = [
+        {
+            "block_type": "knowledge_citation",
+            "metadata_json": {"citation_number": 2, "source_title": "材料二", "page_number": 2},
+        },
+        {
+            "block_type": "knowledge_citation",
+            "metadata_json": {"citation_number": 1, "source_title": "材料一", "page_number": 1},
+        },
+        {
+            "block_type": "knowledge_citation",
+            "metadata_json": {"citation_number": 1, "source_title": "材料一", "page_number": 1},
+        },
+    ]
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "evidence.docx"
+        build_export_artifact(
+            target,
+            output_format="evidence_docx",
+            title="应急处置方案",
+            content=[],
+            facts=[],
+            computations=[],
+            plans=[],
+            audit_summary={},
+            bindings=bindings,
+        )
+        text = "\n".join(paragraph.text for paragraph in Document(target).paragraphs)
+        assert text.count("[1] 材料一") == 1
+        assert text.count("[2] 材料二") == 1
+        assert text.index("[1] 材料一") < text.index("[2] 材料二")

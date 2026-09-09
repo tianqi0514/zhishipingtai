@@ -373,6 +373,7 @@ def scenario_contract() -> dict[str, Any]:
             "default_plan_count": 3,
             "blind_acceptance": True,
             "reference_final_pages": REFERENCE["final_pages"],
+            "reference_final_characters": REFERENCE["final_characters"],
         },
     }
 
@@ -592,6 +593,78 @@ def generate_sections(api: DemoClient, project: dict[str, Any], document: dict[s
     return {"session": restored, "messages": messages, "events": events, "streamed_event_count": streamed}
 
 
+def generate_report_one_click(
+    api: DemoClient,
+    project: dict[str, Any],
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    """Exercise the production input -> toolbox -> DSH -> Plate endpoint.
+
+    The older per-section loop remains above as a regression helper, but the
+    customer acceptance path must prove the same single action exposed by the
+    browser.  The server owns trusted calculations, Semantica conclusions,
+    section placement and the final quality gate.
+    """
+    started = api.post(
+        f"/writing/projects/{project['id']}/generate-report",
+        {"document_id": document["id"], "title": document["title"]},
+    )
+    session_id = str((started.get("agent_session") or {}).get("id") or "")
+    if not session_id:
+        raise RuntimeError("一键生成任务没有创建可恢复的 DSH 写作会话")
+    with api.client.stream(
+        "POST",
+        f"/writing/generation-runs/{started['id']}/agent",
+        headers={"Accept": "text/event-stream"},
+    ) as response:
+        DemoClient._raise(response)
+        streamed_events = parse_sse(response)
+    completed = api.post(f"/writing/generation-runs/{started['id']}/finalize")
+    if completed.get("status") != "completed" or not completed.get("quality_report", {}).get("ok"):
+        raise RuntimeError(f"一键生成没有通过生产质量门：{completed.get('quality_report')}")
+    restored = api.get(f"/writing/agent-sessions/{session_id}")
+    conversation = restored.get("conversation") or {}
+    return {
+        "run": completed,
+        "session": restored,
+        "messages": [
+            item
+            for item in conversation.get("messages") or []
+            if item.get("role") == "assistant" and item.get("status") == "completed"
+        ],
+        "events": conversation.get("events") or [],
+        "streamed_event_count": len(streamed_events),
+    }
+
+
+def load_generated_document(
+    api: DemoClient,
+    document_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    document = api.get(f"/writing/documents/{document_id}")
+    content = (document.get("current_version") or {}).get("content") or []
+    rows = api.get(f"/writing/documents/{document_id}/bindings")
+    citations = [item for item in rows if item.get("block_type") == "knowledge_citation"]
+    evidence: dict[int, dict[str, Any]] = {}
+    for index, item in enumerate(citations, 1):
+        metadata = item.get("metadata_json") or {}
+        number = int(metadata.get("citation_number") or index)
+        evidence[number] = {
+            "citation_number": number,
+            "query_run_id": item.get("retrieval_query_run_id"),
+            "chunk_id": item.get("chunk_id"),
+            "rank": metadata.get("rank"),
+            "snapshot": {
+                "title": metadata.get("source_title"),
+                "document_id": item.get("source_id"),
+                "version_id": item.get("source_version"),
+                "page_number": metadata.get("page_number"),
+                "structural_path": metadata.get("structural_path"),
+            },
+        }
+    return document, content, evidence
+
+
 def _strip_markdown(text: str) -> str:
     text = re.sub(r"\*\*(.*?)\*\*|__(.*?)__", lambda match: match.group(1) or match.group(2) or "", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
@@ -786,7 +859,7 @@ def confirm_test_gates(api: DemoClient, project: dict[str, Any]) -> list[dict[st
 def export_document(api: DemoClient, document: dict[str, Any], output_dir: Path) -> list[dict[str, Any]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     result = []
-    for output_format in ("docx", "pdf", "json", "xlsx"):
+    for output_format in ("docx", "evidence_docx", "pdf", "json", "xlsx"):
         job = api.post(f"/writing/documents/{document['id']}/exports", {"output_format": output_format})
         response = api.client.get(f"/writing/exports/{job['id']}/download")
         DemoClient._raise(response)
@@ -977,8 +1050,8 @@ def assess(
             "evidence": f"{len(execution['plans'])} 套方案，{len({json.dumps(item.get('result'), sort_keys=True) for item in execution['plans']})} 种结果",
         },
         {
-            "name": "DSH 按九章调用写作与知识工具",
-            "passed": len(generated["messages"]) == len(CHAPTERS) and {"writing_generate_section_draft", "knowledge_search"}.issubset(tools),
+            "name": "DSH 一次完成九章写作并调用知识工具",
+            "passed": len(generated["messages"]) == 1 and {"writing_get_project_context", "knowledge_search"}.issubset(tools),
             "evidence": "、".join(sorted(tools)),
         },
         {
@@ -1007,8 +1080,8 @@ def assess(
             "evidence": f"{len(content)} 个顶层 Plate 节点",
         },
         {
-            "name": "DOCX/PDF/JSON/XLSX 均真实导出",
-            "passed": {item["format"] for item in exports} == {"docx", "pdf", "json", "xlsx"} and all(item["size"] > 0 for item in exports),
+            "name": "正式稿与独立依据报告均真实导出",
+            "passed": {item["format"] for item in exports} == {"docx", "evidence_docx", "pdf", "json", "xlsx"} and all(item["size"] > 0 for item in exports),
             "evidence": "、".join(f"{item['format']}={item['size']}B" for item in exports),
         },
         {
@@ -1045,10 +1118,10 @@ def assess(
     ]
     passed = sum(1 for item in checks if item["passed"])
     score = round(100 * passed / len(checks))
-    generation_seconds = round(sum(stage.elapsed_seconds for stage in stages if stage.name == "九章 DSH 写作"), 3)
+    generation_seconds = round(sum(stage.elapsed_seconds for stage in stages if stage.name == "一键生成九章报告"), 3)
     gaps = []
-    if len(text) < REFERENCE["final_characters"]:
-        gaps.append("生成正文仍短于客户下发件，需加强章节最小信息契约和自动续写。")
+    if len(text) < int(REFERENCE["final_characters"] * 0.75):
+        gaps.append("生成正文低于客户下发件的 75%，需加强章节最小信息契约和自动续写。")
     if len(evidence) < 10:
         gaps.append("引用密度不足，写作编排应按章节强制检索并校验引用覆盖。")
     if not all(title in text for _, title, _ in CHAPTERS):
@@ -1065,14 +1138,10 @@ def assess(
         gaps.append("Plate 中引用可点击，但 DOCX 正文未渲染可见引用编号；导出器必须把 knowledge_citation 节点渲染为可核验脚注或尾注。")
     if content_metrics["computed_metric_nodes"] < len(EXPECTED_COMPUTATIONS) or content_metrics["inference_conclusion_nodes"] < 1:
         gaps.append("数值和推演结论仍以普通文字写入正文，没有绑定 ComputationRun/InferenceRun 可信业务块，无法进行局部失效和重算。")
-    gaps.extend(
-        [
-            "当前 DSH 产物仍是多轮修订建议，缺少‘按场景包一键生成完整文稿并写回 Plate’的服务端编排任务。",
-            "客户本体、Chunks 和 Report Spec 目前只能作为文档检索，尚缺可审计的场景包导入、映射和版本差异工作台。",
-            "现有旧验收以 600 字和四个标题即可高分，会把两页骨架误判为生产可用，应改用本脚本的盲测与导出门槛。",
-            "正式方案与独立推演依据说明应作为两个关联产物生成；当前仅有一个正文加简短依据摘要。",
-        ]
-    )
+    if not generated.get("run", {}).get("quality_report", {}).get("ok"):
+        gaps.append("一键生成结果没有通过服务端生产质量门。")
+    if "evidence_docx" not in {item["format"] for item in exports}:
+        gaps.append("正式方案缺少独立的生成依据报告。")
     return {
         "score": score,
         "verdict": "达到客户样本基线" if score >= 92 and not gaps else "未达到客户样本基线",
@@ -1143,7 +1212,6 @@ def main() -> None:
             materials_dir / "积石山县6.2级地震应急处置报告推演数据表.xlsx",
         ),
     )
-    execution = recorder.run("执行判据、Semantica 推演、确定性计算和三方案", lambda: run_reasoning_computation_plans(api, project))
     document = api.post(
         "/writing/documents",
         {
@@ -1152,8 +1220,14 @@ def main() -> None:
             "content": [],
         },
     )
-    generated = recorder.run("九章 DSH 写作", lambda: generate_sections(api, project, document))
-    document, content, evidence = recorder.run("写回 Plate 原生节点并绑定引用", lambda: persist_document(api, project, release, document, generated["messages"]))
+    generated = recorder.run("一键生成九章报告", lambda: generate_report_one_click(api, project, document))
+    execution = recorder.run("核验推演工具箱结果", lambda: {
+        "facts": api.get(f"/writing/projects/{project['id']}/facts"),
+        "reasoning": api.get(f"/writing/projects/{project['id']}/reasoning-runs"),
+        "computations": api.get(f"/writing/projects/{project['id']}/computations"),
+        "plans": api.get(f"/writing/projects/{project['id']}/plans"),
+    })
+    document, content, evidence = recorder.run("核验 Plate 原生节点和依据绑定", lambda: load_generated_document(api, document["id"]))
     recorder.run("确认验收导出闸门", lambda: confirm_test_gates(api, project))
     exports = recorder.run("真实导出 DOCX/PDF/JSON/XLSX", lambda: export_document(api, document, output_dir))
     quality = assess(

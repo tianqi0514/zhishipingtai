@@ -5,18 +5,18 @@
   "status": "active",
   "input_schema": {
     "type": "object",
-    "required": ["event_name", "magnitude", "population_density", "rescue_required", "rescue_available"],
+    "required": ["event_name", "magnitude", "population_density", "rescue_required", "rescue_available", "trauma_beds_required", "county_trauma_beds", "callable_trauma_beds", "tents_required", "tents_available"],
     "properties": {
-      "event_name": {"type": "string"},
-      "magnitude": {"type": "number", "minimum": 0, "maximum": 10, "unit": "级"},
-      "population_density": {"type": "number", "minimum": 0, "unit": "人/km²"},
-      "rescue_required": {"type": "integer", "minimum": 0, "unit": "人"},
-      "rescue_available": {"type": "integer", "minimum": 0, "unit": "人"},
-      "trauma_beds_required": {"type": "integer", "minimum": 0, "unit": "张"},
-      "county_trauma_beds": {"type": "integer", "minimum": 0, "unit": "张"},
-      "callable_trauma_beds": {"type": "integer", "minimum": 0, "unit": "张"},
-      "tents_required": {"type": "integer", "minimum": 0, "unit": "顶"},
-      "tents_available": {"type": "integer", "minimum": 0, "unit": "顶"},
+      "event_name": {"type": "string", "title": "事件名称"},
+      "magnitude": {"type": "number", "title": "地震震级", "minimum": 0, "maximum": 10, "unit": "级"},
+      "population_density": {"type": "number", "title": "人口密度", "minimum": 0, "unit": "人/km²"},
+      "rescue_required": {"type": "integer", "title": "搜救人员需求", "minimum": 0, "unit": "人"},
+      "rescue_available": {"type": "integer", "title": "可用搜救人员", "minimum": 0, "unit": "人"},
+      "trauma_beds_required": {"type": "integer", "title": "创伤床位需求", "minimum": 0, "unit": "张"},
+      "county_trauma_beds": {"type": "integer", "title": "县域可用创伤床位", "minimum": 0, "unit": "张"},
+      "callable_trauma_beds": {"type": "integer", "title": "全域可调用创伤床位", "minimum": 0, "unit": "张"},
+      "tents_required": {"type": "integer", "title": "帐篷需求", "minimum": 0, "unit": "顶"},
+      "tents_available": {"type": "integer", "title": "可用帐篷", "minimum": 0, "unit": "顶"},
       "route_graph": {"type": "object"},
       "route_start": {"type": "string"},
       "route_target": {"type": "string"}
@@ -27,18 +27,27 @@
     "magnitude": "EarthquakeEvent.magnitude",
     "population_density": "AffectedArea.populationDensity",
     "rescue_required": "ResourceDemand.required",
-    "rescue_available": "ResourceInventory.available"
+    "rescue_available": "ResourceInventory.available",
+    "trauma_beds_required": "MedicalDemand.traumaBedsRequired",
+    "county_trauma_beds": "MedicalCapacity.countyTraumaBeds",
+    "callable_trauma_beds": "MedicalCapacity.callableTraumaBeds",
+    "tents_required": "ShelterDemand.tentsRequired",
+    "tents_available": "ShelterInventory.tentsAvailable"
   },
   "rule_set_ids": ["earthquake-grade", "earthquake-response-tasks"],
   "formula_ids": ["resource-gap", "water-demand", "vehicle-trips", "medical-pressure", "route-utility"],
   "tool_ids": ["ResourceInventoryMCP", "HospitalCapacityMCP", "TrafficStatusMCP", "MapRoutingMCP", "WeatherMCP"],
   "chapter_template": {
     "chapters": [
-      {"key": "general", "title": "总则"},
-      {"key": "assessment", "title": "灾情研判"},
-      {"key": "organization", "title": "组织体系"},
-      {"key": "response", "title": "应急保障"},
-      {"key": "appendix", "title": "附则"}
+      {"key": "general", "title": "一、总则", "instruction": "说明编制目的、依据、适用范围和处置原则。"},
+      {"key": "situation", "title": "二、震情灾情", "instruction": "写明发生时间、震中、震级、深度、烈度、影响范围和待核事项。"},
+      {"key": "grading", "title": "三、灾害分级与响应启动", "instruction": "区分灾害分级、响应级别、启动权限和提级建议。"},
+      {"key": "command", "title": "四、组织指挥体系", "instruction": "写清指挥机构、现场指挥部和工作组职责。"},
+      {"key": "actions", "title": "五、应急处置任务", "instruction": "按任务写明责任单位、时限、输入资源和完成标准。"},
+      {"key": "safeguards", "title": "六、应急保障", "instruction": "覆盖队伍、物资、医疗、交通、通信、电力、资金和社会秩序保障。"},
+      {"key": "reporting", "title": "七、信息报送与发布", "instruction": "说明速报、续报、统一发布、舆情与数据更新机制。"},
+      {"key": "discipline", "title": "八、纪律与安全", "instruction": "说明统一指挥、现场安全、监测、信息纪律和责任要求。"},
+      {"key": "appendix", "title": "九、附则", "instruction": "说明方案效力、动态更新、人工确认和依据追溯。"}
     ]
   },
   "output_schema": {"type": "object", "required": ["title", "chapters", "evidence_manifest"]},

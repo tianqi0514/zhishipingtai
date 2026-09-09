@@ -292,10 +292,52 @@ class WritingKnowledgeSearch(StrictModel):
 class WritingAgentSessionCreate(StrictModel):
     document_id: str | None = None
     start_new: bool = False
+    purpose: Literal["editing", "report_generation"] = "editing"
 
 
 class WritingAgentMessageCreate(StrictModel):
     content: str = Field(min_length=1, max_length=20_000)
+
+
+class WritingGenerateReportRequest(StrictModel):
+    document_id: str | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class WritingInputValueChange(StrictModel):
+    fact_key: str = Field(min_length=1, max_length=160)
+    new_value: dict[str, Any]
+    reason: str = Field(min_length=2, max_length=2000)
+
+
+class WritingInputChangePreview(StrictModel):
+    document_id: str
+    changes: list[WritingInputValueChange] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def unique_fact_keys(self):
+        keys = [item.fact_key for item in self.changes]
+        if len(keys) != len(set(keys)):
+            raise ValueError("一次影响预览中不能重复修改同一输入")
+        return self
+
+
+class WritingInputChangeApply(StrictModel):
+    preview_id: str
+
+
+class WritingAgentEditCreate(StrictModel):
+    action: Literal[
+        "expand", "rewrite", "shorten", "formalize", "simplify", "tone",
+        "add_evidence", "fact_check", "to_list", "heading",
+    ]
+    original_text: str = Field(min_length=1, max_length=20_000)
+    block_id: str | None = Field(default=None, max_length=100)
+    instruction: str = Field(default="", max_length=4000)
+
+
+class WritingAgentEditDecision(StrictModel):
+    decision: Literal["accept", "reject"]
 
 
 class AgentWritingRequest(StrictModel):
@@ -338,5 +380,5 @@ class DecisionRecordCreate(StrictModel):
 
 
 class WritingExportCreate(StrictModel):
-    output_format: Literal["docx", "pdf", "json", "xlsx", "geojson"]
+    output_format: Literal["docx", "evidence_docx", "pdf", "json", "xlsx", "geojson"]
     template_version_id: str | None = None

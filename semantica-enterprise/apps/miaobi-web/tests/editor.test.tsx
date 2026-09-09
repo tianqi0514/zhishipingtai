@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { createPlateEditor } from 'platejs/react';
+import type { Operation } from 'platejs';
 
 vi.mock('../src/api', () => ({
   api: vi.fn((path: string) => Promise.resolve(path.endsWith('/comments') ? [] : {
@@ -13,7 +14,8 @@ vi.mock('../src/api', () => ({
     user: { id: 'user-1', name: '测试用户' },
   })),
 }));
-import { MiaobiEditor, EditorKit, materializeMarkdownSuggestion, normalizeCollaborativeValue } from '../src/editor/MiaobiEditor';
+import { MiaobiEditor, EditorKit, materializeMarkdownSuggestion, normalizeCollaborativeValue, replaceCollaborativeValue, serverVersionOwnsCollaborativeState } from '../src/editor/MiaobiEditor';
+import { displaySourceVersion, displayStructuralPath, generationStageLabel } from '../src/App';
 import { lockedTrustedBlockTypes, trustedBlockTypes } from '../src/editor/plugins/trusted-blocks';
 import { cleanEvidenceText } from '../src/evidence';
 import { canonicalJson, installWebCryptoDigestFallback, sha256, sha256Digest } from '../src/hash';
@@ -22,6 +24,45 @@ import { createFrameDeltaBuffer } from '../src/streaming';
 import type { PlateNode } from '../src/types/domain';
 
 describe('妙笔 Plate 编辑器', () => {
+  it('只让正式生成和局部重算版本覆盖旧协同快照', () => {
+    expect(serverVersionOwnsCollaborativeState('输入确认、分析计算与知识约束的一键生成')).toBe(true);
+    expect(serverVersionOwnsCollaborativeState('应用输入变化并局部更新受影响测算')).toBe(true);
+    expect(serverVersionOwnsCollaborativeState('自动保存')).toBe(false);
+    expect(serverVersionOwnsCollaborativeState('手工保存')).toBe(false);
+  });
+  it('通过 Slate 操作替换协作文稿而不是只修改本地 value', () => {
+    const editor = createPlateEditor({
+      plugins: EditorKit,
+      value: [{ id: 'old', type: 'p', children: [{ text: '旧缺口 180' }] }],
+    });
+    const operations: string[] = [];
+    const operationalEditor = editor as typeof editor & { apply: (operation: Operation) => void };
+    const apply = operationalEditor.apply;
+    operationalEditor.apply = (operation: Operation) => {
+      operations.push(operation.type);
+      apply.call(editor, operation);
+    };
+    replaceCollaborativeValue(editor, [
+      { id: 'new', type: 'computed_metric', children: [{ text: '新缺口 100' }] },
+    ]);
+    expect(operations.slice(0, 2)).toEqual(['remove_node', 'insert_node']);
+    expect(editor.children[0]).toEqual(
+      { id: 'new', type: 'computed_metric', children: [{ text: '新缺口 100' }] },
+    );
+  });
+  it('刷新后按持久化生成状态恢复进度文案', () => {
+    expect(generationStageLabel(null, true)).toBe('报告已生成');
+    expect(generationStageLabel({ status: 'completed' } as never, true)).toBe('报告已生成');
+    expect(generationStageLabel({ status: 'cancelled' } as never, true)).toContain('已停止');
+    expect(generationStageLabel({ status: 'quality_failed' } as never, true)).toContain('失败');
+  });
+  it('引用详情不向业务用户暴露内部版本标识并转换结构位置', () => {
+    expect(displaySourceVersion(3)).toBe('V3');
+    expect(displaySourceVersion('v4')).toBe('V4');
+    expect(displaySourceVersion('7b81e732-bb8b-4d9d-9434-f57f186b3373')).toBe('固定知识版本');
+    expect(displayStructuralPath('paragraphs/88')).toBe('正文第 89 段');
+    expect(displayStructuralPath('pages/4')).toBe('第 5 页');
+  });
   it('可信块使用与后端一致的递归键排序 JSON', () => {
     expect(canonicalJson({ z: 1, children: [{ text: '震级', bold: true }], a: '中文' }))
       .toBe('{"a":"中文","children":[{"bold":true,"text":"震级"}],"z":1}');
@@ -132,7 +173,8 @@ describe('妙笔 Plate 编辑器', () => {
     expect(await screen.findByTestId('plate-editor')).toBeInTheDocument();
     expect(await screen.findByRole('toolbar', { name: '文稿编辑工具' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '知识引用' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: '测算值' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: '测算值' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '推演' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '修订' })).toBeEnabled();
     expect(screen.getByRole('button', { name: '接受' })).toBeEnabled();
     expect(screen.getByRole('button', { name: '拒绝' })).toBeEnabled();
@@ -145,11 +187,7 @@ describe('妙笔 Plate 编辑器', () => {
     expect(screen.getByText('Plate 协同与本地恢复已启用')).toBeInTheDocument();
     expect(lockedTrustedBlockTypes).toEqual(['computed_metric', 'inference_conclusion']);
     fireEvent.click(screen.getByRole('button', { name: '知识引用' }));
-    fireEvent.click(screen.getByRole('button', { name: '测算值' }));
-    fireEvent.click(screen.getByRole('button', { name: '推演' }));
     expect(onRequestSource).toHaveBeenNthCalledWith(1, 'evidence');
-    expect(onRequestSource).toHaveBeenNthCalledWith(2, 'calculation');
-    expect(onRequestSource).toHaveBeenNthCalledWith(3, 'calculation');
     expect(screen.queryByText('待选择知识来源')).not.toBeInTheDocument();
     expect(screen.queryByText('待插入测算结果')).not.toBeInTheDocument();
     expect(screen.queryByText('待插入推演结论')).not.toBeInTheDocument();

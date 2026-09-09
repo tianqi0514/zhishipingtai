@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import {
   BlockquoteRules,
   BoldRules,
@@ -74,7 +74,7 @@ import {
 } from '@platejs/suggestion';
 import { SuggestionPlugin } from '@platejs/suggestion/react';
 import { YjsPlugin } from '@platejs/yjs/react';
-import { KEYS, TextApi, TrailingBlockPlugin, type Value } from 'platejs';
+import { KEYS, TextApi, TrailingBlockPlugin, type Operation, type Value } from 'platejs';
 import {
   ParagraphPlugin,
   Plate,
@@ -119,11 +119,48 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { cleanEvidenceText } from '../evidence';
+import { sha256 } from '../hash';
 import { createClientId } from '../ids';
 import type { CollaborationAccess, PlateNode, WritingComment, WritingDocument } from '../types/domain';
 import { TrustedBlockKit } from './plugins/trusted-blocks';
 import { RemoteCursorOverlay } from './RemoteCursorOverlay';
 import { SlashInputElement, requestMiaobiEditorCommand, type MiaobiEditorCommand } from './SlashCommandMenu';
+
+export function serverVersionOwnsCollaborativeState(changeSummary?: string | null): boolean {
+  const summary = String(changeSummary || '').trim();
+  return summary === '输入确认、分析计算与知识约束的一键生成'
+    || summary === '应用输入变化并局部更新受影响测算';
+}
+
+/**
+ * Replace a connected Plate/Yjs document through real Slate operations.
+ *
+ * `editor.tf.setValue()` only changes the local editor value.  When Yjs is
+ * connected the shared XmlText remains unchanged and can immediately restore
+ * stale calculated blocks.  Applying remove/insert operations makes the
+ * server-authoritative version part of the collaboration event stream.
+ */
+export function replaceCollaborativeValue(editor: PlateEditor, nextValue: Value): void {
+  const currentValue = [...(editor.children as Value)];
+  const replacement = JSON.parse(JSON.stringify(nextValue)) as Value;
+  const apply = (editor as unknown as { apply: (operation: Operation) => void }).apply.bind(editor);
+  editor.tf.withoutNormalizing(() => {
+    for (let index = currentValue.length - 1; index >= 0; index -= 1) {
+      apply({
+        type: 'remove_node',
+        path: [index],
+        node: currentValue[index],
+      });
+    }
+    replacement.forEach((node, index) => {
+      apply({
+        type: 'insert_node',
+        path: [index],
+        node,
+      });
+    });
+  });
+}
 
 const Element = ({ children, ...props }: PlateElementProps) => <PlateElement {...props} className={(props.element as Record<string, unknown>).suggestion ? 'block-suggestion' : undefined}>{children}</PlateElement>;
 const H1 = ({ children, ...props }: PlateElementProps) => <PlateElement {...props} as="h1">{children}</PlateElement>;
@@ -285,6 +322,9 @@ type Props = {
   onSaved: (document: WritingDocument) => void;
   onDirtyChange: (dirty: boolean) => void;
   onRequestSource: (tab: 'assistant' | 'evidence' | 'calculation' | 'review') => void;
+  onAgentEdit?: (request: { action: string; originalText: string; blockId?: string; instruction?: string }) => Promise<{ id: string; text: string }>;
+  onAgentEditDecision?: (editId: string, decision: 'accept' | 'reject') => Promise<unknown>;
+  onAgentActivity?: () => void;
   insertionRequest?: PlateNode | PlateNode[] | MarkdownSuggestionInsertion | null;
   onInserted?: () => void;
 };
@@ -346,7 +386,7 @@ export function materializeMarkdownSuggestion(editor: PlateEditor, request: Mark
   })) as unknown as Value;
 }
 
-export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource, insertionRequest, onInserted }: Props) {
+export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource, onAgentEdit, onAgentEditDecision, onAgentActivity, insertionRequest, onInserted }: Props) {
   const initial = normalizeCollaborativeValue(
     (document.current_version?.content?.length ? document.current_version.content : EMPTY_VALUE) as Value,
   ).value;
@@ -361,6 +401,11 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
   const [insertDialog, setInsertDialog] = useState<'link' | 'image' | null>(null);
   const [insertValue, setInsertValue] = useState('');
   const [moreOpen, setMoreOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; text: string; blockId?: string } | null>(null);
+  const [agentEdit, setAgentEdit] = useState<{ id: string; text: string; action: string } | null>(null);
+  const [agentEditError, setAgentEditError] = useState('');
+  const [agentEditing, setAgentEditing] = useState('');
+  const selectionRef = useRef<unknown>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const cursorColor = useMemo(() => `hsl(${[...document.id].reduce((sum, value) => sum + value.charCodeAt(0), 0) % 360} 66% 46%)`, [document.id]);
   const editor = usePlateEditor({
@@ -414,6 +459,54 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
     }
   };
 
+  const openAgentContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!onAgentEdit || collaboration?.read_only || !editor.api.isExpanded() || !editor.selection) return;
+    const text = editor.api.string(editor.selection).trim();
+    if (!text) return;
+    const entry = editor.api.block({ highest: true });
+    const block = entry?.[0] as Record<string, unknown> | undefined;
+    if (block && ['computed_metric', 'inference_conclusion', 'verified_fact', 'alternative_plan'].includes(String(block.type || ''))) return;
+    event.preventDefault();
+    selectionRef.current = JSON.parse(JSON.stringify(editor.selection));
+    setAgentEdit(null);
+    setAgentEditError('');
+    setContextMenu({ x: Math.min(event.clientX, window.innerWidth - 220), y: Math.min(event.clientY, window.innerHeight - 320), text, blockId: String(block?.id || '') || undefined });
+  };
+
+  const requestAgentRevision = async (action: string) => {
+    if (!contextMenu || !onAgentEdit || agentEditing) return;
+    setAgentEditing(action);
+    setAgentEditError('');
+    onAgentActivity?.();
+    try {
+      const result = await onAgentEdit({ action, originalText: contextMenu.text, blockId: contextMenu.blockId });
+      setAgentEdit({ ...result, action });
+    } catch (reason) {
+      setAgentEditError(reason instanceof Error ? reason.message : '修改建议生成失败');
+    } finally { setAgentEditing(''); }
+  };
+
+  const decideAgentRevision = async (decision: 'accept' | 'reject') => {
+    if (!agentEdit || !contextMenu) return;
+    setAgentEditing(decision);
+    try {
+      await onAgentEditDecision?.(agentEdit.id, decision);
+      if (decision === 'accept' && selectionRef.current) {
+        editor.getApi(BaseSuggestionPlugin).suggestion.withoutSuggestions(() => {
+          editor.tf.select(selectionRef.current as never);
+          editor.tf.insertText(agentEdit.text);
+        });
+        editor.tf.focus();
+        onDirtyChange(true);
+      }
+      setContextMenu(null);
+      setAgentEdit(null);
+      selectionRef.current = null;
+    } catch (reason) {
+      setAgentEditError(reason instanceof Error ? reason.message : '修改建议处理失败');
+    } finally { setAgentEditing(''); }
+  };
+
   const refreshComments = () => api<WritingComment[]>(`/writing/documents/${document.id}/comments`).then(setComments);
 
   useEffect(() => {
@@ -436,15 +529,38 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
       id: collaboration.room,
       autoSelect: 'end',
       value: initial,
-      onReady: () => {
+      onReady: async () => {
         if (!active) return;
-        const synchronized = normalizeCollaborativeValue(editor.children as Value);
-        if (synchronized.changed && !collaboration.read_only) {
-          editor.tf.setValue(synchronized.value);
+        let synchronized = normalizeCollaborativeValue(editor.children as Value);
+        const currentVersion = document.current_version;
+        let replacedByServer = false;
+        if (
+          !collaboration.read_only
+          && currentVersion?.content_hash
+          && serverVersionOwnsCollaborativeState(currentVersion.change_summary)
+          && await sha256(synchronized.value) !== currentVersion.content_hash
+        ) {
+          // Deterministic recomputation and one-click generation create an
+          // immutable server version.  That version must replace an older Yjs
+          // snapshot; otherwise the editor can display stale calculated data.
+          // Ordinary autosaves do not enter this branch, so offline edits keep
+          // their normal Yjs recovery semantics.
+          synchronized = normalizeCollaborativeValue(initial);
+          replaceCollaborativeValue(editor, synchronized.value);
+          replacedByServer = true;
+        }
+        if (synchronized.changed && !collaboration.read_only && !replacedByServer) {
+          replaceCollaborativeValue(editor, synchronized.value);
           valueRef.current = synchronized.value;
           window.setTimeout(() => void save('协同文稿引用格式迁移'), 0);
         } else {
           valueRef.current = synchronized.value;
+        }
+        if (replacedByServer) {
+          // Persist an ordinary version after the shared document catches up,
+          // so later reloads no longer need to treat this server version as an
+          // outstanding collaboration override.
+          window.setTimeout(() => void save('同步推演更新到协作文稿'), 0);
         }
         setEditorReady(true);
       },
@@ -655,8 +771,6 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
         <button type="button" disabled={collaboration?.read_only} onMouseDown={(event) => event.preventDefault()} onClick={() => { editor.tf.setNodes({ bold: undefined, italic: undefined, underline: undefined, strikethrough: undefined, color: undefined, backgroundColor: undefined, fontFamily: undefined, fontSize: undefined }, { match: TextApi.isText, split: true }); }} title="清除文字格式"><RemoveFormatting size={16} /></button>
         <span className="toolbar-divider" />
         <button type="button" disabled={collaboration?.read_only} onClick={() => onRequestSource('evidence')} title="从锁定知识版本中选择真实依据">知识引用</button>
-        <button type="button" disabled={collaboration?.read_only} onClick={() => onRequestSource('calculation')} title="从已执行的确定性计算中选择">测算值</button>
-        <button type="button" disabled={collaboration?.read_only} onClick={() => onRequestSource('calculation')} title="从已确认的规则推演结果中选择">推演</button>
         <button type="button" className={suggesting ? 'active-tool' : ''} disabled={collaboration?.read_only} onClick={toggleSuggestionMode}>{suggesting ? '修订中' : '修订'}</button>
         <button type="button" disabled={collaboration?.read_only} onClick={() => decideSuggestion(true)} title="接受当前修订">接受</button>
         <button type="button" disabled={collaboration?.read_only} onClick={() => decideSuggestion(false)} title="拒绝当前修订">拒绝</button>
@@ -675,7 +789,7 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
             saveTimer.current = window.setTimeout(() => void save(), 1800);
           }}
         >
-          {editorReady ? <><FloatingFormatToolbar readOnly={collaboration?.read_only} /><PlateContent className="editor-page" readOnly={collaboration?.read_only} placeholder="开始撰写方案…… 输入 / 插入标题、表格、知识依据或推演结论" /></> : <div className="editor-collaboration-loading">正在恢复协同文稿…</div>}
+          {editorReady ? <><FloatingFormatToolbar readOnly={collaboration?.read_only} /><PlateContent className="editor-page" readOnly={collaboration?.read_only} onContextMenu={openAgentContextMenu} placeholder="开始撰写方案…… 输入 / 可打开完整指令菜单；选中文字后右键可扩写、改写或缩写" /></> : <div className="editor-collaboration-loading">正在恢复协同文稿…</div>}
           {collaboration && <CollaborationStatus />}
         </Plate>
       </div>
@@ -685,6 +799,7 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
       </section>
       <div className="editor-status"><span>{saving ? '正在安全保存' : lastSavedHash ? '已保存' : '尚未保存'}</span><span>{collaborationError || (collaboration?.read_only ? '只读协同' : 'Plate 协同与本地恢复已启用')}</span></div>
       {insertDialog && <div className="editor-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setInsertDialog(null); }}><section className="editor-dialog" role="dialog" aria-modal="true" aria-label={insertDialog === 'link' ? '插入链接' : '插入图片'}><h3>{insertDialog === 'link' ? '插入链接' : '插入图片'}</h3><p>{insertDialog === 'link' ? '输入安全链接地址。已选文字会作为链接文本。' : '输入 HTTPS 图片地址；知识材料中的图片请从右侧依据插入。'}</p><input autoFocus value={insertValue} onChange={(event) => setInsertValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submitInsertDialog(); }} placeholder="https://…" /><div><button type="button" onClick={() => setInsertDialog(null)}>取消</button><button type="button" className="primary" disabled={!insertValue.trim()} onClick={submitInsertDialog}>插入</button></div></section></div>}
+      {contextMenu && <div className="agent-context-layer" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !agentEditing) { setContextMenu(null); setAgentEdit(null); } }}><section className="agent-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="dialog" aria-label="妙笔智能修改"><div className="agent-context-title"><b>妙笔修改</b><button type="button" disabled={!!agentEditing} onClick={() => { setContextMenu(null); setAgentEdit(null); }}>×</button></div>{!agentEdit && <div className="agent-action-grid">{([['expand','扩写'],['rewrite','改写'],['shorten','缩写'],['formalize','更正式'],['simplify','更简洁'],['tone','调整语气'],['to_list','转为条目'],['heading','生成小标题'],['add_evidence','补充依据'],['fact_check','核验事实']] as const).map(([key,label]) => <button type="button" key={key} disabled={!!agentEditing} onClick={() => void requestAgentRevision(key)}>{agentEditing === key ? '生成中…' : label}</button>)}</div>}{agentEdit && <div className="agent-edit-preview"><small>原文</small><p>{contextMenu.text}</p><small>建议</small><p>{agentEdit.text}</p><div><button type="button" disabled={!!agentEditing} onClick={() => void decideAgentRevision('reject')}>不采用</button><button type="button" className="primary" disabled={!!agentEditing} onClick={() => void decideAgentRevision('accept')}>{agentEditing === 'accept' ? '应用中…' : '应用建议'}</button></div></div>}{agentEditError && <p className="agent-edit-error">{agentEditError}</p>}</section></div>}
     </div>
   );
 }

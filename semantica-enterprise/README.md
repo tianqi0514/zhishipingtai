@@ -57,11 +57,11 @@ scripts/deploy_server.sh check
 
 Docker Compose 共启动 14 个生产服务：API、Worker、Scheduler、Agent Runtime、MCP Server、妙笔协同服务、本地 ASR Runtime、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB。前端只访问 FastAPI；Harness、MCP 不直接访问业务数据库或检索中间件，ASR 只开放 Docker 内网端口。
 
-## 妙笔：知识约束的推演式写作
+## 妙笔：输入确认、推演计算与可信写作
 
-妙笔是独立的 React + TypeScript + Plate 完整写作应用，本机入口为 <http://localhost:8080/miaobi/>，当前内网验收入口为 <http://10.5.113.232:9002/miaobi/>。它使用不可变知识产品 Release、核验事实、确定性计算、Semantica 规则推演和 DeepSeek Harness 多步骤 Agent 生成可审校、可追溯、可协同和可正式导出的专业方案，不把普通模型文本包装成权威事实或计算结果。
+妙笔是独立的 React + TypeScript + Plate 完整写作应用，本机入口为 <http://localhost:8080/miaobi/>，内网入口为 <http://10.5.113.232:9002/miaobi/>。普通用户只需完成“输入确认 → 分析计算 → 报告编辑”：权威数字由确定性公式产生，正式推演结论由 Semantica 产生，非推演章节由 DeepSeek Harness 基于当前知识产品 Release 撰写。所有结果进入正文前均可预览，数据变化只标记和更新受影响的可信内容，不静默覆盖人工正文。
 
-编辑器以锁定的 Plate commit `8f65d77f8b4709833436e63661e4d061f709258f` 为能力基线，包含真正的 `/` 指令菜单、完整块类型、专业表格、浮动格式栏、评论、修订、协同和文档导入导出。正文中的知识、测算和推演只显示轻量标记，完整依据统一在右侧核验；任务概览明确展示妙笔当前锁定的知识产品 Release 及其文档、切片、向量和图谱状态。
+编辑器以锁定的 Plate commit `8f65d77f8b4709833436e63661e4d061f709258f` 为能力基线，包含真正的 `/` 指令菜单、完整块类型、专业表格、浮动格式栏、评论、修订、协同和文档导入导出。正文中的知识、测算和推演只显示轻量 `[n]`、`测算`、`推演` 标记，完整依据统一在右侧核验。客户样本盲测已达到 100/100：九章、8,985 个可见字符、111 个引用标记，输入 320→400→320 时搜救缺口和对应正文真实执行 180→100→180。
 
 地震应急处置是当前完成深度技术验收的主场景；洪涝、火灾、地质灾害、雨雪冰冻、疫情和反恐维稳均有独立场景契约及确定性技术 Fixture，但在客户确认规则、阈值和正式模板前明确标记“模板待业务确认”。准备与验证命令：
 
@@ -165,6 +165,12 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 
 ## 文档
 
+- [妙笔简洁产品设计](docs/miaobi/MIAOBI_SIMPLE_PRODUCT_DESIGN.md)
+- [妙笔三步写作流程](docs/miaobi/MIAOBI_WRITING_FLOW.md)
+- [推演工具箱](docs/miaobi/MIAOBI_REASONING_TOOLBOX.md)
+- [报告章节与可信块绑定](docs/miaobi/MIAOBI_REPORT_CHUNK_BINDING.md)
+- [右侧 Agent 写作与修订](docs/miaobi/MIAOBI_AGENT_EDITING.md)
+- [输入变化与影响更新](docs/miaobi/MIAOBI_IMPACT_UPDATE.md)
 - [妙笔产品设计](docs/miaobi/MIAOBI_PRODUCT_DESIGN.md)
 - [妙笔用户流程](docs/miaobi/MIAOBI_USER_FLOW.md)
 - [妙笔技术架构](docs/miaobi/MIAOBI_TECHNICAL_ARCHITECTURE.md)

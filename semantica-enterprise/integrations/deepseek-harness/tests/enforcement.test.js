@@ -219,6 +219,34 @@ test('does not enforce graph tools when the platform disables graph retrieval', 
 })
 
 
+test('formal writing report enforcement follows writing evidence instead of numeric keywords', () => {
+  const { listeners } = fixture()
+  const steered = []
+  const agent = {
+    session: { events: [
+      {
+        type: 'user/message',
+        data: {
+          content: [{ type: 'text', text: '[妙笔正式报告生成]\n生成九章且不少于 8462 字，写明资源数量。' }],
+          source: { kind: 'user' },
+        },
+      },
+      { type: 'tool/call', data: { turn: 8, callId: 'context-8', name: 'writing_get_project_context' } },
+      { type: 'tool/result', data: { callId: 'context-8', content: [] } },
+      { type: 'tool/call', data: { turn: 8, callId: 'search-8', name: 'knowledge_search' } },
+      { type: 'tool/result', data: { callId: 'search-8', content: [] } },
+      { type: 'tool/call', data: { turn: 8, callId: 'outline-8', name: 'writing_create_outline_draft' } },
+      { type: 'tool/result', data: { callId: 'outline-8', content: [] } },
+      { type: 'tool/call', data: { turn: 8, callId: 'section-8', name: 'writing_generate_section_draft' } },
+      { type: 'tool/result', data: { callId: 'section-8', content: [] } },
+    ] },
+    steer(message) { steered.push(message) },
+  }
+  listeners.get('agent/turn-stopping')({ agent, turn: 8, signal: new AbortController().signal })
+  assert.equal(steered.length, 0)
+})
+
+
 test('does not steer after knowledge_search was durably logged', () => {
   const { listeners } = fixture()
   const steered = []

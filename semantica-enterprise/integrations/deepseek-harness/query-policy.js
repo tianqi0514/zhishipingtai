@@ -6,6 +6,8 @@ const DIRECT_RESPONSE_PATTERNS = [
 ]
 
 const RETRIEVAL_SETTINGS_PATTERN = /<chuanshen-retrieval-settings>(\{[^<]*\})<\/chuanshen-retrieval-settings>/gu
+const FORMAL_WRITING_TASK_PATTERN = /^\[妙笔正式报告生成\]/u
+const WRITING_TASK_PATTERN = /^\[妙笔写作任务\]/u
 
 
 function currentUserText(events) {
@@ -104,6 +106,25 @@ export function requiresKnowledgeReason(input) {
 
 export function evidenceRequirements(input, settings = {}) {
   const query = String(input || '').trim()
+  // A formal report prompt contains section contracts, target lengths and
+  // resource quantities. Those numbers describe the writing contract; they
+  // are not, by themselves, a request to query a live business database.
+  // Requiring structured_execute_query here made a document-only report
+  // impossible when no structured mapping was active. Keep the production
+  // boundary explicit: the writing gateway supplies verified facts and
+  // deterministic computations, while the agent must load the project,
+  // retrieve real source evidence and use the governed outline/section tools.
+  if (FORMAL_WRITING_TASK_PATTERN.test(query)) {
+    return [
+      'writing_get_project_context',
+      'knowledge_search',
+      'writing_create_outline_draft',
+      'writing_generate_section_draft',
+    ]
+  }
+  if (WRITING_TASK_PATTERN.test(query)) {
+    return ['writing_get_project_context']
+  }
   if (!requiresKnowledgeSearch(query)) return []
   const structured = requiresStructuredQuery(query)
   const document = !structured || DOCUMENT_EVIDENCE_PATTERNS.some(pattern => pattern.test(query))

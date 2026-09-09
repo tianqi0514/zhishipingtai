@@ -14,13 +14,15 @@ from docx.enum.section import WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt, RGBColor
+from docx.shared import Inches, Mm, Pt, RGBColor
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.styles import Alignment, Font, PatternFill
 
 
 CONTENT_TYPES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "evidence_docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "pdf": "application/pdf",
     "json": "application/json",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -73,6 +75,27 @@ def _clean_citation_text(value: str, max_length: int = 420) -> str:
     return cleaned
 
 
+def _unique_citation_bindings(bindings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return one evidence row per visible citation number.
+
+    A citation node can appear multiple times in the formal report.  The
+    evidence appendix is an index, not an occurrence log, so repeating the
+    same source for every inline occurrence makes it noisy and misleading.
+    """
+    unique: dict[int, dict[str, Any]] = {}
+    for item in bindings:
+        if item.get("block_type") != "knowledge_citation":
+            continue
+        metadata = item.get("metadata_json") or {}
+        try:
+            number = int(metadata.get("citation_number") or 0)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            unique.setdefault(number, item)
+    return [unique[number] for number in sorted(unique)]
+
+
 def _set_run_font(run, size: float = 11, bold: bool = False) -> None:
     font_name = _cjk_font_name()
     run.font.name = font_name
@@ -91,15 +114,50 @@ def _remove_paragraph_borders(paragraph_or_style) -> None:
 
 def _display_title(title: str) -> str:
     """Remove controlled workspace qualifiers from the formal document title."""
-    return re.sub(r"\s*（知识版本\s*\d+）\s*$", "", title).strip()
+    value = re.sub(r"\s*（知识版本\s*\d+）\s*$", "", title).strip()
+    value = re.sub(r"\s*[（(](?:盲测|测试|演示|生成于|\d{4}[-年]\d{1,2})[^）)]*[）)]\s*$", "", value).strip()
+    return value
+
+
+def _display_source_locator(page: Any, structural_path: Any) -> str:
+    """Translate parser-internal paths into reviewer-facing source locations."""
+    if page not in (None, ""):
+        return f"第 {page} 页"
+    value = str(structural_path or "").strip()
+    paragraph = re.fullmatch(r"paragraphs/(\d+)", value)
+    if paragraph:
+        return f"正文第 {int(paragraph.group(1)) + 1} 段"
+    sheet = re.fullmatch(r"sheets/(.+)", value)
+    if sheet:
+        return f"工作表“{sheet.group(1)}”"
+    if value in {"", "document"}:
+        return "文档正文"
+    return value
+
+
+def _source_type_label(value: Any) -> str:
+    return {
+        "policy_document": "文档来源",
+        "official_brief": "官方简报",
+        "computation": "确定性测算",
+        "semantica_inference": "规则推演",
+        "structured_query": "实时数据",
+        "manual": "人工确认",
+    }.get(str(value or ""), "其他来源")
+
+
+def _formula_label(value: Any) -> str:
+    return {
+        "resource_gap": "缺口 = max(需求量 − 可用量, 0)",
+    }.get(str(value or ""), str(value or "已登记公式"))
 
 
 def _configure_docx(document: Document, title: str) -> None:
     section = document.sections[0]
-    # Letter portrait is the deterministic default required by the document
-    # production contract. The template layer may explicitly override it.
-    section.page_width = Inches(8.5)
-    section.page_height = Inches(11)
+    # Formal Chinese documents use A4. Template-specific overrides can still
+    # be applied by the export-template layer before publication.
+    section.page_width = Mm(210)
+    section.page_height = Mm(297)
     section.top_margin = Inches(0.82)
     section.bottom_margin = Inches(0.78)
     section.left_margin = Inches(0.86)
@@ -159,6 +217,27 @@ def _add_table(document: Document, node: dict[str, Any]) -> None:
                     _set_run_font(run, 10, row_index == 0)
 
 
+def _append_plate_children(paragraph, children: list[dict[str, Any]]) -> None:
+    """Render inline Plate nodes, including visible evidence references."""
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        child_type = str(child.get("type") or "")
+        if child_type == "knowledge_citation":
+            label = str(child.get("citation_label") or "[依据]")
+            run = paragraph.add_run(label)
+            _set_run_font(run, 9, True)
+            run.font.superscript = True
+            continue
+        if "text" in child:
+            run = paragraph.add_run(str(child.get("text") or ""))
+            _set_run_font(run, 11, bool(child.get("bold")))
+            run.italic = bool(child.get("italic"))
+            run.underline = bool(child.get("underline"))
+            continue
+        _append_plate_children(paragraph, [item for item in child.get("children") or [] if isinstance(item, dict)])
+
+
 def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_summary: dict[str, Any]) -> None:
     document = Document()
     formal_title = _display_title(title)
@@ -189,8 +268,8 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
             paragraph = document.add_paragraph(style="List Number")
         else:
             paragraph = document.add_paragraph()
-        paragraph.paragraph_format.space_after = Pt(7)
-        paragraph.paragraph_format.line_spacing = 1.45
+        paragraph.paragraph_format.space_after = Pt(5)
+        paragraph.paragraph_format.line_spacing = 1.4
         prefix = ""
         if node_type == "knowledge_citation":
             prefix = "来源依据  "
@@ -202,11 +281,30 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
             prefix = "人工假设  "
         if prefix:
             _set_run_font(paragraph.add_run(prefix), 10, True)
-        _set_run_font(paragraph.add_run(text), 11, False)
+        children = [item for item in node.get("children") or [] if isinstance(item, dict)]
+        if children and node_type not in {"knowledge_citation", "computed_metric", "inference_conclusion", "manual_assumption"}:
+            _append_plate_children(paragraph, children)
+        else:
+            _set_run_font(paragraph.add_run(text), 11, False)
+    document.save(path)
 
-    document.add_section(WD_SECTION.NEW_PAGE)
-    heading = document.add_paragraph(style="Heading 1")
-    _set_run_font(heading.add_run("生成依据摘要"), 16, True)
+
+def build_evidence_docx(
+    path: Path,
+    *,
+    title: str,
+    facts: list[dict[str, Any]],
+    computations: list[dict[str, Any]],
+    plans: list[dict[str, Any]],
+    audit_summary: dict[str, Any],
+    bindings: list[dict[str, Any]],
+) -> None:
+    """Build a separate, auditable evidence report without polluting the formal report."""
+    document = Document()
+    _configure_docx(document, f"{_display_title(title)}—生成依据")
+    intro = document.add_paragraph()
+    _set_run_font(intro.add_run("本文件记录报告使用的知识版本、已核验输入、确定性测算、规则推演和正文来源。它用于核验，不属于正式报告正文。"), 11)
+
     summary_rows = [
         ("知识产品版本", str(audit_summary.get("knowledge_product_release") or "-")),
         ("场景包版本", str(audit_summary.get("scenario_package_version") or "-")),
@@ -215,6 +313,8 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
         ("规则推演", str(audit_summary.get("reasoning_count") or 0)),
         ("采用方案", str(audit_summary.get("selected_plan") or "未选择")),
     ]
+    heading = document.add_paragraph(style="Heading 1")
+    _set_run_font(heading.add_run("一、生成基线"), 16, True)
     table = document.add_table(rows=len(summary_rows) + 1, cols=2)
     table.style = "Table Grid"
     table.rows[0].cells[0].text = "项目"
@@ -222,11 +322,59 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
     for index, (label, value) in enumerate(summary_rows, 1):
         table.rows[index].cells[0].text = label
         table.rows[index].cells[1].text = value
-    for row_index, row in enumerate(table.rows):
-        for cell in row.cells:
-            for paragraph in cell.paragraphs:
-                for run in paragraph.runs:
-                    _set_run_font(run, 10, row_index == 0)
+
+    heading = document.add_paragraph(style="Heading 1")
+    _set_run_font(heading.add_run("二、已核验输入"), 16, True)
+    fact_table = document.add_table(rows=max(1, len(facts)) + 1, cols=5)
+    fact_table.style = "Table Grid"
+    for index, label in enumerate(("事实", "当前值", "单位", "来源", "版本")):
+        fact_table.rows[0].cells[index].text = label
+    for row_index, item in enumerate(facts, 1):
+        value = item.get("value") or {}
+        values = (
+            item.get("label"),
+            value.get("number", value.get("text", value.get("value"))),
+            item.get("unit") or "",
+            _source_type_label(item.get("source_type")),
+            item.get("version") or "",
+        )
+        for column_index, value in enumerate(values):
+            fact_table.rows[row_index].cells[column_index].text = str(value if value is not None else "")
+
+    heading = document.add_paragraph(style="Heading 1")
+    _set_run_font(heading.add_run("三、计算与推演"), 16, True)
+    for item in computations:
+        result = item.get("result") or {}
+        output = result.get("output_fact") or {}
+        paragraph = document.add_paragraph(style="List Bullet")
+        _set_run_font(paragraph.add_run(f"{output.get('label') or result.get('operation')}：{result.get('value')} {output.get('unit') or ''}；{_formula_label(result.get('operation'))}。"), 11)
+    for item in plans:
+        if item.get("status") != "selected":
+            continue
+        route = (item.get("result") or {}).get("route") or {}
+        paragraph = document.add_paragraph(style="List Bullet")
+        _set_run_font(paragraph.add_run(f"采用方案：{item.get('name')}；路线：{' → '.join(route.get('path') or [])}；预计 {route.get('minutes', '—')} 分钟。"), 11)
+
+    heading = document.add_paragraph(style="Heading 1")
+    _set_run_font(heading.add_run("四、正文来源"), 16, True)
+    for item in _unique_citation_bindings(bindings):
+        metadata = item.get("metadata_json") or {}
+        number = metadata.get("citation_number") or "-"
+        source = metadata.get("source_title") or "知识材料"
+        page = metadata.get("page_number")
+        path_value = metadata.get("structural_path")
+        location = _display_source_locator(page, path_value)
+        paragraph = document.add_paragraph(style="List Number")
+        paragraph.paragraph_format.space_after = Pt(1.5)
+        paragraph.paragraph_format.line_spacing = 1.0
+        _set_run_font(paragraph.add_run(f"[{number}] {source}，{location}。"), 10)
+
+    for table_value in document.tables:
+        for row_index, row in enumerate(table_value.rows):
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        _set_run_font(run, 10, row_index == 0)
     document.save(path)
 
 
@@ -235,36 +383,104 @@ def build_xlsx(path: Path, *, facts: list[dict[str, Any]], computations: list[di
     header_fill = PatternFill("solid", fgColor="17365D")
     header_font = Font(color="FFFFFF", bold=True)
 
+    fact_labels = {
+        str(item.get("fact_key") or ""): str(item.get("label") or item.get("fact_key") or "")
+        for item in facts
+    }
+
+    def fact_value(item: dict[str, Any]) -> Any:
+        value = item.get("value") or {}
+        if "number" in value:
+            return value.get("number")
+        if "text" in value:
+            return value.get("text")
+        if "boolean" in value:
+            return "是" if value.get("boolean") else "否"
+        return value.get("value")
+
     facts_sheet = workbook.active
     facts_sheet.title = "已核验事实"
     facts_sheet.append(["事实", "值", "单位", "来源", "版本", "状态"])
     for item in facts:
-        value = item.get("value") or {}
-        facts_sheet.append([item.get("label"), value.get("number", value.get("text", value.get("value"))), item.get("unit"), item.get("source_type"), item.get("version"), item.get("verification_status")])
+        facts_sheet.append(
+            [
+                item.get("label"),
+                fact_value(item),
+                item.get("unit"),
+                _source_type_label(str(item.get("source_type") or "")),
+                item.get("version"),
+                {"verified": "已核验", "unverified": "待核验"}.get(
+                    str(item.get("verification_status") or ""),
+                    item.get("verification_status"),
+                ),
+            ]
+        )
 
     computation_sheet = workbook.create_sheet("确定性计算")
     computation_sheet.append(["计算项", "结果", "单位", "公式", "输入事实"])
     for item in computations:
         result = item.get("result") or {}
         output = result.get("output_fact") or {}
-        computation_sheet.append([output.get("label") or result.get("operation"), result.get("value"), output.get("unit"), result.get("operation"), "、".join((result.get("dependencies") or {}).values())])
+        dependency_labels = [
+            fact_labels.get(str(key), str(key))
+            for key in (result.get("dependencies") or {}).values()
+        ]
+        computation_sheet.append(
+            [
+                output.get("label") or result.get("operation"),
+                result.get("value"),
+                output.get("unit"),
+                _formula_label(str(result.get("operation") or "")),
+                "、".join(dependency_labels),
+            ]
+        )
 
     plan_sheet = workbook.create_sheet("备选方案")
     plan_sheet.append(["方案", "优化目标", "路线", "预计分钟", "路线风险", "状态"])
     for item in plans:
         route = (item.get("result") or {}).get("route") or {}
-        plan_sheet.append([item.get("name"), item.get("objective"), " → ".join(route.get("path") or []), route.get("minutes"), route.get("risk"), item.get("status")])
+        plan_sheet.append(
+            [
+                item.get("name"),
+                {"balanced": "综合平衡", "safety": "安全优先", "speed": "速度优先"}.get(
+                    str(item.get("objective") or ""), item.get("objective")
+                ),
+                " → ".join(route.get("path") or []),
+                route.get("minutes"),
+                route.get("risk"),
+                {"selected": "已采用", "candidate": "备选"}.get(
+                    str(item.get("status") or ""), item.get("status")
+                ),
+            ]
+        )
 
+    widths = {
+        "已核验事实": [24, 30, 12, 16, 10, 12],
+        "确定性计算": [24, 16, 10, 34, 40],
+        "备选方案": [18, 16, 50, 14, 14, 12],
+    }
     for sheet in workbook.worksheets:
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
+        sheet.sheet_view.showGridLines = False
+        sheet.page_setup.orientation = "landscape"
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 1
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.print_area = sheet.dimensions
+        sheet.page_margins.left = 0.25
+        sheet.page_margins.right = 0.25
+        sheet.page_margins.top = 0.45
+        sheet.page_margins.bottom = 0.45
         for cell in sheet[1]:
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center")
-        for column in sheet.columns:
-            width = min(42, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
-            sheet.column_dimensions[column[0].column_letter].width = width
+        for row in sheet.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        for index, width in enumerate(widths[sheet.title], 1):
+            sheet.column_dimensions[get_column_letter(index)].width = width
     workbook.save(path)
 
 
@@ -302,10 +518,21 @@ def build_export_artifact(
     computations: list[dict[str, Any]],
     plans: list[dict[str, Any]],
     audit_summary: dict[str, Any],
+    bindings: list[dict[str, Any]] | None = None,
     coordinates: dict[str, list[float]] | None = None,
 ) -> Path:
     if output_format == "docx":
         build_docx(path, title=title, content=content, audit_summary=audit_summary)
+    elif output_format == "evidence_docx":
+        build_evidence_docx(
+            path,
+            title=title,
+            facts=facts,
+            computations=computations,
+            plans=plans,
+            audit_summary=audit_summary,
+            bindings=bindings or [],
+        )
     elif output_format == "pdf":
         source = path.with_suffix(".docx")
         build_docx(source, title=title, content=content, audit_summary=audit_summary)

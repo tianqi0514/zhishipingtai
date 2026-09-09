@@ -904,7 +904,8 @@ def create_space(payload: SpaceCreate, user: User = Depends(get_current_user), d
     if values.get("media_policy_id"):
         _must_tenant(db, MediaParsingPolicy, values["media_policy_id"], user.tenant_id, "媒体解析策略")
     _must_tenant(db, User, values["owner_id"], user.tenant_id, "空间负责人")
-    row = KnowledgeSpace(tenant_id=user.tenant_id, **values); db.add(row); db.flush()
+    row = KnowledgeSpace(tenant_id=user.tenant_id, **values); db.add(row)
+    _flush_or_conflict(db, "知识空间编码已存在，请更换编码")
     db.add(SpaceGrant(tenant_id=user.tenant_id, space_id=row.id, subject_type="user", subject_id=row.owner_id, permission="manage", effect="allow"))
     audit(db, user.tenant_id, user.id, "space.create", "space", row.id); _commit(db); return _serialize_space_for_user(db, row, user)
 

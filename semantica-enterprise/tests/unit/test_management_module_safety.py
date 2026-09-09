@@ -164,6 +164,18 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_space_creation_returns_a_business_conflict_for_duplicate_codes() -> None:
+    with _jobs_client() as (client, tokens, *_):
+        response = client.post(
+            "/api/v1/spaces",
+            headers=_auth(tokens["admin"]),
+            json={"code": "visible-space", "name": "重复编码空间"},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "知识空间编码已存在，请更换编码"
+
+
 def test_jobs_require_platform_permission_and_enforce_space_boundary() -> None:
     with _jobs_client() as (client, tokens, visible, hidden, unscoped):
         denied = client.get("/api/v1/jobs", headers=_auth(tokens["no_permission"]))

@@ -4,6 +4,7 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import jwt
 from fastapi import FastAPI
@@ -12,7 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from apps.api.writing import router
+from apps.api.writing import _select_current_plan_rows, router
 from apps.api.agent_internal import agent_writing_context, agent_writing_document_outline
 from apps.api.writing_schemas import AgentWritingRequest
 from packages.platform.database import Base, get_db
@@ -30,11 +31,42 @@ from packages.platform.models import (
     Tenant,
     User,
     WritingAgentSession,
+    WritingBlockBinding,
     WritingDocument,
     WritingDocumentVersion,
     WritingProjectMember,
 )
 from packages.platform.security import create_access_token, hash_password
+from packages.platform.writing import content_hash
+
+
+def test_export_plan_selection_keeps_one_current_plan_per_objective() -> None:
+    def plan(key: str, objective: str, version: int, status: str, fingerprint: str):
+        return SimpleNamespace(
+            plan_key=key,
+            name=key,
+            objective=objective,
+            version=version,
+            status=status,
+            result={"input_fingerprint": fingerprint},
+        )
+
+    rows = [
+        plan("speed", "speed", 3, "candidate", "current"),
+        plan("safety", "safety", 3, "candidate", "current"),
+        plan("balanced", "balanced", 3, "candidate", "current"),
+        plan("balanced", "balanced", 2, "selected", "current"),
+        plan("speed", "speed", 1, "candidate", "old"),
+        plan("safety", "safety", 1, "candidate", "old"),
+    ]
+
+    selected = _select_current_plan_rows(rows)
+
+    assert [(row.objective, row.version) for row in selected] == [
+        ("balanced", 2),
+        ("safety", 3),
+        ("speed", 3),
+    ]
 
 
 @contextmanager
@@ -370,6 +402,168 @@ def test_ground_truth_baseline_computations_and_fact_override_are_versioned() ->
         assert historical.value["number"] == 320
 
 
+def test_input_change_preview_is_non_mutating_and_apply_updates_only_dependent_report_content() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        values = {
+            "event_name": ("事件名称", {"text": "积石山县6.2级地震"}, None),
+            "magnitude": ("地震震级", {"number": 6.2}, "级"),
+            "population_density": ("人口密度", {"number": 305.6}, "人/km²"),
+            "rescue_required": ("搜救人员需求", {"number": 500}, "人"),
+            "rescue_available": ("可用搜救人员", {"number": 320}, "人"),
+            "trauma_beds_required": ("创伤床位需求", {"number": 330}, "张"),
+            "county_trauma_beds": ("县域可用床位", {"number": 110}, "张"),
+            "callable_trauma_beds": ("全域可调床位", {"number": 250}, "张"),
+            "tents_required": ("帐篷需求", {"number": 7000}, "顶"),
+            "tents_available": ("可用帐篷", {"number": 5200}, "顶"),
+        }
+        fact_ids = {}
+        for key, (label, value, unit) in values.items():
+            created = client.post(
+                f"/api/v1/writing/projects/{project['id']}/facts",
+                json={
+                    "fact_key": key,
+                    "label": label,
+                    "fact_type": "official_brief",
+                    "value": value,
+                    "unit": unit,
+                    "source_type": "official_brief",
+                    "source_id": "customer-ground-truth",
+                    "verification_status": "verified",
+                },
+            )
+            assert created.status_code == 200, created.text
+            fact_ids[key] = created.json()["id"]
+        baseline = client.post(f"/api/v1/writing/projects/{project['id']}/computations/run-baseline")
+        assert baseline.status_code == 200, baseline.text
+        rescue_item = next(item for item in baseline.json()["items"] if item["fact"]["fact_key"] == "rescue_gap")
+        run = rescue_item["run"]
+        metric = {
+            "id": "rescue-gap-block",
+            "type": "computed_metric",
+            "label": "搜救人员缺口",
+            "value": 180,
+            "unit": "人",
+            "formula": "resource_gap",
+            "dependencies": {"required": "rescue_required", "available": "rescue_available"},
+            "computation_run_id": run["id"],
+            "evidence_ids": [fact_ids["rescue_required"], fact_ids["rescue_available"]],
+            "freshness_status": "current",
+            "children": [{"text": "经核验与测算，搜救人员缺口为180人。"}],
+        }
+        untouched = {"id": "untouched", "type": "p", "children": [{"text": "组织体系保持不变。"}]}
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={"project_id": project["id"], "title": "影响更新测试", "content": [metric, untouched]},
+        ).json()
+        bound = client.post(
+            f"/api/v1/writing/documents/{document['id']}/bindings",
+            json={
+                "block_id": metric["id"],
+                "block_type": "computed_metric",
+                "source_type": "computation",
+                "computation_run_id": run["id"],
+                "content_hash": content_hash(metric),
+                "block_content": metric,
+                "evidence_ids": metric["evidence_ids"],
+                "verification_status": "verified",
+            },
+        )
+        assert bound.status_code == 200, bound.text
+
+        preview = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/preview",
+            json={
+                "document_id": document["id"],
+                "changes": [{"fact_key": "rescue_available", "new_value": {"number": 400}, "reason": "现场资源更新"}],
+            },
+        )
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["impact"]["calculations"] == [
+            {
+                "previous_run_id": run["id"],
+                "result_key": "rescue_gap",
+                "label": "搜救人员缺口",
+                "unit": "人",
+                "old_value": 180,
+                "new_value": 100,
+                "formula": "max(0, required - available)",
+                "dependencies": {"required": "rescue_required", "available": "rescue_available"},
+            }
+        ]
+        before_apply = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
+        assert next(item for item in before_apply if item["fact_key"] == "rescue_available")["value"]["number"] == 320
+
+        applied = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/apply",
+            json={"preview_id": preview.json()["id"]},
+        )
+        assert applied.status_code == 200, applied.text
+        assert applied.json()["status"] == "applied"
+        after_apply = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
+        assert next(item for item in after_apply if item["fact_key"] == "rescue_available")["value"]["number"] == 400
+        current = client.get(f"/api/v1/writing/documents/{document['id']}").json()["current_version"]
+        assert current["version"] == 2
+        updated_metric = next(item for item in current["content"] if item["id"] == metric["id"])
+        assert updated_metric["value"] == 100
+        assert next(item for item in current["content"] if item["id"] == "untouched") == untouched
+        old = db.get(WritingDocumentVersion, document["current_version"]["id"])
+        assert next(item for item in old.content if item["id"] == metric["id"])["value"] == 180
+
+        # Simulate an older production document whose binding still points to
+        # a previous immutable run. Impact detection must follow the logical
+        # result key instead of hiding the affected report block.
+        historical_binding = db.query(WritingBlockBinding).filter_by(
+            document_id=document["id"], block_id=metric["id"]
+        ).one()
+        historical_binding.computation_run_id = run["id"]
+        db.commit()
+
+        restored_preview = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/preview",
+            json={
+                "document_id": document["id"],
+                "changes": [{"fact_key": "rescue_available", "new_value": {"number": 320}, "reason": "恢复原始资源数"}],
+            },
+        )
+        assert restored_preview.status_code == 200, restored_preview.text
+        restored_impact = restored_preview.json()["impact"]
+        assert restored_impact["calculations"][0]["old_value"] == 100
+        assert restored_impact["calculations"][0]["new_value"] == 180
+        assert restored_impact["report_blocks"] == [{"block_id": "rescue-gap-block", "section": "报告正文"}]
+        restored = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/apply",
+            json={"preview_id": restored_preview.json()["id"]},
+        )
+        assert restored.status_code == 200, restored.text
+        restored_current = client.get(f"/api/v1/writing/documents/{document['id']}").json()["current_version"]
+        assert next(item for item in restored_current["content"] if item["id"] == metric["id"])["value"] == 180
+        restored_facts = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
+        assert next(item for item in restored_facts if item["fact_key"] == "rescue_gap")["value"]["number"] == 180
+
+        second_preview = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/preview",
+            json={
+                "document_id": document["id"],
+                "changes": [{"fact_key": "rescue_available", "new_value": {"number": 400}, "reason": "再次验证当前计算选择"}],
+            },
+        )
+        assert second_preview.status_code == 200, second_preview.text
+        second_impact = second_preview.json()["impact"]
+        assert second_impact["calculations"][0]["old_value"] == 180
+        assert second_impact["calculations"][0]["new_value"] == 100
+        assert second_impact["report_blocks"] == [{"block_id": "rescue-gap-block", "section": "报告正文"}]
+        second_applied = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/apply",
+            json={"preview_id": second_preview.json()["id"]},
+        )
+        assert second_applied.status_code == 200, second_applied.text
+        second_current = client.get(f"/api/v1/writing/documents/{document['id']}").json()["current_version"]
+        assert next(item for item in second_current["content"] if item["id"] == metric["id"])["value"] == 100
+        second_facts = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
+        assert next(item for item in second_facts if item["fact_key"] == "rescue_gap")["value"]["number"] == 100
+
+
 def test_project_knowledge_search_is_locked_to_product_release(monkeypatch) -> None:
     captured = {}
 
@@ -503,6 +697,7 @@ def test_writing_agent_session_is_idempotent_and_release_scoped() -> None:
         assert fresh.json()["conversation"]["settings"]["knowledge_product_release_id"] == release.id
         session = db.get(WritingAgentSession, fresh.json()["id"])
         conversation = db.get(Conversation, fresh.json()["conversation_id"])
+        assert session.purpose == "editing"
         assert session.harness_session_id == conversation.harness_session_id
         assert conversation.settings["kind"] == "writing"
         assert conversation.settings["knowledge_product_release_id"] == release.id
@@ -521,6 +716,35 @@ def test_writing_agent_session_is_idempotent_and_release_scoped() -> None:
             AgentWritingRequest(conversation_id=conversation.id), claims=claims, db=db
         )
         assert outline["document_title"] == "助手测试文稿"
+
+
+def test_report_generation_session_is_isolated_from_editor_assistant() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={"project_id": project["id"], "title": "会话隔离测试", "content": []},
+        ).json()
+        report = client.post(
+            f"/api/v1/writing/projects/{project['id']}/agent-sessions",
+            json={
+                "document_id": document["id"],
+                "start_new": True,
+                "purpose": "report_generation",
+            },
+        )
+        assert report.status_code == 200, report.text
+        editor = client.post(
+            f"/api/v1/writing/projects/{project['id']}/agent-sessions",
+            json={"document_id": document["id"]},
+        )
+        assert editor.status_code == 200, editor.text
+        assert editor.json()["id"] != report.json()["id"]
+        assert db.get(WritingAgentSession, report.json()["id"]).purpose == "report_generation"
+        assert db.get(WritingAgentSession, editor.json()["id"]).purpose == "editing"
+        listed = client.get(f"/api/v1/writing/projects/{project['id']}/agent-sessions")
+        assert listed.status_code == 200, listed.text
+        assert [item["id"] for item in listed.json()] == [editor.json()["id"]]
 
 
 def test_project_earthquake_reasoning_uses_deterministic_criteria_and_semantica() -> None:

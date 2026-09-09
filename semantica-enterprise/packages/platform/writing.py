@@ -78,6 +78,25 @@ def content_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _legacy_browser_confidence_hash(value: Any) -> str:
+    """Reconstruct v1 hashes where the server emitted ``1.0`` confidence.
+
+    JSON in the browser cannot distinguish ``1.0`` from ``1``.  Accept only
+    this precisely scoped, semantically identical legacy form so opening an
+    untouched Semantica evidence block does not look like content tampering.
+    """
+    def restore(item: Any, key: str | None = None) -> Any:
+        if key == "confidence" and isinstance(item, int) and not isinstance(item, bool):
+            return float(item)
+        if isinstance(item, list):
+            return [restore(child) for child in item]
+        if isinstance(item, dict):
+            return {child_key: restore(child, child_key) for child_key, child in item.items()}
+        return item
+
+    return content_hash(restore(value))
+
+
 def validate_scenario_contract(contract: dict[str, Any]) -> dict[str, Any]:
     required = {
         "input_schema",
@@ -478,9 +497,10 @@ def validate_plate_content(content: list[dict[str, Any]], bindings: dict[str, di
         if binding.get("freshness_status") != "current":
             issues.append({"code": "stale_binding", "block_id": block_id, "message": "正文块依据已经变化"})
         metadata = binding.get("metadata") or binding.get("metadata_json") or {}
+        valid_content_hashes = {content_hash(node), _legacy_browser_confidence_hash(node)}
         if (
             metadata.get("content_hash_algorithm") == "canonical-json-v1"
-            and binding.get("content_hash") != content_hash(node)
+            and binding.get("content_hash") not in valid_content_hashes
         ):
             issues.append(
                 {

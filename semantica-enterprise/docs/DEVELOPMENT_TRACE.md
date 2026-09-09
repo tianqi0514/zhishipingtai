@@ -404,3 +404,15 @@ Python 回归在该镜像 Python 3.13.15 内只读挂载当前源码执行，共
 - 新增 `scripts/miaobi/acceptance_customer_sample.py`，将旧的“能生成”检查升级为生产质量门禁，覆盖正文长度上下限、工作草稿泄漏、章节唯一、重复率、A4、正文引用和可信业务块。
 - 新增对应单元测试，验证不合格文稿不会继续获得虚假的高分。
 - 严格结果为 12/19 项通过、63/100；确认当前链路真实但正式文稿质量未达到客户样本基线。详细证据和 P0—P2 反推计划见 `docs/miaobi/MIAOBI_CUSTOMER_SAMPLE_WRITING_TEST.md`。
+
+### 2026-09-10 妙笔简洁写作闭环与客户样本 100 分收口
+
+- 新建 `codex/miaobi-simple-writing-flow`，先提交产品契约，再把普通用户流程收敛为“输入确认 → 分析计算 → 报告编辑”，主导航只保留方案任务和报告编辑。
+- 新增 `WritingGenerationRun`、`WritingInputChange`、`WritingAgentEdit` 及 0026/0027 迁移；Agent Session 增加 purpose，写作和普通问答不再混用历史上下文。
+- 新增严格报告 JSON 与质量门禁。客户样本隔离盲测只使用 7 份源材料和 587 个 Chunk，DSH 真实生成耗时 171.62 秒，九章正文 8,985 字、70 个 Plate 节点、111 个引用标记、4 个测算块、1 个推演块，19/19 门禁通过，评分由 63 提升到 100。
+- 将正文中的卡片式技术对象改为轻量引用、测算和推演标记；点击后由右侧依据区加载真实 Chunk、公式输入、ComputationRun、InferenceRun 和证明链。右侧 Agent 只产生修订建议，不直接覆盖正文。
+- 输入变更使用预览和应用两阶段协议。浏览器真实执行 320→400→320，搜救缺口与正文局部更新 180→100→180，未关联章节不变。
+- 该往返测试发现三个版本性缺陷：最新计算运行可能引用非当前输入、旧绑定无法关联同一逻辑指标、服务端权威值未通过真实 Slate 操作同步到 Yjs。分别用当前事实依赖匹配、fact_key 逻辑绑定和 remove/insert 节点操作修复，并加入回归。
+- 最终回归：Python 单元 550/550、Semantica 合约 19/19、MySQL/PostgreSQL 10/10、关键 API E2E 3/3、DSH 22/22、Plate 14/14，TypeScript 与生产构建通过。
+- 最终 V16 正式 DOCX、生成依据 DOCX、PDF、JSON、XLSX 均由真实接口生成；PDF 为 8 页 A4，XLSX 含 3 个真实工作表。不交付包含修复前过期计算记录的 V14 文件。
+- 不删除 Volume 重启 API、Worker、Scheduler、Agent Runtime、MCP 与协同服务后，任务、输入版本、320 人、180 人缺口、70 个正文节点与协同状态全部恢复；服务日志无未处理异常。
