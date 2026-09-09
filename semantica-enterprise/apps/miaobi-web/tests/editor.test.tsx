@@ -15,7 +15,7 @@ vi.mock('../src/api', () => ({
 import { MiaobiEditor, EditorKit, normalizeCollaborativeValue } from '../src/editor/MiaobiEditor';
 import { lockedTrustedBlockTypes, trustedBlockTypes } from '../src/editor/plugins/trusted-blocks';
 import { cleanEvidenceText } from '../src/evidence';
-import { canonicalJson, sha256 } from '../src/hash';
+import { canonicalJson, installWebCryptoDigestFallback, sha256, sha256Digest } from '../src/hash';
 import { createClientId } from '../src/ids';
 import { createFrameDeltaBuffer } from '../src/streaming';
 
@@ -27,6 +27,16 @@ describe('妙笔 Plate 编辑器', () => {
   it('在没有 Web Crypto 的内网 HTTP 页面仍生成服务端兼容 SHA-256', async () => {
     const value = { z: 1, children: [{ text: '震级', bold: true }], a: '中文' };
     expect(await sha256(value)).toBe('3ca7a15a8f27087738aa69ee1a0bf6c65a3d6f19dce484778676a77ef9d6aa3b');
+  });
+  it('为 Plate Yjs 在纯 HTTP 页面补充同值 SHA-256 digest', async () => {
+    const scope = { crypto: Object.create(null) } as typeof globalThis;
+    expect(installWebCryptoDigestFallback(scope)).toBe(true);
+    const input = new TextEncoder().encode('abc');
+    const direct = Array.from(new Uint8Array(await sha256Digest(input))).map((part) => part.toString(16).padStart(2, '0')).join('');
+    const throughPlateContract = Array.from(new Uint8Array(await scope.crypto.subtle.digest('SHA-256', input))).map((part) => part.toString(16).padStart(2, '0')).join('');
+    expect(direct).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+    expect(throughPlateContract).toBe(direct);
+    expect(installWebCryptoDigestFallback(scope)).toBe(false);
   });
   it('在内网页面生成标准且不重复的客户端标识', () => {
     const first = createClientId();

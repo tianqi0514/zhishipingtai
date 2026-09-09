@@ -28,8 +28,7 @@ export function canonicalJson(value: unknown): string {
  * terminated, so trusted-block integrity must not depend on that browser API.
  * The server remains authoritative and verifies the resulting canonical hash.
  */
-export async function sha256(value: unknown): Promise<string> {
-  const input = new TextEncoder().encode(canonicalJson(value));
+function sha256Bytes(input: Uint8Array): Uint8Array {
   const paddedLength = Math.ceil((input.length + 9) / 64) * 64;
   const message = new Uint8Array(paddedLength);
   message.set(input);
@@ -84,5 +83,53 @@ export async function sha256(value: unknown): Promise<string> {
     hash[7] = (hash[7] + h) >>> 0;
   }
 
-  return Array.from(hash).map((part) => part.toString(16).padStart(8, '0')).join('');
+  const output = new Uint8Array(32);
+  const outputView = new DataView(output.buffer);
+  hash.forEach((part, index) => outputView.setUint32(index * 4, part));
+  return output;
+}
+
+export async function sha256Digest(data: BufferSource): Promise<ArrayBuffer> {
+  const bytes = data instanceof ArrayBuffer
+    ? new Uint8Array(data)
+    : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  return sha256Bytes(bytes).buffer as ArrayBuffer;
+}
+
+export async function sha256(value: unknown): Promise<string> {
+  const digest = sha256Bytes(new TextEncoder().encode(canonicalJson(value)));
+  return Array.from(digest).map((part) => part.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Plate Yjs 53.2 derives a deterministic first-update client id with
+ * `crypto.subtle.digest`. Browsers intentionally omit SubtleCrypto on plain
+ * HTTP IP origins, which are common for isolated-network deployments. Install
+ * the one digest operation Plate needs while leaving native random generation
+ * and every server-side security decision untouched.
+ */
+export function installWebCryptoDigestFallback(scope: typeof globalThis = globalThis): boolean {
+  const current = scope.crypto;
+  if (current?.subtle) return false;
+  const digest = async (algorithm: AlgorithmIdentifier, data: BufferSource): Promise<ArrayBuffer> => {
+    const name = typeof algorithm === 'string' ? algorithm : algorithm.name;
+    if (name.toUpperCase().replace(/_/g, '-') !== 'SHA-256') {
+      throw new DOMException(`Unsupported digest algorithm: ${name}`, 'NotSupportedError');
+    }
+    return sha256Digest(data);
+  };
+  const subtle = { digest } as unknown as SubtleCrypto;
+  if (current) {
+    try {
+      Object.defineProperty(current, 'subtle', { configurable: true, value: subtle });
+      return true;
+    } catch {
+      // Some browsers expose a non-extensible Crypto object. Replacing the
+      // configurable global accessor below preserves its native methods.
+    }
+  }
+  const compatible = Object.create(current || null) as Crypto;
+  Object.defineProperty(compatible, 'subtle', { configurable: true, value: subtle });
+  Object.defineProperty(scope, 'crypto', { configurable: true, value: compatible });
+  return true;
 }
