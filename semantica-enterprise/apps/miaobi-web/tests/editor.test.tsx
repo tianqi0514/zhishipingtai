@@ -18,6 +18,7 @@ import { cleanEvidenceText } from '../src/evidence';
 import { canonicalJson, installWebCryptoDigestFallback, sha256, sha256Digest } from '../src/hash';
 import { createClientId } from '../src/ids';
 import { createFrameDeltaBuffer } from '../src/streaming';
+import type { PlateNode } from '../src/types/domain';
 
 describe('妙笔 Plate 编辑器', () => {
   it('可信块使用与后端一致的递归键排序 JSON', () => {
@@ -62,12 +63,14 @@ describe('妙笔 Plate 编辑器', () => {
       { id: 'body', type: 'p', children: [{ text: '# 普通正文保留原样' }] },
     ]);
     expect(migrated.changed).toBe(true);
-    expect(migrated.value[0].children[0].text).toBe('预案 等级判据');
+    expect(migrated.value[0].children[0].text).toBe('预案 等级判据 ');
+    expect(migrated.value[0].children[1].type).toBe('knowledge_citation');
+    expect((migrated.value[0].children[1].children as PlateNode[])[0].text).toBe('');
     expect(migrated.value[1].children[0].text).toBe('# 普通正文保留原样');
   });
 
   it('使用锁定版 Plate 插件体系并注册全部可信业务块', () => {
-    expect(EditorKit.length).toBeGreaterThan(25);
+    expect(EditorKit.length).toBeGreaterThan(45);
     expect(trustedBlockTypes).toEqual([
       'knowledge_citation',
       'verified_fact',
@@ -108,16 +111,20 @@ describe('妙笔 Plate 编辑器', () => {
     expect(await screen.findByRole('toolbar', { name: '文稿编辑工具' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '知识引用' })).toBeEnabled();
     expect(screen.getByRole('button', { name: '测算值' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: '修订模式' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: '接受修订' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: '拒绝修订' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '修订' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '接受' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '拒绝' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: '段落样式' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: '字体' })).toBeEnabled();
+    expect(screen.getByRole('combobox', { name: '字号' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '导入 Word、Markdown 或 HTML' })).toBeEnabled();
     expect(screen.getByRole('region', { name: '协同评论' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: '评论内容' })).toBeInTheDocument();
     expect(screen.getByText('Plate 协同与本地恢复已启用')).toBeInTheDocument();
     expect(lockedTrustedBlockTypes).toEqual(['computed_metric', 'inference_conclusion']);
     fireEvent.click(screen.getByRole('button', { name: '知识引用' }));
     fireEvent.click(screen.getByRole('button', { name: '测算值' }));
-    fireEvent.click(screen.getByRole('button', { name: '推演结论' }));
+    fireEvent.click(screen.getByRole('button', { name: '推演' }));
     expect(onRequestSource).toHaveBeenNthCalledWith(1, 'evidence');
     expect(onRequestSource).toHaveBeenNthCalledWith(2, 'calculation');
     expect(onRequestSource).toHaveBeenNthCalledWith(3, 'calculation');

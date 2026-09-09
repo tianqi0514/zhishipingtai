@@ -18,23 +18,39 @@ const META: Record<string, { label: string; tone: string }> = {
 export const lockedTrustedBlockTypes = ['computed_metric', 'inference_conclusion'];
 
 function TrustedBlock({ children, ...props }: PlateElementProps & { children?: ReactNode }) {
-  const type = String((props.element as Record<string, unknown>).type || '');
+  const element = props.element as Record<string, unknown>;
+  const type = String(element.type || '');
   const item = META[type] || { label: '可信内容', tone: 'gray' };
-  const freshness = String((props.element as Record<string, unknown>).freshness_status || 'unverified');
+  const freshness = String(element.freshness_status || 'unverified');
   const locked = lockedTrustedBlockTypes.includes(type);
+  const openDetails = () => window.dispatchEvent(new CustomEvent('miaobi:open-binding', { detail: { ...element, label: item.label } }));
+  if (type === 'knowledge_citation') {
+    return (
+      <PlateElement {...props} as="span" className={`trusted-block trusted-reference tone-${item.tone} state-${freshness}`}>
+        <span className="trusted-content">{children}</span>
+        <button type="button" className="trusted-marker" contentEditable={false} onMouseDown={(event) => event.preventDefault()} onClick={openDetails} aria-label={`查看${item.label}依据`} title="在右侧查看完整依据">
+          {String(element.citation_label || '依据')}
+        </button>
+        {freshness !== 'current' && <button type="button" className="trusted-freshness" contentEditable={false} onMouseDown={(event) => event.preventDefault()} onClick={openDetails}>{freshness === 'stale' ? '需更新' : '待核验'}</button>}
+      </PlateElement>
+    );
+  }
   return (
     <PlateElement {...props} className={`trusted-block tone-${item.tone} state-${freshness}`}>
-      <span className="trusted-label" contentEditable={false}>{item.label}</span>
-      <div className="trusted-content" contentEditable={locked ? false : undefined}>{children}</div>
-      <span className="trusted-state" contentEditable={false}>
-        {freshness === 'current' ? '依据有效' : freshness === 'stale' ? '依据已变化' : '待绑定依据'}
-      </span>
+      <span className="trusted-content" contentEditable={locked ? false : undefined}>{children}</span>
+      <button type="button" className="trusted-marker" contentEditable={false} onMouseDown={(event) => event.preventDefault()} onClick={openDetails} aria-label={`查看${item.label}依据`} title="在右侧查看完整依据">
+        {type === 'knowledge_citation' ? '依据' : type === 'computed_metric' ? '测算' : type === 'inference_conclusion' ? '推演' : item.label}
+      </button>
+      {freshness !== 'current' && <button type="button" className="trusted-freshness" contentEditable={false} onMouseDown={(event) => event.preventDefault()} onClick={openDetails}>{freshness === 'stale' ? '需更新' : '待核验'}</button>}
     </PlateElement>
   );
 }
 
-export const TrustedBlockKit = Object.keys(META).map((key) =>
-  createPlatePlugin({ key, node: { isElement: true } }).withComponent(TrustedBlock)
-);
+export const TrustedBlockKit = Object.keys(META).map((key) => createPlatePlugin({
+  key,
+  node: key === 'knowledge_citation'
+    ? { isElement: true, isInline: true, isVoid: true }
+    : { isElement: true },
+}).withComponent(TrustedBlock));
 
 export const trustedBlockTypes = Object.keys(META);

@@ -32,6 +32,40 @@ export type Project = {
   config?: Record<string, unknown>;
 };
 
+export type KnowledgeContextSpace = {
+  id: string;
+  name: string;
+  code: string;
+  knowledge_release_id: string;
+  knowledge_release_number: number;
+  published_at?: string;
+  status: string;
+  document_count: number;
+  chunk_count: number;
+  entity_count: number;
+  fact_count: number;
+  graph_available: boolean;
+  vector_available: boolean;
+};
+
+export type KnowledgeContext = {
+  product: { id: string; name: string; code: string };
+  release: {
+    id: string;
+    version: number;
+    checksum: string;
+    published_at?: string;
+    status: string;
+    is_latest: boolean;
+  };
+  spaces: KnowledgeContextSpace[];
+  snapshot_locked: boolean;
+  document_count: number;
+  chunk_count: number;
+  entity_count: number;
+  fact_count: number;
+};
+
 export type WritingDocument = {
   id: string;
   project_id: string;
@@ -152,6 +186,13 @@ export type AgentMessage = {
   content: string;
   status: string;
   error_message?: string;
+  citations?: Array<{
+    citation_number: number;
+    chunk_id: string;
+    query_run_id?: string;
+    rank: number;
+    snapshot?: KnowledgeResult;
+  }>;
 };
 
 export type AgentEvent = {

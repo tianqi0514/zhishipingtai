@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import jwt
@@ -20,7 +21,11 @@ from packages.platform.models import (
     KnowledgeProduct,
     KnowledgeProductRelease,
     KnowledgeProductReleaseItem,
+    KnowledgeRelease,
     KnowledgeSpace,
+    GraphRelease,
+    IndexRelease,
+    ModelConfig,
     ProjectFact,
     Tenant,
     User,
@@ -63,6 +68,57 @@ def writing_client():
     )
     db.add(space)
     db.flush()
+    embedding = ModelConfig(
+        tenant_id=tenant.id,
+        name="测试向量模型",
+        model_kind="embedding",
+        provider="local",
+        model_name="test-embedding",
+        enabled=True,
+        is_default=True,
+    )
+    db.add(embedding)
+    db.flush()
+    graph_release = GraphRelease(
+        tenant_id=tenant.id,
+        space_id=space.id,
+        release_number=1,
+        graph_name="miaobi_test_graph",
+        entity_count=12,
+        fact_count=18,
+        status="published",
+        published_at=datetime.now(timezone.utc),
+    )
+    db.add(graph_release)
+    db.flush()
+    index_release = IndexRelease(
+        tenant_id=tenant.id,
+        space_id=space.id,
+        release_number=1,
+        opensearch_index="miaobi_test_index",
+        qdrant_collection="miaobi_test_vectors",
+        graph_release_id=graph_release.id,
+        model_config_id=embedding.id,
+        embedding_dimension=4,
+        document_count=3,
+        chunk_count=16,
+        status="published",
+        published_at=datetime.now(timezone.utc),
+    )
+    db.add(index_release)
+    db.flush()
+    knowledge_release = KnowledgeRelease(
+        tenant_id=tenant.id,
+        space_id=space.id,
+        release_number=1,
+        graph_release_id=graph_release.id,
+        index_release_id=index_release.id,
+        checksum="e" * 64,
+        status="published",
+        published_at=datetime.now(timezone.utc),
+    )
+    db.add(knowledge_release)
+    db.flush()
     product = KnowledgeProduct(
         tenant_id=tenant.id,
         code="emergency-product",
@@ -89,7 +145,7 @@ def writing_client():
             tenant_id=tenant.id,
             product_release_id=release.id,
             space_id=space.id,
-            knowledge_release_id="knowledge-release-test",
+            knowledge_release_id=knowledge_release.id,
             checksum="b" * 64,
         )
     )
@@ -152,6 +208,24 @@ def _create_project(client: TestClient, release_id: str) -> dict:
     )
     assert project.status_code == 200, project.text
     return project.json()
+
+
+def test_project_knowledge_context_exposes_locked_zhiku_release() -> None:
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        response = client.get(f"/api/v1/writing/projects/{project['id']}/knowledge-context")
+        assert response.status_code == 200, response.text
+        context = response.json()
+        assert context["product"]["name"] == "应急知识产品"
+        assert context["release"]["version"] == 1
+        assert context["release"]["is_latest"] is True
+        assert context["snapshot_locked"] is True
+        assert context["document_count"] == 3
+        assert context["chunk_count"] == 16
+        assert context["entity_count"] == 12
+        assert context["fact_count"] == 18
+        assert context["spaces"][0]["graph_available"] is True
+        assert context["spaces"][0]["vector_available"] is True
 
 
 def test_writing_project_fact_computation_and_local_stale_propagation() -> None:

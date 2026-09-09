@@ -25,12 +25,13 @@ import { cleanEvidenceText } from './evidence';
 import { sha256 } from './hash';
 import { createClientId } from './ids';
 import { createFrameDeltaBuffer } from './streaming';
-import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
+import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeContext, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
 
 type Product = { id: string; name: string; code: string };
 type Release = { id: string; version: number; status: string };
 type User = { id: string; display_name: string; is_admin: boolean };
 type Tab = 'overview' | 'facts' | 'reasoning' | 'plans' | 'writing' | 'review';
+type EditorInsertion = PlateNode | PlateNode[];
 
 const tabs: Array<{ key: Tab; label: string; icon: typeof LayoutDashboard }> = [
   { key: 'overview', label: '任务概览', icon: LayoutDashboard },
@@ -54,13 +55,15 @@ export function App() {
   const [documents, setDocuments] = useState<WritingDocument[]>([]);
   const [computations, setComputations] = useState<ComputationRun[]>([]);
   const [gates, setGates] = useState<DecisionGate[]>([]);
+  const [knowledgeContext, setKnowledgeContext] = useState<KnowledgeContext | null>(null);
   const [document, setDocument] = useState<WritingDocument | null>(null);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
   const [assistantTab, setAssistantTab] = useState<'assistant' | 'evidence' | 'calculation' | 'review'>('assistant');
-  const [insertionRequest, setInsertionRequest] = useState<PlateNode | null>(null);
+  const [insertionRequest, setInsertionRequest] = useState<EditorInsertion | null>(null);
+  const [selectedBinding, setSelectedBinding] = useState<Record<string, unknown> | null>(null);
 
   const selected = projects.find((item) => item.id === projectId) || null;
 
@@ -73,13 +76,14 @@ export function App() {
   };
 
   const loadProjectDetails = async (id: string) => {
-    const [detail, factRows, planRows, documentRows, computationRows, gateRows] = await Promise.all([
+    const [detail, factRows, planRows, documentRows, computationRows, gateRows, context] = await Promise.all([
       api<Project>(`/writing/projects/${id}`),
       api<Fact[]>(`/writing/projects/${id}/facts`),
       api<AlternativePlan[]>(`/writing/projects/${id}/plans`),
       api<WritingDocument[]>(`/writing/projects/${id}/documents`),
       api<ComputationRun[]>(`/writing/projects/${id}/computations`),
       api<DecisionGate[]>(`/writing/projects/${id}/decision-gates`),
+      api<KnowledgeContext>(`/writing/projects/${id}/knowledge-context`),
     ]);
     setProject(detail);
     setFacts(factRows);
@@ -87,6 +91,7 @@ export function App() {
     setDocuments(documentRows);
     setComputations(computationRows);
     setGates(gateRows);
+    setKnowledgeContext(context);
     setDocument(documentRows.length ? await api<WritingDocument>(`/writing/documents/${documentRows[0].id}`) : null);
   };
 
@@ -100,11 +105,22 @@ export function App() {
   useEffect(() => {
     if (!projectId) {
       setProject(null);
+      setKnowledgeContext(null);
       return;
     }
     sessionStorage.setItem('miaobi-project', projectId);
     loadProjectDetails(projectId).catch((reason) => setError(reason instanceof Error ? reason.message : '方案任务加载失败'));
   }, [projectId]);
+
+  useEffect(() => {
+    const openBinding = (event: Event) => {
+      const detail = (event as CustomEvent<Record<string, unknown>>).detail || {};
+      setSelectedBinding(detail);
+      setAssistantTab(String(detail.type) === 'knowledge_citation' ? 'evidence' : 'calculation');
+    };
+    window.addEventListener('miaobi:open-binding', openBinding);
+    return () => window.removeEventListener('miaobi:open-binding', openBinding);
+  }, []);
 
   const createDocument = async () => {
     if (!project) return;
@@ -151,7 +167,7 @@ export function App() {
         {!selected ? <Welcome onCreate={() => setCreateOpen(true)} /> : (
           <>
             {tab !== 'writing' && <PageHeader project={selected} tab={tab} />}
-            {tab === 'overview' && <Overview project={project || selected} facts={facts} plans={plans} documents={documents} onContinue={(next) => setTab(next)} />}
+            {tab === 'overview' && <Overview project={project || selected} facts={facts} plans={plans} documents={documents} knowledgeContext={knowledgeContext} onChanged={() => loadProjectDetails(selected.id)} onContinue={(next) => setTab(next)} />}
             {tab === 'facts' && <Facts project={selected} facts={facts} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
             {tab === 'reasoning' && <Reasoning project={selected} facts={facts} computations={computations} gates={gates} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
             {tab === 'plans' && <Plans project={selected} rows={plans} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />}
@@ -162,10 +178,11 @@ export function App() {
                   {document ? <Suspense fallback={<div className="editor-shell editor-loading">正在加载完整文稿编辑器…</div>}><MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} onRequestSource={setAssistantTab} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /></Suspense> : <EmptyAction title="还没有文稿" detail="从锁定的知识产品版本创建第一份方案初稿。" action="创建文稿" onClick={() => void createDocument()} />}
                 </section>
                 <aside className="assistant-pane">
+                  {knowledgeContext && <button type="button" className="writing-knowledge-baseline" onClick={() => setTab('overview')} title="查看当前文稿使用的传神智库知识版本"><BookOpenCheck size={16} /><span><small>当前知识基线</small><b>{knowledgeContext.product.name} · V{knowledgeContext.release.version}</b></span><em>{knowledgeContext.document_count} 份材料</em><ChevronRight size={15} /></button>}
                   <div className="assistant-tabs">
                     {([['assistant','妙笔助手'],['evidence','引用依据'],['calculation','计算与推演'],['review','审校问题']] as const).map(([key,label]) => <button type="button" key={key} className={assistantTab === key ? 'active' : ''} onClick={() => setAssistantTab(key)}>{label}</button>)}
                   </div>
-                  <AssistantPanel tab={assistantTab} project={selected} document={document} facts={facts} plans={plans} computations={computations} onInsert={setInsertionRequest} onError={setError} />
+                  <AssistantPanel tab={assistantTab} project={selected} document={document} facts={facts} plans={plans} computations={computations} selectedBinding={selectedBinding} onInsert={setInsertionRequest} onError={setError} />
                 </aside>
               </div>
             )}
@@ -188,15 +205,42 @@ function PageHeader({ project, tab }: { project: Project; tab: Tab }) {
   return <div className="page-header"><div><span className="eyebrow">{project.name}</span><h1>{current.label}</h1></div><span className={`status ${project.status}`}>{statusLabel(project.status)}</span></div>;
 }
 
-function Overview({ project, facts, plans, documents, onContinue }: { project: Project; facts: Fact[]; plans: AlternativePlan[]; documents: WritingDocument[]; onContinue: (tab: Tab) => void }) {
+function Overview({ project, facts, plans, documents, knowledgeContext, onChanged, onContinue }: { project: Project; facts: Fact[]; plans: AlternativePlan[]; documents: WritingDocument[]; knowledgeContext: KnowledgeContext | null; onChanged: () => Promise<void>; onContinue: (tab: Tab) => void }) {
   const verified = facts.filter((item) => item.verification_status === 'verified').length;
+  const [rebasing, setRebasing] = useState(false);
   const steps: Array<{ title: string; detail: string; done: boolean; target: Tab }> = [
     { title: '准备数据与事实', detail: `${facts.length} 条事实，${verified} 条已核验`, done: facts.length > 0 && verified === facts.length, target: 'facts' },
     { title: '规则与计算推演', detail: '形成等级、任务与资源缺口依据', done: plans.length > 0, target: 'reasoning' },
     { title: '比较备选方案', detail: `${plans.length} 套真实算法方案`, done: plans.length >= 2, target: 'plans' },
     { title: '撰写与审校', detail: `${documents.length} 份文稿`, done: documents.length > 0, target: 'writing' },
   ];
-  return <div className="overview-grid"><section className="hero-card"><div><span className="eyebrow">当前进度</span><h2>{steps.find((item) => !item.done)?.title || '可以进入审校发布'}</h2><p>系统不会替您跳过缺失事实、口径冲突和人工确认。</p></div><button type="button" className="primary" onClick={() => onContinue(steps.find((item) => !item.done)?.target || 'review')}>继续处理<ChevronRight size={17} /></button></section><section className="step-list">{steps.map((step, index) => <button type="button" key={step.title} onClick={() => onContinue(step.target)}><span className={step.done ? 'step done' : 'step'}>{step.done ? <CheckCircle2 size={18} /> : index + 1}</span><span><b>{step.title}</b><small>{step.detail}</small></span><ChevronRight size={17} /></button>)}</section><section className="metrics"><Metric label="已核验事实" value={`${verified}/${facts.length}`} /><Metric label="备选方案" value={String(plans.length)} /><Metric label="文稿版本" value={String(documents.length)} /><Metric label="待确认" value={String(project.pending_gates || 0)} /></section></div>;
+  const openSpace = (spaceId: string, hash: string) => {
+    localStorage.setItem('chuanshen.pendingSpace', spaceId);
+    window.location.href = `/${hash}`;
+  };
+  const rebase = async () => {
+    if (!knowledgeContext || knowledgeContext.release.is_latest || rebasing) return;
+    if (!window.confirm('切换到最新知识版本后，正文中已有依据将标记为需要核验。继续吗？')) return;
+    setRebasing(true);
+    try {
+      const releases = await api<Array<{ id: string; version: number; status: string }>>(`/knowledge-products/${knowledgeContext.product.id}/releases`);
+      const latest = releases.filter((item) => item.status === 'published').sort((left, right) => right.version - left.version)[0];
+      if (!latest) throw new Error('当前知识产品没有可用的已发布版本');
+      await api(`/writing/projects/${project.id}/knowledge-release`, { method: 'POST', body: { knowledge_product_release_id: latest.id, reason: '在妙笔任务概览中采用最新知识基线' } });
+      await onChanged();
+    } finally { setRebasing(false); }
+  };
+  return <div className="overview-grid">
+    <section className="hero-card"><div><span className="eyebrow">当前进度</span><h2>{steps.find((item) => !item.done)?.title || '可以进入审校发布'}</h2><p>系统不会替您跳过缺失事实、口径冲突和人工确认。</p></div><button type="button" className="primary" onClick={() => onContinue(steps.find((item) => !item.done)?.target || 'review')}>继续处理<ChevronRight size={17} /></button></section>
+    {knowledgeContext && <section className="knowledge-context-card" aria-label="传神智库知识基线">
+      <div className="knowledge-context-head"><div><span className="eyebrow">来自传神智库</span><h2>{knowledgeContext.product.name} · Release V{knowledgeContext.release.version}</h2><p>妙笔检索、推演和正文依据固定使用这一版知识，生成过程不会被后台新数据静默改变。</p></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前最新版' : '有新版本'}</span></div>
+      <div className="knowledge-context-metrics"><Metric label="来源文档" value={String(knowledgeContext.document_count)} /><Metric label="知识片段" value={String(knowledgeContext.chunk_count)} /><Metric label="图谱对象" value={String(knowledgeContext.entity_count)} /><Metric label="知识关系" value={String(knowledgeContext.fact_count)} /></div>
+      <div className="knowledge-space-list">{knowledgeContext.spaces.map((space) => <article key={space.id}><div><b>{space.name}</b><small>知识版本 V{space.knowledge_release_number} · {space.document_count} 份文档 · {space.chunk_count} 个片段</small></div><div className="knowledge-channel-tags"><span className={space.vector_available ? 'ready' : 'missing'}>全文/向量{space.vector_available ? '可用' : '未发布'}</span><span className={space.graph_available ? 'ready' : 'missing'}>图谱{space.graph_available ? '可用' : '未发布'}</span></div><div className="knowledge-context-actions"><button type="button" onClick={() => openSpace(space.id, '#documents')}>查看材料</button><button type="button" onClick={() => openSpace(space.id, '#graph')}>查看图谱</button></div></article>)}</div>
+      <div className="knowledge-context-foot"><span>材料接入与治理在传神智库完成；妙笔消费已发布的知识版本，并把引用、测算和推演结果写入正文。</span><div><a className="secondary" href="/#knowledge-products">管理知识产品</a>{!knowledgeContext.release.is_latest && <button type="button" className="primary compact" disabled={rebasing} onClick={() => void rebase()}>{rebasing ? '切换中…' : '采用最新知识'}</button>}</div></div>
+    </section>}
+    <section className="step-list">{steps.map((step, index) => <button type="button" key={step.title} onClick={() => onContinue(step.target)}><span className={step.done ? 'step done' : 'step'}>{step.done ? <CheckCircle2 size={18} /> : index + 1}</span><span><b>{step.title}</b><small>{step.detail}</small></span><ChevronRight size={17} /></button>)}</section>
+    <section className="metrics"><Metric label="已核验事实" value={`${verified}/${facts.length}`} /><Metric label="备选方案" value={String(plans.length)} /><Metric label="文稿版本" value={String(documents.length)} /><Metric label="待确认" value={String(project.pending_gates || 0)} /></section>
+  </div>;
 }
 
 function Facts({ project, facts, onChanged, onError }: { project: Project; facts: Fact[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
@@ -344,14 +388,14 @@ function Review({ project, document, gates, onChanged, onError }: { project: Pro
   return <div className="review-page"><div className="two-columns"><section className="content-card"><h2>发布前检查</h2>{document ? <div className="check-list"><p><CheckCircle2 />文稿已创建并具有不可变版本</p><p><AlertTriangle />{unresolved.length ? `仍有 ${unresolved.length} 个人工确认节点` : '人工确认节点已完成'}</p><p><AlertTriangle />可信块不得存在失效或未核验依据</p></div> : <p>请先创建文稿。</p>}<button type="button" className="primary" disabled={!document || checking} onClick={() => void validate()}>{checking ? '检查中…' : '执行审校'}</button>{issues.length > 0 && <ul className="issue-list">{issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul>}{pendingGates.length > 0 && <div className="gate-review-list">{pendingGates.map((gate) => <div key={gate.id}><span>{gate.name}</span><button type="button" disabled={!!confirming} onClick={() => void confirmGate(gate)}>{confirming === gate.id ? '确认中…' : '确认'}</button></div>)}</div>}{document && !checking && !checked && issues.length === 0 && pendingGates.length === 0 && <p className="field-help">点击“执行审校”核对正文来源和发布条件。</p>}{document && !checking && checked && issues.length === 0 && pendingGates.length === 0 && <p className="review-success"><CheckCircle2 />审校通过，可以生成正式文件。</p>}</section><section className="content-card"><h2>正式导出</h2><p>Word 与 PDF 只有在全部业务节点确认、可信块有效后才能生成；证据数据可另行导出。</p><div className="export-actions">{(['docx','pdf','json','xlsx','geojson'] as const).map((format) => <button type="button" key={format} className={format === 'docx' || format === 'pdf' ? 'primary' : 'secondary'} disabled={!document || !!exporting} onClick={() => void createExport(format)}>{exporting === format ? '生成中…' : format.toUpperCase()}</button>)}</div></section></div><section className="content-card export-history"><h2>导出记录</h2>{exports.length ? <div className="export-list">{exports.map((job) => <div key={job.id}><span className={`status ${job.status}`}>{job.status === 'succeeded' ? '已生成' : job.status === 'failed' ? '失败' : `${job.progress}%`}</span><b>{job.manifest?.filename || job.output_format.toUpperCase()}</b><small>{job.checksum ? `校验值 ${job.checksum.slice(0, 12)}…` : job.error_message || ''}</small>{job.status === 'succeeded' && <a className="secondary" href={`/api/v1/writing/exports/${job.id}/download`}>下载</a>}</div>)}</div> : <div className="empty-mini">完成审校后生成的文件会保留版本、模板和校验记录。</div>}</section></div>;
 }
 
-function AssistantPanel({ tab, project, document, facts, plans, computations, onInsert, onError }: { tab: string; project: Project; document: WritingDocument | null; facts: Fact[]; plans: AlternativePlan[]; computations: ComputationRun[]; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
-  if (tab === 'evidence') return <EvidencePanel project={project} document={document} onInsert={onInsert} onError={onError} />;
-  if (tab === 'calculation') return <CalculationPanel project={project} document={document} facts={facts} plans={plans} computations={computations} onInsert={onInsert} onError={onError} />;
+function AssistantPanel({ tab, project, document, facts, plans, computations, selectedBinding, onInsert, onError }: { tab: string; project: Project; document: WritingDocument | null; facts: Fact[]; plans: AlternativePlan[]; computations: ComputationRun[]; selectedBinding: Record<string, unknown> | null; onInsert: (node: EditorInsertion) => void; onError: (message: string) => void }) {
+  if (tab === 'evidence') return <EvidencePanel project={project} document={document} selectedBinding={selectedBinding} onInsert={onInsert} onError={onError} />;
+  if (tab === 'calculation') return <CalculationPanel project={project} document={document} facts={facts} plans={plans} computations={computations} selectedBinding={selectedBinding} onInsert={onInsert} onError={onError} />;
   if (tab === 'review') return <div className="assistant-content"><h3>审校问题</h3><div className="empty-mini">执行审校后按严重程度列出事实、引用、结构和表述问题。</div></div>;
   return <WritingAssistant project={project} document={document} onInsert={onInsert} onError={onError} />;
 }
 
-function CalculationPanel({ project, document, facts, plans, computations, onInsert, onError }: { project: Project; document: WritingDocument | null; facts: Fact[]; plans: AlternativePlan[]; computations: ComputationRun[]; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
+function CalculationPanel({ project, document, facts, plans, computations, selectedBinding, onInsert, onError }: { project: Project; document: WritingDocument | null; facts: Fact[]; plans: AlternativePlan[]; computations: ComputationRun[]; selectedBinding: Record<string, unknown> | null; onInsert: (node: EditorInsertion) => void; onError: (message: string) => void }) {
   const [inserting, setInserting] = useState('');
   const latest = new Map<string, ComputationRun>();
   computations.forEach((item) => {
@@ -363,7 +407,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
     setInserting(run.id);
     const label = run.result.output_fact?.label || '确定性测算';
     const unit = run.result.output_fact?.unit || '';
-    const block: PlateNode = { id: createClientId(), type: 'computed_metric', formula: run.result.operation, freshness_status: 'current', children: [{ text: `${label}：${run.result.value}${unit}` }] };
+    const block: PlateNode = { id: createClientId(), type: 'computed_metric', formula: run.result.operation, computation_run_id: run.id, dependencies: run.result.dependencies || {}, evidence_ids: run.input_fact_ids, freshness_status: 'current', children: [{ text: `${label}：${run.result.value}${unit}` }] };
     try {
       await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'computation', source_id: run.id, computation_run_id: run.id, evidence_ids: run.input_fact_ids, content_hash: await sha256(block), block_content: block, verification_status: 'verified', freshness_status: 'current', metadata: { formula: run.result.operation, dependencies: run.result.dependencies || {}, project_id: project.id } } });
       onInsert(block);
@@ -374,7 +418,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
     if (!document || inserting) return;
     setInserting(plan.id);
     const route = plan.result.route;
-    const block: PlateNode = { id: createClientId(), type: 'alternative_plan', freshness_status: 'current', children: [{ text: `${plan.name}：${route?.path?.join(' → ') || '无路线'}，预计 ${route?.minutes ?? '—'} 分钟，路线风险 ${route?.risk ?? '—'}。` }] };
+    const block: PlateNode = { id: createClientId(), type: 'alternative_plan', source_id: plan.id, plan_key: plan.plan_key, freshness_status: 'current', children: [{ text: `${plan.name}：${route?.path?.join(' → ') || '无路线'}，预计 ${route?.minutes ?? '—'} 分钟，路线风险 ${route?.risk ?? '—'}。` }] };
     try {
       await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'mcp_tool', source_id: plan.id, evidence_ids: [], content_hash: await sha256(block), block_content: block, verification_status: plan.status === 'selected' ? 'verified' : 'unverified', freshness_status: 'current', metadata: { plan_key: plan.plan_key, project_id: project.id } } });
       onInsert(block);
@@ -384,7 +428,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
   const insertInference = async (fact: Fact) => {
     if (!document || inserting || fact.verification_status !== 'verified' || fact.freshness_status !== 'current') return;
     setInserting(fact.id);
-    const block: PlateNode = { id: createClientId(), type: 'inference_conclusion', freshness_status: 'current', children: [{ text: `${fact.label}：${formatValue(fact.value)}` }] };
+    const block: PlateNode = { id: createClientId(), type: 'inference_conclusion', fact_id: fact.id, source_id: fact.source_id, source_version: fact.source_version, source_locator: fact.source_locator || {}, freshness_status: 'current', children: [{ text: `${fact.label}：${formatValue(fact.value)}` }] };
     const evidence = Array.isArray(fact.source_locator?.evidence) ? fact.source_locator.evidence : [];
     const evidenceIds = evidence.map((item) => String((item as Record<string, unknown>).source_fact_id || '')).filter(Boolean);
     try {
@@ -395,10 +439,10 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
   };
   const selected = plans.find((item) => item.status === 'selected');
   const inferences = facts.filter((item) => item.fact_type === 'semantica_inference' && item.verification_status === 'verified' && item.freshness_status === 'current');
-  return <div className="assistant-content"><h3>计算与推演</h3><p>已核验事实 {facts.filter((item) => item.verification_status === 'verified').length} 条；只有真实运行且已确认的结果可以插入正文。</p>{inferences.length > 0 && <div className="calculation-list inference-list">{inferences.map((fact) => <article key={fact.id}><div><b>{fact.label}</b><strong>{formatValue(fact.value)}</strong></div><small>规则推演 · 已人工确认 · 可追溯前提</small><button type="button" disabled={!document || !!inserting} onClick={() => void insertInference(fact)}>{inserting === fact.id ? '插入中…' : '插入推演块'}</button></article>)}</div>}<div className="calculation-list">{Array.from(latest.values()).map((run) => <article key={run.id}><div><b>{run.result.output_fact?.label || run.result.operation}</b><strong>{run.result.value} {run.result.output_fact?.unit || ''}</strong></div><small>{Object.entries(run.result.dependencies || {}).map(([name, key]) => `${name}←${key}`).join('；')}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insertMetric(run)}>{inserting === run.id ? '插入中…' : '插入测算块'}</button></article>)}</div>{selected && <div className="selected-plan-mini"><span className="eyebrow">已选方案</span><b>{selected.name}</b><p>{selected.result.route?.path?.join(' → ')}</p><button type="button" disabled={!document || !!inserting} onClick={() => void insertPlan(selected)}>{inserting === selected.id ? '插入中…' : '插入方案块'}</button></div>}{!inferences.length && !latest.size && <div className="empty-mini">先在“推演工作台”运行并确认规则推演或确定性计算，再将结果作为可信块插入正文。</div>}</div>;
+  return <div className="assistant-content"><h3>计算与推演</h3>{selectedBinding && String(selectedBinding.type) !== 'knowledge_citation' && <BindingInspector binding={selectedBinding} />}<p>已核验事实 {facts.filter((item) => item.verification_status === 'verified').length} 条；只有真实运行且已确认的结果可以插入正文。</p>{inferences.length > 0 && <div className="calculation-list inference-list">{inferences.map((fact) => <article key={fact.id}><div><b>{fact.label}</b><strong>{formatValue(fact.value)}</strong></div><small>规则推演 · 已人工确认 · 可追溯前提</small><button type="button" disabled={!document || !!inserting} onClick={() => void insertInference(fact)}>{inserting === fact.id ? '插入中…' : '插入推演块'}</button></article>)}</div>}<div className="calculation-list">{Array.from(latest.values()).map((run) => <article key={run.id}><div><b>{run.result.output_fact?.label || run.result.operation}</b><strong>{run.result.value} {run.result.output_fact?.unit || ''}</strong></div><small>{Object.entries(run.result.dependencies || {}).map(([name, key]) => `${name}←${key}`).join('；')}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insertMetric(run)}>{inserting === run.id ? '插入中…' : '插入测算块'}</button></article>)}</div>{selected && <div className="selected-plan-mini"><span className="eyebrow">已选方案</span><b>{selected.name}</b><p>{selected.result.route?.path?.join(' → ')}</p><button type="button" disabled={!document || !!inserting} onClick={() => void insertPlan(selected)}>{inserting === selected.id ? '插入中…' : '插入方案块'}</button></div>}{!inferences.length && !latest.size && <div className="empty-mini">先在“推演工作台”运行并确认规则推演或确定性计算，再将结果作为可信块插入正文。</div>}</div>;
 }
 
-function WritingAssistant({ project, document, onInsert, onError }: { project: Project; document: WritingDocument | null; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
+function WritingAssistant({ project, document, onInsert, onError }: { project: Project; document: WritingDocument | null; onInsert: (node: EditorInsertion) => void; onError: (message: string) => void }) {
   const [session, setSession] = useState<WritingAgentSession | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -407,6 +451,7 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
   const [stage, setStage] = useState('等待指令');
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [insertingSuggestion, setInsertingSuggestion] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const deltaBatchRef = useRef<ReturnType<typeof createFrameDeltaBuffer> | null>(null);
   if (!deltaBatchRef.current) {
@@ -545,18 +590,68 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
   };
 
   const latest = [...messages].reverse().find((item) => item.role === 'assistant' && item.content.trim());
-  const insertSuggestion = () => {
-    if (!latest) return;
-    const suggestionId = createClientId();
-    onInsert({
-      id: createClientId(),
-      type: 'p',
-      suggestion: { id: suggestionId, type: 'insert', userId: 'miaobi-agent', createdAt: Date.now() },
-      children: [{ text: latest.content }],
-    });
+  const insertSuggestion = async () => {
+    if (!latest || !document || insertingSuggestion) return;
+    setInsertingSuggestion(true);
+    try {
+      const citations = new Map((latest.citations || []).map((item) => [item.citation_number, item]));
+      const referenced: PlateNode[] = [];
+      const paragraphs = latest.content.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
+      const nodes = paragraphs.map((paragraph) => {
+        const children: PlateNode[] = [];
+        let cursor = 0;
+        for (const match of paragraph.matchAll(/\[(\d+)\]/g)) {
+          const index = match.index ?? 0;
+          if (index > cursor) children.push({ text: paragraph.slice(cursor, index) });
+          const citationNumber = Number(match[1]);
+          const citation = citations.get(citationNumber);
+          if (citation?.snapshot) {
+            const item = citation.snapshot;
+            const reference: PlateNode = {
+              id: createClientId(), type: 'knowledge_citation', citation_label: `[${citationNumber}]`,
+              source_title: item.title, chunk_id: citation.chunk_id, query_run_id: citation.query_run_id,
+              source_id: item.document_id, source_version: item.version_id,
+              source_locator: { page_number: item.page_number, structural_path: item.structural_path },
+              freshness_status: 'current', children: [{ text: '' }],
+            };
+            children.push(reference);
+            referenced.push(reference);
+          } else {
+            children.push({ text: match[0] });
+          }
+          cursor = index + match[0].length;
+        }
+        if (cursor < paragraph.length) children.push({ text: paragraph.slice(cursor) });
+        if (!children.length) children.push({ text: paragraph });
+        return {
+          id: createClientId(), type: 'p',
+          suggestion: { id: createClientId(), type: 'insert', userId: 'miaobi-agent', createdAt: Date.now() },
+          children,
+        } as PlateNode;
+      });
+      for (const reference of referenced) {
+        await api(`/writing/documents/${document.id}/bindings`, {
+          method: 'POST',
+          body: {
+            block_id: reference.id, block_type: reference.type, source_type: 'policy_document',
+            source_id: reference.source_id, source_version: reference.source_version,
+            knowledge_product_release_id: project.knowledge_product_release_id,
+            chunk_id: reference.chunk_id, query_run_id: reference.query_run_id,
+            content_hash: await sha256(reference), block_content: reference,
+            verification_status: 'verified', freshness_status: 'current',
+            metadata: { inserted_from: 'writing_agent', project_id: project.id },
+          },
+        });
+      }
+      onInsert(nodes);
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : '插入带依据的修订建议失败');
+    } finally {
+      setInsertingSuggestion(false);
+    }
   };
 
-  return <div className="assistant-content writing-agent"><div className="assistant-title"><h3>妙笔助手</h3><div className="agent-title-actions"><span className={running ? 'agent-status running' : 'agent-status'}>{stage}{(running || elapsedSeconds > 0) ? ` · ${elapsedSeconds} 秒` : ''}</span><button type="button" className="text-button" disabled={running} onClick={() => void createSession(true).catch((reason) => onError(reason instanceof Error ? reason.message : '新建对话失败'))}>新对话</button></div></div>{events.length > 0 && <div className="agent-timeline" aria-label="Agent 可核验执行过程">{events.map((item, index) => <div key={`${item.sequence || index}-${item.event_type}`}><i className={['turn_completed','tool_finished','retrieval_ranked'].includes(item.event_type) ? 'done' : ''} /><span>{agentEventLabel(item)}</span><small>{eventDuration(item)}</small></div>)}</div>}<div className="agent-messages">{messages.filter((item) => item.content || item.status !== 'completed').map((item, index) => <article key={`${item.id}-${index}`} className={item.role}><b>{item.role === 'user' ? '我' : '妙笔'}</b><p>{item.content || (item.status === 'generating' ? '正在组织内容…' : item.error_message || '未生成内容')}</p>{item.status !== 'completed' && <small>{item.status === 'generating' ? '生成中' : item.status === 'cancelled' ? '已停止' : '失败'}</small>}</article>)}{!messages.length && <div className="empty-mini">助手将调用真实知识、推演和计算工具，输出只作为待确认的修订建议。</div>}</div>{latest && !running && <button type="button" className="insert-suggestion" onClick={insertSuggestion}>插入为修订建议</button>}<div className="agent-input"><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="说明希望撰写或修改的内容" /><button type="button" disabled={!session || (!running && !input.trim())} onClick={() => running ? void stop() : void send()}>{running ? <Square size={16} /> : <Send size={16} />}{running ? '停止' : '发送'}</button></div></div>;
+  return <div className="assistant-content writing-agent"><div className="assistant-title"><h3>妙笔助手</h3><div className="agent-title-actions"><span className={running ? 'agent-status running' : 'agent-status'}>{stage}{(running || elapsedSeconds > 0) ? ` · ${elapsedSeconds} 秒` : ''}</span><button type="button" className="text-button" disabled={running} onClick={() => void createSession(true).catch((reason) => onError(reason instanceof Error ? reason.message : '新建对话失败'))}>新对话</button></div></div>{events.length > 0 && <div className="agent-timeline" aria-label="Agent 可核验执行过程">{events.map((item, index) => <div key={`${item.sequence || index}-${item.event_type}`}><i className={['turn_completed','tool_finished','retrieval_ranked'].includes(item.event_type) ? 'done' : ''} /><span>{agentEventLabel(item)}</span><small>{eventDuration(item)}</small></div>)}</div>}<div className="agent-messages">{messages.filter((item) => item.content || item.status !== 'completed').map((item, index) => <article key={`${item.id}-${index}`} className={item.role}><b>{item.role === 'user' ? '我' : '妙笔'}</b><p>{item.content || (item.status === 'generating' ? '正在组织内容…' : item.error_message || '未生成内容')}</p>{item.status !== 'completed' && <small>{item.status === 'generating' ? '生成中' : item.status === 'cancelled' ? '已停止' : '失败'}</small>}</article>)}{!messages.length && <div className="empty-mini">助手将调用真实知识、推演和计算工具，输出只作为待确认的修订建议。</div>}</div>{latest && !running && <button type="button" className="insert-suggestion" disabled={!document || insertingSuggestion} onClick={() => void insertSuggestion()}>{insertingSuggestion ? '正在绑定依据…' : '插入为修订建议'}</button>}<div className="agent-input"><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder="说明希望撰写或修改的内容" /><button type="button" disabled={!session || (!running && !input.trim())} onClick={() => running ? void stop() : void send()}>{running ? <Square size={16} /> : <Send size={16} />}{running ? '停止' : '发送'}</button></div></div>;
 }
 
 function visibleAgentEvent(event: string) {
@@ -585,11 +680,23 @@ function writingStage(tool: string) {
   return ({ writing_get_project_context: '正在读取任务资料', writing_get_document_outline: '正在检查文稿目录', writing_create_outline_draft: '正在生成目录草稿', writing_generate_section_draft: '正在组织章节依据', writing_bind_evidence: '正在绑定来源', writing_validate_document: '正在检查文稿', writing_get_stale_blocks: '正在检查过期内容', writing_recompute_impacts: '正在分析变更影响', writing_compare_alternative_plans: '正在比较备选方案', writing_prepare_export: '正在准备导出', knowledge_search: '正在检索知识', knowledge_reason: '正在执行规则推演', structured_execute_query: '正在查询业务数据' } as Record<string,string>)[tool] || '正在执行知识工具';
 }
 
-function EvidencePanel({ project, document, onInsert, onError }: { project: Project; document: WritingDocument | null; onInsert: (node: PlateNode) => void; onError: (message: string) => void }) {
+function EvidencePanel({ project, document, selectedBinding, onInsert, onError }: { project: Project; document: WritingDocument | null; selectedBinding: Record<string, unknown> | null; onInsert: (node: EditorInsertion) => void; onError: (message: string) => void }) {
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [result, setResult] = useState<KnowledgeSearchResponse | null>(null);
   const [inserting, setInserting] = useState('');
+  const [fragment, setFragment] = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    setFragment(null);
+    if (!selectedBinding || String(selectedBinding.type) !== 'knowledge_citation') return;
+    const chunkId = String(selectedBinding.chunk_id || '');
+    const queryRunId = String(selectedBinding.query_run_id || '');
+    if (!chunkId || !queryRunId) return;
+    api<Record<string, unknown>>(`/writing/projects/${project.id}/knowledge/fragments/${chunkId}?query_run_id=${encodeURIComponent(queryRunId)}`)
+      .then(setFragment)
+      .catch((reason) => onError(reason instanceof Error ? reason.message : '来源片段加载失败'));
+  }, [project.id, selectedBinding]);
 
   const search = async () => {
     if (!query.trim() || searching) return;
@@ -607,28 +714,34 @@ function EvidencePanel({ project, document, onInsert, onError }: { project: Proj
     if (!document || !result || inserting) return;
     setInserting(item.chunk_id);
     const evidenceText = cleanEvidenceText(item.snippet || item.text || '');
-    const block: PlateNode = {
+    const reference: PlateNode = {
       id: createClientId(),
       type: 'knowledge_citation',
+      citation_label: `[${item.rank}]`,
       source_title: item.title,
+      chunk_id: item.chunk_id,
+      query_run_id: result.query_id,
+      source_id: item.document_id,
+      source_version: item.version_id,
       source_locator: { page_number: item.page_number, structural_path: item.structural_path },
       freshness_status: 'current',
-      children: [{ text: `${item.title}${item.page_number ? `（第 ${item.page_number} 页）` : ''}：${evidenceText}` }],
+      children: [{ text: '' }],
     };
+    const block: PlateNode = { id: createClientId(), type: 'p', children: [{ text: evidenceText ? `${evidenceText} ` : '' }, reference] };
     try {
       await api(`/writing/documents/${document.id}/bindings`, {
         method: 'POST',
         body: {
-          block_id: block.id,
-          block_type: block.type,
+          block_id: reference.id,
+          block_type: reference.type,
           source_type: 'policy_document',
           source_id: item.document_id,
           source_version: item.version_id,
           knowledge_product_release_id: project.knowledge_product_release_id,
           chunk_id: item.chunk_id,
           query_run_id: result.query_id,
-          content_hash: await sha256(block),
-          block_content: block,
+          content_hash: await sha256(reference),
+          block_content: reference,
           verification_status: 'verified',
           freshness_status: 'current',
           metadata: { rank: item.rank, channels: item.channels, fused_score: item.fused_score },
@@ -639,7 +752,15 @@ function EvidencePanel({ project, document, onInsert, onError }: { project: Proj
     finally { setInserting(''); }
   };
 
-  return <div className="assistant-content"><h3>引用依据</h3><p>检索范围固定为当前方案任务锁定的知识产品版本。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{cleanEvidenceText(item.snippet || item.text || '无摘要')}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前锁定版本中没有检索到依据。</div>}</div></div>;
+  return <div className="assistant-content"><h3>引用依据</h3>{selectedBinding && String(selectedBinding.type) === 'knowledge_citation' && <BindingInspector binding={selectedBinding} detail={fragment} />}<p>检索范围固定为当前方案任务锁定的知识产品版本。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{cleanEvidenceText(item.snippet || item.text || '无摘要')}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前锁定版本中没有检索到依据。</div>}</div></div>;
+}
+
+function BindingInspector({ binding, detail }: { binding: Record<string, unknown>; detail?: Record<string, unknown> | null }) {
+  const children = Array.isArray(binding.children) ? binding.children as Array<Record<string, unknown>> : [];
+  const text = children.map((item) => String(item.text || '')).join('');
+  const locator = (detail?.source_span || binding.source_locator || {}) as Record<string, unknown>;
+  const evidenceIds = Array.isArray(binding.evidence_ids) ? binding.evidence_ids : [];
+  return <section className="binding-inspector" aria-label="当前正文依据"><div className="binding-inspector-title"><span>当前正文标记</span><b>{String(binding.label || '可信内容')}</b></div><p>{String(detail?.text || text || '正在读取完整依据…')}</p><dl><div><dt>来源</dt><dd>{String(detail?.document_title || binding.source_title || sourceLabel(String(binding.type || '')))}</dd></div>{Boolean(detail?.page_number || locator.page_number) && <div><dt>位置</dt><dd>第 {String(detail?.page_number || locator.page_number)} 页</dd></div>}{Boolean(detail?.structural_path || locator.structural_path) && <div><dt>结构</dt><dd>{String(detail?.structural_path || locator.structural_path)}</dd></div>}{Boolean(binding.formula) && <div><dt>公式</dt><dd>{String(binding.formula)}</dd></div>}{Boolean(binding.source_version) && <div><dt>版本</dt><dd>{String(binding.source_version)}</dd></div>}<div><dt>状态</dt><dd>{binding.freshness_status === 'current' ? '依据有效' : '需要核验或更新'}</dd></div>{evidenceIds.length > 0 && <div><dt>前提</dt><dd>{evidenceIds.length} 条已绑定事实</dd></div>}</dl></section>;
 }
 
 function Outline({ content }: { content: Array<Record<string, unknown>> }) {

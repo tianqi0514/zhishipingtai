@@ -62,8 +62,13 @@ from packages.platform.models import (
     Chunk,
     DecisionGate,
     DecisionRecord,
+    GraphRelease,
+    IndexRelease,
+    KnowledgeProduct,
     KnowledgeProductRelease,
     KnowledgeProductReleaseItem,
+    KnowledgeRelease,
+    KnowledgeSpace,
     Document,
     DocumentVersion,
     ExportJob,
@@ -660,6 +665,70 @@ def get_project(project_id: str, user: User = Depends(get_current_user), db: Ses
         db.scalar(select(func.count()).select_from(DecisionGate).where(DecisionGate.project_id == row.id, DecisionGate.required.is_(True), DecisionGate.status != "confirmed", _active(DecisionGate))) or 0
     )
     return data
+
+
+@router.get("/projects/{project_id}/knowledge-context")
+def get_project_knowledge_context(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Expose the immutable Zhiku release behind a writing task in business terms."""
+    project = _project(db, project_id, user)
+    release = _release_for_user(db, project.knowledge_product_release_id, user)
+    product = _tenant_row(db, KnowledgeProduct, release.product_id, user.tenant_id, "知识产品")
+    spaces: list[dict[str, Any]] = []
+    for item in db.scalars(
+        select(KnowledgeProductReleaseItem).where(
+            KnowledgeProductReleaseItem.product_release_id == release.id,
+            _active(KnowledgeProductReleaseItem),
+        ).order_by(KnowledgeProductReleaseItem.created_at)
+    ):
+        space = _tenant_row(db, KnowledgeSpace, item.space_id, user.tenant_id, "知识空间")
+        knowledge_release = _tenant_row(db, KnowledgeRelease, item.knowledge_release_id, user.tenant_id, "知识版本")
+        graph_release = db.get(GraphRelease, knowledge_release.graph_release_id)
+        index_release = db.get(IndexRelease, knowledge_release.index_release_id)
+        spaces.append(
+            {
+                "id": space.id,
+                "name": space.name,
+                "code": space.code,
+                "knowledge_release_id": knowledge_release.id,
+                "knowledge_release_number": knowledge_release.release_number,
+                "published_at": knowledge_release.published_at,
+                "status": knowledge_release.status,
+                "document_count": index_release.document_count if index_release else 0,
+                "chunk_count": index_release.chunk_count if index_release else 0,
+                "entity_count": graph_release.entity_count if graph_release else 0,
+                "fact_count": graph_release.fact_count if graph_release else 0,
+                "graph_available": bool(graph_release and graph_release.status == "published"),
+                "vector_available": bool(index_release and index_release.status == "published"),
+            }
+        )
+    latest_release_id = db.scalar(
+        select(KnowledgeProductRelease.id).where(
+            KnowledgeProductRelease.product_id == product.id,
+            KnowledgeProductRelease.status == "published",
+            _active(KnowledgeProductRelease),
+        ).order_by(KnowledgeProductRelease.version.desc()).limit(1)
+    )
+    return {
+        "product": {"id": product.id, "name": product.name, "code": product.code},
+        "release": {
+            "id": release.id,
+            "version": release.version,
+            "checksum": release.checksum,
+            "published_at": release.published_at,
+            "status": release.status,
+            "is_latest": latest_release_id == release.id,
+        },
+        "spaces": spaces,
+        "snapshot_locked": True,
+        "document_count": sum(int(item["document_count"]) for item in spaces),
+        "chunk_count": sum(int(item["chunk_count"]) for item in spaces),
+        "entity_count": sum(int(item["entity_count"]) for item in spaces),
+        "fact_count": sum(int(item["fact_count"]) for item in spaces),
+    }
 
 
 @router.post("/projects/{project_id}/knowledge/search")

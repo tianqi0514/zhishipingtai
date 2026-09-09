@@ -188,6 +188,12 @@ async function refreshLookups({force=false}={}){
   [state.spaces,state.orgs,state.roles,state.policies,state.mediaPolicies,state.users]=await Promise.all([
     cachedApi('/spaces',{force}),cachedApi('/org-units',{force}),cachedApi('/roles',{force}),cachedApi('/parser-policies',{force}),cachedApi('/media-policies',{force}),state.user.is_admin?cachedApi('/users',{force}):Promise.resolve([state.user]),
   ]);
+  const pendingSpace=localStorage.getItem('chuanshen.pendingSpace');
+  if(pendingSpace&&state.spaces.some(x=>x.id===pendingSpace&&x.enabled!==false)){
+    state.activeSpaceId=pendingSpace;
+    localStorage.setItem(spaceStorageKey(),pendingSpace);
+    localStorage.removeItem('chuanshen.pendingSpace');
+  }
   ensureActiveSpace();renderSpaceContext();
 }
 $('#content').addEventListener('click',event=>{

@@ -61,11 +61,18 @@ Docker Compose 共启动 14 个生产服务：API、Worker、Scheduler、Agent R
 
 妙笔是独立的 React + TypeScript + Plate 完整写作应用，本机入口为 <http://localhost:8080/miaobi/>，当前内网验收入口为 <http://10.5.113.232:9002/miaobi/>。它使用不可变知识产品 Release、核验事实、确定性计算、Semantica 规则推演和 DeepSeek Harness 多步骤 Agent 生成可审校、可追溯、可协同和可正式导出的专业方案，不把普通模型文本包装成权威事实或计算结果。
 
+编辑器以锁定的 Plate commit `8f65d77f8b4709833436e63661e4d061f709258f` 为能力基线，包含真正的 `/` 指令菜单、完整块类型、专业表格、浮动格式栏、评论、修订、协同和文档导入导出。正文中的知识、测算和推演只显示轻量标记，完整依据统一在右侧核验；任务概览明确展示妙笔当前锁定的知识产品 Release 及其文档、切片、向量和图谱状态。
+
 地震应急处置是当前完成深度技术验收的主场景；洪涝、火灾、地质灾害、雨雪冰冻、疫情和反恐维稳均有独立场景契约及确定性技术 Fixture，但在客户确认规则、阈值和正式模板前明确标记“模板待业务确认”。准备与验证命令：
 
 ```bash
 docker compose exec -T api python /app/scripts/miaobi/prepare_earthquake_demo.py
 docker compose exec -T api python /app/scripts/miaobi/verify_earthquake_demo.py
+
+# 从真实上传开始，连续执行三轮 DSH 写作并生成可回溯的平台改进清单
+docker compose exec -T api sh -lc \
+  'MIAOBI_DEMO_URL=http://127.0.0.1:8080 MIAOBI_DEMO_PASSWORD="$BOOTSTRAP_ADMIN_PASSWORD" \
+   python /app/scripts/miaobi/acceptance_upload_to_report.py'
 
 # 六类扩展场景通过真实 API 执行核验事实、计算、可信文稿、审校和 JSON 导出
 docker cp tests/e2e/miaobi_multiscenario_live.py semantica-enterprise-api-1:/tmp/
@@ -162,6 +169,8 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [妙笔用户流程](docs/miaobi/MIAOBI_USER_FLOW.md)
 - [妙笔技术架构](docs/miaobi/MIAOBI_TECHNICAL_ARCHITECTURE.md)
 - [Plate 完整版集成](docs/miaobi/MIAOBI_PLATE_INTEGRATION.md)
+- [完整 Plate 编辑器重构](docs/miaobi/FULL_PLATE_EDITOR_REDESIGN.md)
+- [从上传到报告质量验收](docs/miaobi/MIAOBI_UPLOAD_TO_REPORT_ACCEPTANCE.md)
 - [妙笔 API](docs/miaobi/MIAOBI_API.md)
 - [Semantica 推演集成](docs/miaobi/MIAOBI_SEMANTICA_INTEGRATION.md)
 - [DeepSeek Harness 写作 Agent](docs/miaobi/MIAOBI_DSH_INTEGRATION.md)
