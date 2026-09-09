@@ -15,13 +15,17 @@ vi.mock('../src/api', () => ({
 import { MiaobiEditor, EditorKit, normalizeCollaborativeValue } from '../src/editor/MiaobiEditor';
 import { lockedTrustedBlockTypes, trustedBlockTypes } from '../src/editor/plugins/trusted-blocks';
 import { cleanEvidenceText } from '../src/evidence';
+import { canonicalJson, sha256 } from '../src/hash';
 import { createFrameDeltaBuffer } from '../src/streaming';
-import { canonicalJson } from '../src/App';
 
 describe('妙笔 Plate 编辑器', () => {
   it('可信块使用与后端一致的递归键排序 JSON', () => {
     expect(canonicalJson({ z: 1, children: [{ text: '震级', bold: true }], a: '中文' }))
       .toBe('{"a":"中文","children":[{"bold":true,"text":"震级"}],"z":1}');
+  });
+  it('在没有 Web Crypto 的内网 HTTP 页面仍生成服务端兼容 SHA-256', async () => {
+    const value = { z: 1, children: [{ text: '震级', bold: true }], a: '中文' };
+    expect(await sha256(value)).toBe('3ca7a15a8f27087738aa69ee1a0bf6c65a3d6f19dce484778676a77ef9d6aa3b');
   });
   it('清理检索片段中的 Markdown 与 HTML 实体并安全截断', () => {
     const value = cleanEvidenceText('制度.md：# 地震预案\n&gt; **响应要求** [来源](https://example.test) ' + '处置'.repeat(300));

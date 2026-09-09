@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { api, ApiError } from './api';
 import { cleanEvidenceText } from './evidence';
+import { sha256 } from './hash';
 import { createFrameDeltaBuffer } from './streaming';
 import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
 
@@ -638,20 +639,6 @@ function EvidencePanel({ project, document, onInsert, onError }: { project: Proj
   };
 
   return <div className="assistant-content"><h3>引用依据</h3><p>检索范围固定为当前方案任务锁定的知识产品版本。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{cleanEvidenceText(item.snippet || item.text || '无摘要')}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前锁定版本中没有检索到依据。</div>}</div></div>;
-}
-
-export function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value as Record<string, unknown>).filter((key) => (value as Record<string, unknown>)[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
-  }
-  return value === undefined ? 'null' : JSON.stringify(value);
-}
-
-async function sha256(value: unknown) {
-  const bytes = new TextEncoder().encode(canonicalJson(value));
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest)).map((item) => item.toString(16).padStart(2, '0')).join('');
 }
 
 function Outline({ content }: { content: Array<Record<string, unknown>> }) {
