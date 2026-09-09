@@ -32,14 +32,18 @@ class DemoClient:
     def __init__(self) -> None:
         base_url = os.getenv("MIAOBI_DEMO_URL", "http://127.0.0.1:8080").rstrip("/")
         username = os.getenv("MIAOBI_DEMO_USERNAME", "admin")
+        access_token = os.getenv("MIAOBI_DEMO_TOKEN", "").strip()
         password = (
             os.getenv("MIAOBI_DEMO_PASSWORD")
             or os.getenv("BOOTSTRAP_ADMIN_PASSWORD")
             or _dotenv_value("BOOTSTRAP_ADMIN_PASSWORD")
         )
-        if not password:
-            raise RuntimeError("请通过 MIAOBI_DEMO_PASSWORD 或 .env 配置演示管理员密码")
+        if not password and not access_token:
+            raise RuntimeError("请通过 MIAOBI_DEMO_TOKEN、MIAOBI_DEMO_PASSWORD 或 .env 配置演示鉴权信息")
         self.client = httpx.Client(base_url=f"{base_url}/api/v1", timeout=httpx.Timeout(30, read=900))
+        if access_token:
+            self.client.headers["Authorization"] = f"Bearer {access_token}"
+            return
         response = self.client.post("/auth/login", json={"username": username, "password": password})
         self._raise(response)
 
