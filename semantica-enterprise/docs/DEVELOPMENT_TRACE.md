@@ -375,3 +375,13 @@ Python 回归在该镜像 Python 3.13.15 内只读挂载当前源码执行，共
 最终本机证据：Python 单元 530/530、Semantica 合约 19/19、DeepSeek Harness 合约 20/20、结构化实库 11/11、Plate 组件 6/6、协同安全 2/2；10 个并发工作区全部成功，100 块文稿保存审校 31 ms，1000 个流式增量按动画帧批处理。完整 Plate 编辑器延迟加载后，初始应用包为 247.13 kB（gzip 78.62 kB），编辑器块为 1,154.02 kB（gzip 341.93 kB）。不删 Volume 重启后项目、知识、文稿、DSH Session、索引和图谱均恢复；本机浏览器三档视口和 Console 复核通过。
 
 该阶段仍严格区分生产候选与业务验收：地震完成客户材料驱动的深度技术验收；其他六类待客户专家确认规则和正式参数；真实商业 GIS、实时交通、医院和资源系统仍需外部联调；单实例协同需要共享持久化后才能横向扩展。最终候选 Tag 仅在 GitHub 推送和内网服务器独立部署验收后创建。
+
+### 2026-09-09 妙笔内网生产候选部署与最终恢复验收
+
+将 `codex/miaobi-production` 部署到 `10.5.113.232` 的 `/home/tianqi/zhishipingtai`，API、Worker、Scheduler、DeepSeek Harness Runtime、MCP、Hocuspocus、SenseVoice、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant 和 FalkorDB 共 14 个服务均在服务器运行并通过健康检查。服务器为 x86_64、32 vCPU、251 GiB 内存、约 792 GiB 可用磁盘；没有 NVIDIA GPU，因此没有在该主机勉强部署 Qwen3.8-27B-NVFP4。
+
+真实浏览器在内网 HTTP 地址首次进入 Plate 编辑器时发现 Plate Yjs 53.2 的确定性初始状态摘要直接调用 `crypto.subtle.digest`，而浏览器在非 Secure Context 不提供该 API。修复限定在应用启动兼容层：只补齐 Web Crypto SHA-256 摘要，不修改 Plate 核心、不替换随机数、不降低 JWT、服务端可信哈希或权限边界。新增组件回归后，Plate 9/9、TypeScript 与生产构建通过；远端页面显示“协同已同步”，Console 为 0。
+
+随后在不删除 Volume 的前提下完整停止并重启远端服务。严格预检再次得到 Ground Truth 14/14、三套方案、Semantica Datalog、15 条图谱事实和全文/向量/图谱三路检索正常。全新浏览器标签恢复文稿、已插入修订、DSH 历史消息与事件；在同一 Session 继续追问时，Agent 正确结合上一轮说明搜救人员缺口为 500−320=180，并产生新的真实工具事件。最终代码层回归为 Python 530/530、Semantica 合约 19/19、DSH 20/20、结构化实库 11/11、Plate 9/9、协同安全 2/2、5 客户端协同通过。
+
+最后正常停止本机 16 个项目和结构化测试容器，未删除任何 Volume。本机 `127.0.0.1:8080` 随即不可访问，而内网 `10.5.113.232:9002/health/ready` 继续返回 HTTP 200；原远端浏览器标签中的 Plate 编辑器、协同连接和历史问答均保持可用，Console 仍为 0，完成“不依赖本机”的部署边界验证。

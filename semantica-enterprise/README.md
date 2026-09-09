@@ -55,11 +55,11 @@ scripts/deploy_server.sh check
 - 应用构建：以业务应用为中心显示上线准备度和下一步；底层提供最小权限凭据、不可变知识供给、能力场景版本、真实上线测试、反馈转人工治理和调用审计。
 - 开放能力：REST/OpenAPI、MCP Server 和 `chuanshen` CLI；三种方式都可以访问权限化知识，MCP/CLI 的结构化查询只接受激活映射和自然语言问题，仍由 FastAPI 完成 Plan/IR 校验与参数化只读执行。
 
-Docker Compose 共启动 13 个核心服务：API、Worker、Scheduler、Agent Runtime、MCP Server、本地 ASR Runtime、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB。前端只访问 FastAPI；Harness、MCP 不直接访问业务数据库或检索中间件，ASR 只开放 Docker 内网端口。
+Docker Compose 共启动 14 个生产服务：API、Worker、Scheduler、Agent Runtime、MCP Server、妙笔协同服务、本地 ASR Runtime、PostgreSQL、Redis、RabbitMQ、MinIO、OpenSearch、Qdrant、FalkorDB。前端只访问 FastAPI；Harness、MCP 不直接访问业务数据库或检索中间件，ASR 只开放 Docker 内网端口。
 
 ## 妙笔：知识约束的推演式写作
 
-妙笔是独立的 React + TypeScript + Plate 完整写作应用，入口为 <http://localhost:8080/miaobi/>。它使用不可变知识产品 Release、核验事实、确定性计算、Semantica 规则推演和 DeepSeek Harness 多步骤 Agent 生成可审校、可追溯、可协同和可正式导出的专业方案，不把普通模型文本包装成权威事实或计算结果。
+妙笔是独立的 React + TypeScript + Plate 完整写作应用，本机入口为 <http://localhost:8080/miaobi/>，当前内网验收入口为 <http://10.5.113.232:9002/miaobi/>。它使用不可变知识产品 Release、核验事实、确定性计算、Semantica 规则推演和 DeepSeek Harness 多步骤 Agent 生成可审校、可追溯、可协同和可正式导出的专业方案，不把普通模型文本包装成权威事实或计算结果。
 
 地震应急处置是当前完成深度技术验收的主场景；洪涝、火灾、地质灾害、雨雪冰冻、疫情和反恐维稳均有独立场景契约及确定性技术 Fixture，但在客户确认规则、阈值和正式模板前明确标记“模板待业务确认”。准备与验证命令：
 

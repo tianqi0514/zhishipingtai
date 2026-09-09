@@ -4,9 +4,9 @@
 
 测试分支：`codex/miaobi-production`
 
-基线提交：`784758e`
+最终功能验证提交：`2ab3477592cb3fa7d64ecd77eb530c31ed3d3a4a`
 
-应用镜像：`semantica-enterprise:0.10.0`（`sha256:88ad74cf7b99…`）
+内网应用镜像：`semantica-enterprise:0.10.0`（`sha256:3e4148adce41…`，运行用户 `app`）
 
 Plate 锁定提交：`8f65d77f8b4709833436e63661e4d061f709258f`
 
@@ -18,7 +18,7 @@ Plate 锁定提交：`8f65d77f8b4709833436e63661e4d061f709258f`
 | Semantica 合约 | 19 | 0 | 0 | 真实 DatalogReasoner、证据、预览、发布/撤回 |
 | DeepSeek Harness 合约 | 20 | 0 | 0 | Runtime、Cordis 工具、事件、取消和恢复 |
 | 结构化数据库集成 | 11 | 0 | 0 | MySQL/PostgreSQL 实库与 PostgreSQL Fact 幂等 |
-| Plate 组件 | 6 | 0 | 0 | 编辑、可信块、引用定位、1000 流式增量 |
+| Plate 组件 | 9 | 0 | 0 | 编辑、可信块、引用定位、HTTP 内网协同兼容、1000 流式增量 |
 | 协同安全 | 2 | 0 | 0 | Token、房间和权限 |
 | 六灾种 API E2E | 6 | 0 | 0 | 独立场景的完整技术链路 |
 | 地震 Ground Truth | 14 | 0 | 0 | 事实、公式、局部重算 |
@@ -54,13 +54,24 @@ Plate 锁定提交：`8f65d77f8b4709833436e63661e4d061f709258f`
 - XLSX 包含“已核验事实”“确定性计算”“备选方案”三个真实工作表。
 - GeoJSON 使用选中方案路径与项目坐标生成真实 LineString；缺失坐标时返回错误，不生成假路线。
 - 5 个协同客户端连接同一 Hocuspocus 房间并同步不同改动；服务重启后快照恢复。
+- 内网仅 HTTP 地址不提供浏览器 Secure Context；启动兼容层只补齐 Plate/Yjs 用于确定性初始状态的 SHA-256 摘要，不替代随机数、鉴权、服务端可信哈希或生产 TLS。真实浏览器在该地址已显示“协同已同步”。
+
+### 内网服务器与重启恢复
+
+- 部署地址：`http://10.5.113.232:9002/`，妙笔入口：`/miaobi/`。
+- 服务器：x86_64、32 vCPU、251 GiB 内存、879 GiB 系统盘（验收时可用约 792 GiB）。
+- 14 个 Compose 服务全部 `running/healthy`；API、Worker、Scheduler、Agent Runtime、MCP、协同、ASR 和全部中间件均位于服务器，不依赖本机。
+- 不删除 Volume 完整停止并重启服务后，严格预检仍为 `ready=true`：Ground Truth 14/14、3 套方案、15 条图谱事实、三路检索命中正常。
+- 重启后同一 DSH Session 继续追问“其中搜救人员缺口是如何计算出来的”，真实执行任务资料读取与知识检索，回答 500−320=180，并恢复上一轮消息、事件时间线和已插入修订内容。
+- 本机 16 个项目与结构化测试容器全部正常停止且未删除 Volume；本机 `8080` 已不可访问时，内网 `/health/ready` 仍返回 HTTP 200，浏览器中的 Plate、协同和历史会话继续正常工作。
+- 服务器没有 NVIDIA GPU，因此未在该主机部署 Qwen3.8-27B-NVFP4；模型推理继续调用已配置且真实可用的独立推理服务。
 
 ### 性能
 
 - 10 个并发工作区请求全部成功，中位延迟 1016 ms，P95 1040 ms。
 - 100 块文稿保存并审校 31 ms。
 - 1000 个流式 `answer_delta` 通过动画帧缓冲一次提交，避免逐 Token 重绘。
-- Plate 初始应用包 247.13 kB（gzip 78.62 kB）；完整编辑器延迟块 1,154.02 kB（gzip 341.93 kB）。
+- Plate 初始应用包 249.80 kB（gzip 80.10 kB）；完整编辑器延迟块 1,154.02 kB（gzip 341.93 kB）。
 
 ## 关键执行命令
 
@@ -80,6 +91,7 @@ docker compose exec -T -e MIAOBI_REPO_ROOT=/app \
 
 cd apps/miaobi-web && pnpm test && pnpm typecheck && pnpm build
 COLLABORATION_CLIENTS=5 node apps/miaobi-collab/tests/live-collaboration.mjs
+docker compose exec -T agent-runtime npm test
 ```
 
 管理员密码、模型密钥、数据库密码和内部服务 Token 均通过运行时环境或 Secret 注入，本报告未记录其值。
