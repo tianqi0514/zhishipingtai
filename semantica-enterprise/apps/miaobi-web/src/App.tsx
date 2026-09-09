@@ -23,6 +23,7 @@ import {
 import { api, ApiError } from './api';
 import { cleanEvidenceText } from './evidence';
 import { sha256 } from './hash';
+import { createClientId } from './ids';
 import { createFrameDeltaBuffer } from './streaming';
 import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
 
@@ -362,7 +363,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
     setInserting(run.id);
     const label = run.result.output_fact?.label || '确定性测算';
     const unit = run.result.output_fact?.unit || '';
-    const block: PlateNode = { id: crypto.randomUUID(), type: 'computed_metric', formula: run.result.operation, freshness_status: 'current', children: [{ text: `${label}：${run.result.value}${unit}` }] };
+    const block: PlateNode = { id: createClientId(), type: 'computed_metric', formula: run.result.operation, freshness_status: 'current', children: [{ text: `${label}：${run.result.value}${unit}` }] };
     try {
       await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'computation', source_id: run.id, computation_run_id: run.id, evidence_ids: run.input_fact_ids, content_hash: await sha256(block), block_content: block, verification_status: 'verified', freshness_status: 'current', metadata: { formula: run.result.operation, dependencies: run.result.dependencies || {}, project_id: project.id } } });
       onInsert(block);
@@ -373,7 +374,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
     if (!document || inserting) return;
     setInserting(plan.id);
     const route = plan.result.route;
-    const block: PlateNode = { id: crypto.randomUUID(), type: 'alternative_plan', freshness_status: 'current', children: [{ text: `${plan.name}：${route?.path?.join(' → ') || '无路线'}，预计 ${route?.minutes ?? '—'} 分钟，路线风险 ${route?.risk ?? '—'}。` }] };
+    const block: PlateNode = { id: createClientId(), type: 'alternative_plan', freshness_status: 'current', children: [{ text: `${plan.name}：${route?.path?.join(' → ') || '无路线'}，预计 ${route?.minutes ?? '—'} 分钟，路线风险 ${route?.risk ?? '—'}。` }] };
     try {
       await api(`/writing/documents/${document.id}/bindings`, { method: 'POST', body: { block_id: block.id, block_type: block.type, source_type: 'mcp_tool', source_id: plan.id, evidence_ids: [], content_hash: await sha256(block), block_content: block, verification_status: plan.status === 'selected' ? 'verified' : 'unverified', freshness_status: 'current', metadata: { plan_key: plan.plan_key, project_id: project.id } } });
       onInsert(block);
@@ -383,7 +384,7 @@ function CalculationPanel({ project, document, facts, plans, computations, onIns
   const insertInference = async (fact: Fact) => {
     if (!document || inserting || fact.verification_status !== 'verified' || fact.freshness_status !== 'current') return;
     setInserting(fact.id);
-    const block: PlateNode = { id: crypto.randomUUID(), type: 'inference_conclusion', freshness_status: 'current', children: [{ text: `${fact.label}：${formatValue(fact.value)}` }] };
+    const block: PlateNode = { id: createClientId(), type: 'inference_conclusion', freshness_status: 'current', children: [{ text: `${fact.label}：${formatValue(fact.value)}` }] };
     const evidence = Array.isArray(fact.source_locator?.evidence) ? fact.source_locator.evidence : [];
     const evidenceIds = evidence.map((item) => String((item as Record<string, unknown>).source_fact_id || '')).filter(Boolean);
     try {
@@ -468,7 +469,7 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
     deltaBatchRef.current?.dispose();
     setStartedAt(Date.now());
     setElapsedSeconds(0);
-    setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', content: prompt, status: 'completed' }, { id: 'streaming', role: 'assistant', content: '', status: 'generating' }]);
+    setMessages((current) => [...current, { id: createClientId(), role: 'user', content: prompt, status: 'completed' }, { id: 'streaming', role: 'assistant', content: '', status: 'generating' }]);
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -546,9 +547,9 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
   const latest = [...messages].reverse().find((item) => item.role === 'assistant' && item.content.trim());
   const insertSuggestion = () => {
     if (!latest) return;
-    const suggestionId = crypto.randomUUID();
+    const suggestionId = createClientId();
     onInsert({
-      id: crypto.randomUUID(),
+      id: createClientId(),
       type: 'p',
       suggestion: { id: suggestionId, type: 'insert', userId: 'miaobi-agent', createdAt: Date.now() },
       children: [{ text: latest.content }],
@@ -607,7 +608,7 @@ function EvidencePanel({ project, document, onInsert, onError }: { project: Proj
     setInserting(item.chunk_id);
     const evidenceText = cleanEvidenceText(item.snippet || item.text || '');
     const block: PlateNode = {
-      id: crypto.randomUUID(),
+      id: createClientId(),
       type: 'knowledge_citation',
       source_title: item.title,
       source_locator: { page_number: item.page_number, structural_path: item.structural_path },

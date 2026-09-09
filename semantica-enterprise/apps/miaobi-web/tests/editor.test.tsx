@@ -16,6 +16,7 @@ import { MiaobiEditor, EditorKit, normalizeCollaborativeValue } from '../src/edi
 import { lockedTrustedBlockTypes, trustedBlockTypes } from '../src/editor/plugins/trusted-blocks';
 import { cleanEvidenceText } from '../src/evidence';
 import { canonicalJson, sha256 } from '../src/hash';
+import { createClientId } from '../src/ids';
 import { createFrameDeltaBuffer } from '../src/streaming';
 
 describe('妙笔 Plate 编辑器', () => {
@@ -26,6 +27,12 @@ describe('妙笔 Plate 编辑器', () => {
   it('在没有 Web Crypto 的内网 HTTP 页面仍生成服务端兼容 SHA-256', async () => {
     const value = { z: 1, children: [{ text: '震级', bold: true }], a: '中文' };
     expect(await sha256(value)).toBe('3ca7a15a8f27087738aa69ee1a0bf6c65a3d6f19dce484778676a77ef9d6aa3b');
+  });
+  it('在内网页面生成标准且不重复的客户端标识', () => {
+    const first = createClientId();
+    const second = createClientId();
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(second).not.toBe(first);
   });
   it('清理检索片段中的 Markdown 与 HTML 实体并安全截断', () => {
     const value = cleanEvidenceText('制度.md：# 地震预案\n&gt; **响应要求** [来源](https://example.test) ' + '处置'.repeat(300));
