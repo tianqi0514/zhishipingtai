@@ -82,6 +82,7 @@ import {
   PlateElement,
   PlateLeaf,
   type PlateElementProps,
+  type PlateEditor,
   type PlateLeafProps,
   usePlateEditor,
   useEditorRef,
@@ -118,6 +119,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import { cleanEvidenceText } from '../evidence';
+import { createClientId } from '../ids';
 import type { CollaborationAccess, PlateNode, WritingComment, WritingDocument } from '../types/domain';
 import { TrustedBlockKit } from './plugins/trusted-blocks';
 import { RemoteCursorOverlay } from './RemoteCursorOverlay';
@@ -228,7 +230,11 @@ export const EditorKit = [
     inject: { nodeProps: { nodeKey: KEYS.listType, query: ({ nodeProps }) => Boolean(nodeProps.element?.listStyleType && !isOrderedList(nodeProps.element)), transformProps: ({ props }) => ({ ...props, role: 'listitem', style: { ...props.style, display: 'list-item' } }) }, targetPlugins: [...KEYS.heading, KEYS.p, KEYS.blockquote, KEYS.codeBlock, KEYS.toggle, KEYS.img] },
     render: { belowNodes: BlockList },
   }),
-  SlashPlugin.configure({ options: { triggerQuery: (editor) => !editor.api.some({ match: { type: editor.getType(KEYS.codeBlock) } }) } }),
+  SlashPlugin.configure({
+    options: {
+      triggerQuery: (editor) => !editor.api.some({ match: { type: editor.getType(KEYS.codeBlock) } }),
+    },
+  }),
   SlashInputPlugin.withComponent(SlashInputElement),
   MarkdownPlugin.configure({ options: { plainMarks: [KEYS.suggestion, KEYS.comment] } }),
   TrailingBlockPlugin,
@@ -279,9 +285,66 @@ type Props = {
   onSaved: (document: WritingDocument) => void;
   onDirtyChange: (dirty: boolean) => void;
   onRequestSource: (tab: 'assistant' | 'evidence' | 'calculation' | 'review') => void;
-  insertionRequest?: PlateNode | PlateNode[] | null;
+  insertionRequest?: PlateNode | PlateNode[] | MarkdownSuggestionInsertion | null;
   onInserted?: () => void;
 };
+
+export type MarkdownSuggestionInsertion = {
+  kind: 'markdown-suggestion';
+  markdown: string;
+  references: PlateNode[];
+};
+
+function isMarkdownSuggestion(value: Props['insertionRequest']): value is MarkdownSuggestionInsertion {
+  return Boolean(value && !Array.isArray(value) && (value as MarkdownSuggestionInsertion).kind === 'markdown-suggestion');
+}
+
+/**
+ * Convert the assistant's Markdown into native Plate nodes and replace only
+ * validated citation labels with the small inline citation element. This
+ * prevents Markdown control characters from leaking into the formal body.
+ */
+export function materializeMarkdownSuggestion(editor: PlateEditor, request: MarkdownSuggestionInsertion): Value {
+  const references = new Map<string, PlateNode[]>();
+  request.references.forEach((reference) => {
+    const label = String(reference.citation_label || '');
+    references.set(label, [...(references.get(label) || []), reference]);
+  });
+  const expand = (node: PlateNode): PlateNode[] => {
+    if (typeof node.text === 'string') {
+      const output: PlateNode[] = [];
+      let cursor = 0;
+      for (const match of node.text.matchAll(/\[(\d+)\]/g)) {
+        const index = match.index ?? 0;
+        const label = match[0];
+        const queue = references.get(label);
+        const reference = queue?.shift();
+        if (!reference) continue;
+        if (index > cursor) output.push({ ...node, text: node.text.slice(cursor, index) });
+        output.push(reference);
+        cursor = index + label.length;
+      }
+      if (cursor === 0) return [node];
+      if (cursor < node.text.length) output.push({ ...node, text: node.text.slice(cursor) });
+      return output;
+    }
+    const children = Array.isArray(node.children)
+      ? node.children.flatMap((child) => expand(child as PlateNode))
+      : [{ text: '' }];
+    return [{ ...node, children }];
+  };
+  const value = deserializeMd(editor, request.markdown) as Value;
+  return value.flatMap((node) => expand(node as PlateNode)).map((node) => ({
+    ...node,
+    id: typeof node.id === 'string' ? node.id : createClientId(),
+    suggestion: {
+      id: createClientId(),
+      type: 'insert',
+      userId: 'miaobi-agent',
+      createdAt: Date.now(),
+    },
+  })) as unknown as Value;
+}
 
 export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource, insertionRequest, onInserted }: Props) {
   const initial = normalizeCollaborativeValue(
@@ -301,12 +364,16 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
   const importRef = useRef<HTMLInputElement>(null);
   const cursorColor = useMemo(() => `hsl(${[...document.id].reduce((sum, value) => sum + value.charCodeAt(0), 0) % 360} 66% 46%)`, [document.id]);
   const editor = usePlateEditor({
+    // Plate uses editor.meta.userId to scope temporary slash/mention input
+    // nodes to the local collaborator.
+    userId: collaboration?.user.id,
     plugins: [
       ...EditorKit,
       CommentPlugin.withComponent(CommentLeaf),
       SuggestionPlugin.configure({ options: { currentUserId: collaboration?.user.id || null, isSuggesting: suggesting } }).withComponent(SuggestionLeaf),
       ...(collaboration ? [YjsPlugin.configure({
         options: {
+          userId: collaboration.user.id,
           cursors: { data: { color: cursorColor, name: collaboration.user.name } },
           providers: [
             {
@@ -409,7 +476,10 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
 
   useEffect(() => {
     if (!insertionRequest || collaboration?.read_only) return;
-    editor.tf.insertNodes(insertionRequest as Value[number] | Value);
+    const nodes = isMarkdownSuggestion(insertionRequest)
+      ? materializeMarkdownSuggestion(editor, insertionRequest)
+      : insertionRequest;
+    editor.tf.insertNodes(nodes as Value[number] | Value);
     onInserted?.();
   }, [editor, insertionRequest, onInserted, collaboration?.read_only]);
 

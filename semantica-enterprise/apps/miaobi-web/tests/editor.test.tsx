@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { createPlateEditor } from 'platejs/react';
 
 vi.mock('../src/api', () => ({
   api: vi.fn((path: string) => Promise.resolve(path.endsWith('/comments') ? [] : {
@@ -12,7 +13,7 @@ vi.mock('../src/api', () => ({
     user: { id: 'user-1', name: '测试用户' },
   })),
 }));
-import { MiaobiEditor, EditorKit, normalizeCollaborativeValue } from '../src/editor/MiaobiEditor';
+import { MiaobiEditor, EditorKit, materializeMarkdownSuggestion, normalizeCollaborativeValue } from '../src/editor/MiaobiEditor';
 import { lockedTrustedBlockTypes, trustedBlockTypes } from '../src/editor/plugins/trusted-blocks';
 import { cleanEvidenceText } from '../src/evidence';
 import { canonicalJson, installWebCryptoDigestFallback, sha256, sha256Digest } from '../src/hash';
@@ -67,6 +68,27 @@ describe('妙笔 Plate 编辑器', () => {
     expect(migrated.value[0].children[1].type).toBe('knowledge_citation');
     expect((migrated.value[0].children[1].children as PlateNode[])[0].text).toBe('');
     expect(migrated.value[1].children[0].text).toBe('# 普通正文保留原样');
+  });
+
+  it('把助手 Markdown 转成 Plate 结构并只保留轻量引用标记', () => {
+    const editor = createPlateEditor({ plugins: EditorKit });
+    const value = materializeMarkdownSuggestion(editor, {
+      kind: 'markdown-suggestion',
+      markdown: '## 灾情研判\n\n震级为 **6.2级**，依据见[1]。',
+      references: [{
+        id: 'citation-1',
+        type: 'knowledge_citation',
+        citation_label: '[1]',
+        chunk_id: 'chunk-1',
+        children: [{ text: '' }],
+      }],
+    });
+    expect(value[0].type).toBe('h2');
+    expect(value[0].children[0].text).toBe('灾情研判');
+    expect(value[1].type).toBe('p');
+    expect(value[1].children.some((node: PlateNode) => node.bold && node.text === '6.2级')).toBe(true);
+    expect(value[1].children.some((node: PlateNode) => node.type === 'knowledge_citation' && node.citation_label === '[1]')).toBe(true);
+    expect(JSON.stringify(value)).not.toContain('**');
   });
 
   it('使用锁定版 Plate 插件体系并注册全部可信业务块', () => {

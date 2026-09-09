@@ -26,12 +26,13 @@ import { sha256 } from './hash';
 import { createClientId } from './ids';
 import { createFrameDeltaBuffer } from './streaming';
 import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeContext, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ScenarioPackage, WritingAgentSession, WritingDocument } from './types/domain';
+import type { MarkdownSuggestionInsertion } from './editor/MiaobiEditor';
 
 type Product = { id: string; name: string; code: string };
 type Release = { id: string; version: number; status: string };
 type User = { id: string; display_name: string; is_admin: boolean };
 type Tab = 'overview' | 'facts' | 'reasoning' | 'plans' | 'writing' | 'review';
-type EditorInsertion = PlateNode | PlateNode[];
+type EditorInsertion = PlateNode | PlateNode[] | MarkdownSuggestionInsertion;
 
 const tabs: Array<{ key: Tab; label: string; icon: typeof LayoutDashboard }> = [
   { key: 'overview', label: '任务概览', icon: LayoutDashboard },
@@ -596,39 +597,19 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
     try {
       const citations = new Map((latest.citations || []).map((item) => [item.citation_number, item]));
       const referenced: PlateNode[] = [];
-      const paragraphs = latest.content.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
-      const nodes = paragraphs.map((paragraph) => {
-        const children: PlateNode[] = [];
-        let cursor = 0;
-        for (const match of paragraph.matchAll(/\[(\d+)\]/g)) {
-          const index = match.index ?? 0;
-          if (index > cursor) children.push({ text: paragraph.slice(cursor, index) });
-          const citationNumber = Number(match[1]);
-          const citation = citations.get(citationNumber);
-          if (citation?.snapshot) {
-            const item = citation.snapshot;
-            const reference: PlateNode = {
-              id: createClientId(), type: 'knowledge_citation', citation_label: `[${citationNumber}]`,
-              source_title: item.title, chunk_id: citation.chunk_id, query_run_id: citation.query_run_id,
-              source_id: item.document_id, source_version: item.version_id,
-              source_locator: { page_number: item.page_number, structural_path: item.structural_path },
-              freshness_status: 'current', children: [{ text: '' }],
-            };
-            children.push(reference);
-            referenced.push(reference);
-          } else {
-            children.push({ text: match[0] });
-          }
-          cursor = index + match[0].length;
-        }
-        if (cursor < paragraph.length) children.push({ text: paragraph.slice(cursor) });
-        if (!children.length) children.push({ text: paragraph });
-        return {
-          id: createClientId(), type: 'p',
-          suggestion: { id: createClientId(), type: 'insert', userId: 'miaobi-agent', createdAt: Date.now() },
-          children,
-        } as PlateNode;
-      });
+      for (const match of latest.content.matchAll(/\[(\d+)\]/g)) {
+        const citationNumber = Number(match[1]);
+        const citation = citations.get(citationNumber);
+        if (!citation?.snapshot) continue;
+        const item = citation.snapshot;
+        referenced.push({
+          id: createClientId(), type: 'knowledge_citation', citation_label: `[${citationNumber}]`,
+          source_title: item.title, chunk_id: citation.chunk_id, query_run_id: citation.query_run_id,
+          source_id: item.document_id, source_version: item.version_id,
+          source_locator: { page_number: item.page_number, structural_path: item.structural_path },
+          freshness_status: 'current', children: [{ text: '' }],
+        });
+      }
       for (const reference of referenced) {
         await api(`/writing/documents/${document.id}/bindings`, {
           method: 'POST',
@@ -643,7 +624,7 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
           },
         });
       }
-      onInsert(nodes);
+      onInsert({ kind: 'markdown-suggestion', markdown: latest.content, references: referenced });
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : '插入带依据的修订建议失败');
     } finally {
