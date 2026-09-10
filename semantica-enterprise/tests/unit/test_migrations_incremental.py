@@ -43,6 +43,7 @@ def test_schema_migrations_are_repeatable_on_fresh_database() -> None:
         "0025_miaobi_project_readiness",
         "0026_miaobi_simple_writing_flow",
         "0027_miaobi_agent_session_purpose",
+        "0028_writing_materials_ontology_governance",
     ]
     assert profile_table == "document_profiles"
 

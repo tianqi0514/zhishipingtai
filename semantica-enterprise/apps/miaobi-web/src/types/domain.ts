@@ -30,9 +30,33 @@ export type Project = {
   facts?: number;
   pending_gates?: number;
   config?: Record<string, unknown>;
+  scenario?: {
+    package_id: string;
+    package_name: string;
+    version: number;
+    version_id: string;
+    is_current: boolean;
+    business_config?: {
+      toolbox: {
+        reasoning_enabled: boolean;
+        calculation_enabled: boolean;
+        target_sections: Record<string, string[]>;
+      };
+      writing_policy: {
+        missing_input_action: 'block' | 'warn';
+        unverified_fact_action: 'block' | 'warn';
+        require_citations: boolean;
+        allow_manual_override: boolean;
+      };
+      output: {
+        title_pattern: string;
+        allowed_formats: Array<'docx' | 'pdf' | 'json' | 'xlsx' | 'geojson'>;
+      };
+    };
+  };
   input_contract?: {
     required: string[];
-    properties: Record<string, { type?: string; title?: string; unit?: string; minimum?: number; maximum?: number }>;
+    properties: Record<string, { type?: string; title?: string; unit?: string; minimum?: number; maximum?: number; confirmation_required?: boolean }>;
     chapters: Array<{ key: string; title: string }>;
   };
 };
@@ -69,6 +93,35 @@ export type KnowledgeContext = {
   chunk_count: number;
   entity_count: number;
   fact_count: number;
+  task_material_count: number;
+  task_material_roles: Record<string, number>;
+  retrieval_scope: 'task_materials' | 'knowledge_product_release';
+};
+
+export type ProjectMaterial = {
+  id: string;
+  project_id: string;
+  document_id: string;
+  version_id: string;
+  material_role: 'policy_basis' | 'task_data' | 'reference' | 'attachment';
+  usage_scope: 'task_only' | 'space_asset';
+  status: string;
+  version_pinned: boolean;
+  current_document_version: boolean;
+  document: { id: string; space_id: string; title: string; status: string; tags: string[] };
+  version: { id: string; version_number: number; filename: string; content_type: string; size: number; status: string };
+};
+
+export type ProjectMaterialCandidate = {
+  document_id: string;
+  version_id: string;
+  space_id: string;
+  title: string;
+  filename: string;
+  content_type: string;
+  version_number: number;
+  processing_status: string;
+  already_linked: boolean;
 };
 
 export type WritingDocument = {

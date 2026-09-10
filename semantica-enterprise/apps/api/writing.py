@@ -27,6 +27,7 @@ from apps.api.writing_schemas import (
     ScenarioPackageCreate,
     ScenarioPackageUpdate,
     ScenarioPackageVersionCreate,
+    ScenarioBusinessConfig,
     WritingBlockBindingUpsert,
     WritingDocumentCreate,
     WritingDocumentUpdate,
@@ -45,6 +46,8 @@ from apps.api.writing_schemas import (
     WritingInputChangePreview,
     WritingAgentSessionCreate,
     WritingProjectCreate,
+    WritingProjectMaterialCreate,
+    WritingProjectMaterialUpdate,
     WritingProjectReleaseRebase,
     WritingProjectUpdate,
     WritingRecomputeRequest,
@@ -90,6 +93,7 @@ from packages.platform.models import (
     WritingDocumentVersion,
     WritingComment,
     WritingProject,
+    WritingProjectMaterial,
     WritingProjectMember,
     WritingAgentSession,
     WritingGenerationRun,
@@ -118,6 +122,11 @@ from packages.platform.writing_flow import (
     validate_and_parse_agent_report,
 )
 from packages.platform.writing_export import CONTENT_TYPES, build_export_artifact
+from packages.platform.writing_configuration import (
+    business_scenario_from_contract,
+    business_setting_effects,
+    compile_business_scenario,
+)
 from packages.platform.storage import object_storage
 from packages.platform.config import get_settings
 from packages.platform.security import create_collaboration_access_token
@@ -263,6 +272,86 @@ def _scenario_contract(version: ScenarioPackageVersion) -> dict[str, Any]:
     }
 
 
+def _material_payload(
+    material: WritingProjectMaterial,
+    document: Document,
+    version: DocumentVersion,
+) -> dict[str, Any]:
+    return {
+        **serialize_row(material),
+        "document": {
+            "id": document.id,
+            "space_id": document.space_id,
+            "title": document.title,
+            "status": document.status,
+            "tags": document.tags or [],
+        },
+        "version": {
+            "id": version.id,
+            "version_number": version.version_number,
+            "filename": version.filename,
+            "content_type": version.content_type,
+            "size": version.size,
+            "status": version.status,
+        },
+        "version_pinned": True,
+        "current_document_version": document.current_version_id == version.id,
+    }
+
+
+def _project_material_document_ids(db: Session, project_id: str) -> list[str]:
+    return list(
+        db.scalars(
+            select(WritingProjectMaterial.document_id).where(
+                WritingProjectMaterial.project_id == project_id,
+                WritingProjectMaterial.status == "active",
+                _active(WritingProjectMaterial),
+            ).distinct()
+        )
+    )
+
+
+_INTERNAL_WRITING_MATERIAL_SUFFIXES = (
+    ".ontology.yaml",
+    ".ontology.yml",
+    ".spec.yaml",
+    ".spec.yml",
+    ".chunks.yaml",
+    ".chunks.yml",
+)
+
+
+def _is_internal_writing_configuration(document: Document, version: DocumentVersion) -> bool:
+    """Keep legacy machine contracts out of the business-material workflow.
+
+    Existing releases may still contain ontology/report/chunk YAMLs from early
+    prototypes.  They remain traceable in Zhiku, but a writer cannot select
+    them as report evidence.  New scenario contracts live in versioned Miaobi
+    configuration instead.
+    """
+    filename = (version.filename or "").strip().lower()
+    if filename.endswith(_INTERNAL_WRITING_MATERIAL_SUFFIXES):
+        return True
+    summary = version.parse_summary or {}
+    declared_role = str(
+        summary.get("material_role")
+        or summary.get("document_role")
+        or summary.get("artifact_kind")
+        or ""
+    ).strip().lower()
+    if declared_role in {
+        "ontology",
+        "semantic_model",
+        "report_spec",
+        "scenario_contract",
+        "chunk_manifest",
+        "system_configuration",
+    }:
+        return True
+    tags = {str(item).strip().lower() for item in (document.tags or [])}
+    return bool(tags & {"system-configuration", "internal-contract", "系统配置", "内部契约"})
+
+
 def _section_plan(version: ScenarioPackageVersion) -> list[dict[str, Any]]:
     rows = (version.chapter_template or {}).get("chapters") or []
     result = []
@@ -277,6 +366,10 @@ def _section_plan(version: ScenarioPackageVersion) -> list[dict[str, Any]]:
                     "key": key,
                     "title": title,
                     "instruction": str(item.get("instruction") or "根据已核验资料撰写正式业务内容。"),
+                    "generation_mode": str(item.get("generation_mode") or "agent"),
+                    "required_inputs": list(item.get("required_inputs") or []),
+                    "toolbox_outputs": list(item.get("toolbox_outputs") or []),
+                    "citation_required": item.get("citation_required") is True,
                 }
             )
     if not result:
@@ -335,6 +428,22 @@ def _latest_computation_rows(db: Session, project_id: str) -> list[ComputationRu
                 continue
         latest.setdefault(key, row)
     return list(latest.values())
+
+
+def _scenario_runtime_settings(
+    db: Session,
+    project: WritingProject,
+) -> tuple[ScenarioPackageVersion, dict[str, Any], dict[str, Any]]:
+    scenario = _tenant_row(
+        db,
+        ScenarioPackageVersion,
+        project.scenario_package_version_id,
+        project.tenant_id,
+        "场景包版本",
+    )
+    config = dict(scenario.config or {})
+    policy = {**dict(scenario.review_rules or {}), **dict(config.get("writing_policy") or {})}
+    return scenario, config, policy
 
 
 def _select_current_plan_rows(rows: list[AlternativePlan]) -> list[AlternativePlan]:
@@ -399,25 +508,22 @@ def _strict_report_quality(
     content: list[dict[str, Any]],
     bindings: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    scenario = _tenant_row(
-        db,
-        ScenarioPackageVersion,
-        project.scenario_package_version_id,
-        project.tenant_id,
-        "场景包版本",
-    )
-    computations = _latest_computation_rows(db, project.id)
-    inference_count = int(
-        db.scalar(
-            select(func.count()).select_from(ProjectFact).where(
-                ProjectFact.project_id == project.id,
-                ProjectFact.fact_type == "semantica_inference",
-                ProjectFact.active.is_(True),
-                _active(ProjectFact),
+    scenario, scenario_config, writing_policy = _scenario_runtime_settings(db, project)
+    toolbox = dict(scenario_config.get("toolbox") or {})
+    computations = _latest_computation_rows(db, project.id) if toolbox.get("calculation_enabled", True) else []
+    inference_count = 0
+    if toolbox.get("reasoning_enabled", True):
+        inference_count = int(
+            db.scalar(
+                select(func.count()).select_from(ProjectFact).where(
+                    ProjectFact.project_id == project.id,
+                    ProjectFact.fact_type == "semantica_inference",
+                    ProjectFact.active.is_(True),
+                    _active(ProjectFact),
+                )
             )
+            or 0
         )
-        or 0
-    )
     reference_characters = (scenario.config or {}).get("reference_final_characters")
     return report_quality_review(
         content,
@@ -426,6 +532,7 @@ def _strict_report_quality(
         expected_computation_count=len(computations),
         expected_inference_count=inference_count,
         reference_characters=int(reference_characters) if reference_characters else None,
+        require_citations=bool(writing_policy.get("require_citations", True)),
     )
 
 
@@ -803,6 +910,122 @@ def activate_scenario_package_version(
     return serialize_row(version)
 
 
+@router.get("/scenario-packages/{package_id}/business-config")
+def get_scenario_business_config(
+    package_id: str,
+    version_id: str | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return only business settings with real runtime consumers."""
+    package = _tenant_row(db, ScenarioPackage, package_id, user.tenant_id, "场景包")
+    version = db.get(ScenarioPackageVersion, version_id) if version_id else None
+    if version is None and package.current_version_id:
+        version = db.get(ScenarioPackageVersion, package.current_version_id)
+    if version is None:
+        version = db.scalar(
+            select(ScenarioPackageVersion).where(
+                ScenarioPackageVersion.scenario_package_id == package.id,
+                _active(ScenarioPackageVersion),
+            ).order_by(ScenarioPackageVersion.version.desc())
+        )
+    if version is None or version.tenant_id != user.tenant_id or version.scenario_package_id != package.id:
+        raise HTTPException(status_code=404, detail="场景配置版本不存在")
+    return {
+        "package": serialize_row(package),
+        "version": {"id": version.id, "version": version.version, "status": version.status, "checksum": version.checksum},
+        "config": business_scenario_from_contract(_scenario_contract(version)),
+        "setting_effects": business_setting_effects({}),
+    }
+
+
+@router.post("/scenario-packages/{package_id}/business-config/validate")
+def validate_scenario_business_config(
+    package_id: str,
+    payload: ScenarioBusinessConfig,
+    admin: User = Depends(require_writing_admin),
+    db: Session = Depends(get_db),
+):
+    _tenant_row(db, ScenarioPackage, package_id, admin.tenant_id, "场景包")
+    contract = compile_business_scenario(payload.model_dump(exclude={"activate"}))
+    try:
+        validate_scenario_contract(contract)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "valid": True,
+        "checksum": content_hash(contract),
+        "summary": {
+            "input_count": len(payload.inputs),
+            "required_input_count": sum(1 for item in payload.inputs if item.required),
+            "section_count": len(payload.sections),
+            "decision_gate_count": len(payload.decision_gates),
+            "reasoning_enabled": payload.toolbox.reasoning_enabled,
+            "calculation_enabled": payload.toolbox.calculation_enabled,
+            "allowed_formats": payload.output.allowed_formats,
+        },
+        "setting_effects": business_setting_effects(payload.model_dump()),
+    }
+
+
+@router.put("/scenario-packages/{package_id}/business-config")
+def save_scenario_business_config(
+    package_id: str,
+    payload: ScenarioBusinessConfig,
+    admin: User = Depends(require_writing_admin),
+    db: Session = Depends(get_db),
+):
+    """Create an immutable executable version from business-facing settings."""
+    package = _tenant_row(db, ScenarioPackage, package_id, admin.tenant_id, "场景包")
+    contract = compile_business_scenario(payload.model_dump(exclude={"activate"}))
+    try:
+        validate_scenario_contract(contract)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    number = int(
+        db.scalar(
+            select(func.max(ScenarioPackageVersion.version)).where(
+                ScenarioPackageVersion.scenario_package_id == package.id
+            )
+        )
+        or 0
+    ) + 1
+    row = ScenarioPackageVersion(
+        tenant_id=admin.tenant_id,
+        scenario_package_id=package.id,
+        version=number,
+        checksum=content_hash(contract),
+        status="active" if payload.activate else "draft",
+        created_by=admin.id,
+        **contract,
+    )
+    db.add(row)
+    db.flush()
+    if payload.activate:
+        db.query(ScenarioPackageVersion).filter(
+            ScenarioPackageVersion.scenario_package_id == package.id,
+            ScenarioPackageVersion.id != row.id,
+            ScenarioPackageVersion.status == "active",
+        ).update({"status": "retired"})
+        package.current_version_id = row.id
+        package.status = "active"
+    audit(
+        db,
+        admin.tenant_id,
+        admin.id,
+        "writing.scenario_package.business_config.save",
+        "scenario_package_version",
+        row.id,
+        {"version": number, "activated": payload.activate, "checksum": row.checksum},
+    )
+    db.commit()
+    return {
+        "version": serialize_row(row),
+        "config": business_scenario_from_contract(contract),
+        "setting_effects": business_setting_effects(payload.model_dump()),
+    }
+
+
 # Projects, facts, gates and deterministic plans.
 
 
@@ -868,6 +1091,17 @@ def get_project(project_id: str, user: User = Depends(get_current_user), db: Ses
     row = _project(db, project_id, user)
     data = serialize_row(row)
     scenario = db.get(ScenarioPackageVersion, row.scenario_package_version_id)
+    scenario_package = db.get(ScenarioPackage, scenario.scenario_package_id) if scenario else None
+    if scenario_package is not None and scenario_package.tenant_id == user.tenant_id:
+        business_config = business_scenario_from_contract(_scenario_contract(scenario))
+        data["scenario"] = {
+            "package_id": scenario_package.id,
+            "package_name": scenario_package.name,
+            "version": scenario.version,
+            "version_id": scenario.id,
+            "is_current": scenario_package.current_version_id == scenario.id,
+            "business_config": business_config,
+        }
     data["input_contract"] = {
         "required": list((scenario.input_schema or {}).get("required") or []),
         "properties": dict((scenario.input_schema or {}).get("properties") or {}),
@@ -881,6 +1115,200 @@ def get_project(project_id: str, user: User = Depends(get_current_user), db: Ses
         db.scalar(select(func.count()).select_from(DecisionGate).where(DecisionGate.project_id == row.id, DecisionGate.required.is_(True), DecisionGate.status != "confirmed", _active(DecisionGate))) or 0
     )
     return data
+
+
+@router.get("/projects/{project_id}/material-candidates")
+def list_project_material_candidates(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List processed Zhiku documents that can be pinned to this task."""
+    project = _project(db, project_id, user)
+    space_ids, _ = _release_scope(db, project, user)
+    linked_versions = set(
+        db.scalars(
+            select(WritingProjectMaterial.version_id).where(
+                WritingProjectMaterial.project_id == project.id,
+                WritingProjectMaterial.status == "active",
+                _active(WritingProjectMaterial),
+            )
+        )
+    )
+    rows = list(
+        db.scalars(
+            select(Document).where(
+                Document.tenant_id == user.tenant_id,
+                Document.space_id.in_(space_ids),
+                Document.current_version_id.is_not(None),
+                _active(Document),
+            ).order_by(Document.updated_at.desc())
+        )
+    )
+    result = []
+    for document in rows:
+        version = db.get(DocumentVersion, document.current_version_id)
+        if version is None or version.deleted_at is not None:
+            continue
+        if _is_internal_writing_configuration(document, version):
+            continue
+        result.append(
+            {
+                "document_id": document.id,
+                "version_id": version.id,
+                "space_id": document.space_id,
+                "title": document.title,
+                "filename": version.filename,
+                "content_type": version.content_type,
+                "version_number": version.version_number,
+                "processing_status": version.status,
+                "already_linked": version.id in linked_versions,
+            }
+        )
+    return result
+
+
+@router.get("/projects/{project_id}/materials")
+def list_project_materials(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _project(db, project_id, user)
+    rows = list(
+        db.scalars(
+            select(WritingProjectMaterial).where(
+                WritingProjectMaterial.project_id == project.id,
+                WritingProjectMaterial.status == "active",
+                _active(WritingProjectMaterial),
+            ).order_by(WritingProjectMaterial.created_at)
+        )
+    )
+    result = []
+    for row in rows:
+        document = _tenant_row(db, Document, row.document_id, user.tenant_id, "材料")
+        version = _tenant_row(db, DocumentVersion, row.version_id, user.tenant_id, "材料版本")
+        if not has_space_permission(db, user, document.space_id, "read"):
+            continue
+        result.append(_material_payload(row, document, version))
+    return result
+
+
+@router.post("/projects/{project_id}/materials")
+def add_project_material(
+    project_id: str,
+    payload: WritingProjectMaterialCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _project(db, project_id, user, "editor")
+    document = _tenant_row(db, Document, payload.document_id, user.tenant_id, "材料")
+    if not has_space_permission(db, user, document.space_id, "read"):
+        raise HTTPException(status_code=403, detail="无权使用该材料")
+    allowed_spaces, _ = _release_scope(db, project, user)
+    if document.space_id not in allowed_spaces:
+        raise HTTPException(status_code=409, detail="材料不属于当前任务绑定的知识产品，请先更新知识产品范围")
+    version_id = payload.version_id or document.current_version_id
+    if not version_id:
+        raise HTTPException(status_code=409, detail="材料尚无可用版本")
+    version = _tenant_row(db, DocumentVersion, version_id, user.tenant_id, "材料版本")
+    if version.document_id != document.id:
+        raise HTTPException(status_code=404, detail="材料版本不存在")
+    if _is_internal_writing_configuration(document, version):
+        raise HTTPException(
+            status_code=409,
+            detail="该文件属于系统配置或中间产物，不能作为报告业务材料；请在知识结构或场景配置中管理",
+        )
+    if version.status not in {"processed", "published", "ready"}:
+        raise HTTPException(status_code=409, detail="材料仍在知识加工中，完成后才能用于写作")
+    existing = db.scalar(
+        select(WritingProjectMaterial).where(
+            WritingProjectMaterial.project_id == project.id,
+            WritingProjectMaterial.version_id == version.id,
+        )
+    )
+    if existing is not None and existing.deleted_at is None and existing.status == "active":
+        raise HTTPException(status_code=409, detail="该材料已经加入当前任务")
+    if existing is None:
+        row = WritingProjectMaterial(
+            tenant_id=user.tenant_id,
+            project_id=project.id,
+            document_id=document.id,
+            version_id=version.id,
+            material_role=payload.material_role,
+            usage_scope=payload.usage_scope,
+            status="active",
+            material_metadata={"pinned_sha256": version.sha256},
+            added_by=user.id,
+        )
+        db.add(row)
+    else:
+        row = existing
+        row.deleted_at = None
+        row.status = "active"
+        row.material_role = payload.material_role
+        row.usage_scope = payload.usage_scope
+        row.added_by = user.id
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "writing.project.material.add",
+        "writing_project_material",
+        row.id,
+        {"document_id": document.id, "version_id": version.id, "role": row.material_role, "scope": row.usage_scope},
+    )
+    _commit(db, "该材料已经加入当前任务")
+    db.refresh(row)
+    return _material_payload(row, document, version)
+
+
+@router.put("/projects/{project_id}/materials/{material_id}")
+def update_project_material(
+    project_id: str,
+    material_id: str,
+    payload: WritingProjectMaterialUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _project(db, project_id, user, "editor")
+    row = _tenant_row(db, WritingProjectMaterial, material_id, user.tenant_id, "任务材料")
+    if row.project_id != project.id or row.status != "active":
+        raise HTTPException(status_code=404, detail="任务材料不存在")
+    apply_patch(row, payload.model_dump(exclude_none=True), {"material_role", "usage_scope"})
+    audit(db, user.tenant_id, user.id, "writing.project.material.update", "writing_project_material", row.id)
+    db.commit()
+    return _material_payload(
+        row,
+        _tenant_row(db, Document, row.document_id, user.tenant_id, "材料"),
+        _tenant_row(db, DocumentVersion, row.version_id, user.tenant_id, "材料版本"),
+    )
+
+
+@router.delete("/projects/{project_id}/materials/{material_id}")
+def remove_project_material(
+    project_id: str,
+    material_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _project(db, project_id, user, "editor")
+    row = _tenant_row(db, WritingProjectMaterial, material_id, user.tenant_id, "任务材料")
+    if row.project_id != project.id:
+        raise HTTPException(status_code=404, detail="任务材料不存在")
+    row.status = "removed"
+    row.deleted_at = datetime.now(timezone.utc)
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "writing.project.material.remove",
+        "writing_project_material",
+        row.id,
+        {"document_id": row.document_id, "version_id": row.version_id, "document_preserved": True},
+    )
+    db.commit()
+    return {"deleted": True, "document_preserved": True}
 
 
 @router.get("/projects/{project_id}/knowledge-context")
@@ -928,6 +1356,18 @@ def get_project_knowledge_context(
             _active(KnowledgeProductRelease),
         ).order_by(KnowledgeProductRelease.version.desc()).limit(1)
     )
+    materials = list(
+        db.scalars(
+            select(WritingProjectMaterial).where(
+                WritingProjectMaterial.project_id == project.id,
+                WritingProjectMaterial.status == "active",
+                _active(WritingProjectMaterial),
+            )
+        )
+    )
+    material_roles: dict[str, int] = {}
+    for material in materials:
+        material_roles[material.material_role] = material_roles.get(material.material_role, 0) + 1
     return {
         "product": {"id": product.id, "name": product.name, "code": product.code},
         "release": {
@@ -944,6 +1384,9 @@ def get_project_knowledge_context(
         "chunk_count": sum(int(item["chunk_count"]) for item in spaces),
         "entity_count": sum(int(item["entity_count"]) for item in spaces),
         "fact_count": sum(int(item["fact_count"]) for item in spaces),
+        "task_material_count": len(materials),
+        "task_material_roles": material_roles,
+        "retrieval_scope": "task_materials" if materials else "knowledge_product_release",
     }
 
 
@@ -957,6 +1400,13 @@ def search_project_knowledge(
     """Search the immutable Knowledge Product release bound to this project."""
     project = _project(db, project_id, user)
     space_ids, knowledge_release_ids = _release_scope(db, project, user)
+    material_document_ids = _project_material_document_ids(db, project.id)
+    effective_filters = dict(payload.filters or {})
+    if material_document_ids:
+        requested_document_ids = set(effective_filters.get("document_ids") or material_document_ids)
+        if requested_document_ids - set(material_document_ids):
+            raise HTTPException(status_code=403, detail="检索条件包含未加入当前方案任务的材料")
+        effective_filters["document_ids"] = sorted(requested_document_ids)
     try:
         result = execute_hybrid_search(
             db,
@@ -969,12 +1419,13 @@ def search_project_knowledge(
             use_vector=payload.use_vector,
             use_graph=payload.use_graph,
             use_reranker=payload.use_reranker,
-            filters=payload.filters,
+            filters=effective_filters,
             audit_action="writing.knowledge.search",
             knowledge_release_ids=knowledge_release_ids,
             retrieval_context={
                 "writing_project_id": project.id,
                 "knowledge_product_release_id": project.knowledge_product_release_id,
+                "material_document_ids": material_document_ids,
             },
         )
     except ValueError as exc:
@@ -1092,6 +1543,7 @@ def create_writing_agent_session(
         existing.status = "archived"
 
     space_ids, knowledge_release_ids = _release_scope(db, project, user)
+    material_document_ids = _project_material_document_ids(db, project.id)
     harness_session_id = f"miaobi-{uuid.uuid4().hex}"
     session = WritingAgentSession(
         tenant_id=user.tenant_id,
@@ -1117,6 +1569,7 @@ def create_writing_agent_session(
             "writing_document_id": payload.document_id,
             "knowledge_product_release_id": project.knowledge_product_release_id,
             "knowledge_release_ids": knowledge_release_ids,
+            "material_document_ids": material_document_ids,
             "space_ids": space_ids,
             "use_keyword": True,
             "use_vector": True,
@@ -1356,12 +1809,47 @@ def start_report_generation(
         )
     )
     by_key = {row.fact_key: row for row in active_facts}
-    required_keys = list((scenario.input_schema or {}).get("required") or [])
+    input_schema = dict(scenario.input_schema or {})
+    input_properties = dict(input_schema.get("properties") or {})
+    required_keys = list(input_schema.get("required") or [])
     missing = [key for key in required_keys if key not in by_key]
     unconfirmed = [
         key for key in required_keys
-        if key in by_key and by_key[key].verification_status != "verified"
+        if (
+            key in by_key
+            and bool((input_properties.get(key) or {}).get("confirmation_required", True))
+            and by_key[key].verification_status != "verified"
+        )
     ]
+    invalid_inputs: list[dict[str, str]] = []
+    for key in required_keys:
+        if key not in by_key:
+            continue
+        spec = dict(input_properties.get(key) or {})
+        value = dict(by_key[key].value or {})
+        raw = value.get("number", value.get("value", value.get("text")))
+        data_type = str(spec.get("type") or "string")
+        if data_type in {"number", "integer"}:
+            if isinstance(raw, bool):
+                invalid_inputs.append({"key": key, "message": "应为数值"})
+                continue
+            try:
+                number = float(raw)
+            except (TypeError, ValueError):
+                invalid_inputs.append({"key": key, "message": "应为数值"})
+                continue
+            if data_type == "integer" and not number.is_integer():
+                invalid_inputs.append({"key": key, "message": "应为整数"})
+            if spec.get("minimum") is not None and number < float(spec["minimum"]):
+                invalid_inputs.append({"key": key, "message": f"不能小于 {spec['minimum']}"})
+            if spec.get("maximum") is not None and number > float(spec["maximum"]):
+                invalid_inputs.append({"key": key, "message": f"不能大于 {spec['maximum']}"})
+        elif data_type == "boolean" and not isinstance(raw, bool):
+            invalid_inputs.append({"key": key, "message": "应为是/否值"})
+        elif data_type == "array" and not isinstance(value.get("items", raw), list):
+            invalid_inputs.append({"key": key, "message": "应为列表"})
+        elif data_type == "object" and not isinstance(value.get("object", raw), dict):
+            invalid_inputs.append({"key": key, "message": "应为结构化对象"})
     stale = [
         key for key in required_keys
         if key in by_key and by_key[key].freshness_status not in {"current", "manual_override"}
@@ -1376,13 +1864,22 @@ def start_report_generation(
         )
         or 0
     )
-    if missing or unconfirmed or stale or open_conflicts:
+    writing_policy = {
+        **dict(scenario.review_rules or {}),
+        **dict((scenario.config or {}).get("writing_policy") or {}),
+    }
+    missing_action = writing_policy.get("missing_input_action", "block")
+    unverified_action = writing_policy.get("unverified_fact_action", "block")
+    blocking_missing = missing if missing_action == "block" else []
+    blocking_unconfirmed = unconfirmed if unverified_action == "block" else []
+    if blocking_missing or blocking_unconfirmed or invalid_inputs or stale or open_conflicts:
         raise HTTPException(
             status_code=409,
             detail={
                 "message": "请先完成报告输入确认",
-                "missing": missing,
-                "unconfirmed": unconfirmed,
+                "missing": blocking_missing,
+                "unconfirmed": blocking_unconfirmed,
+                "invalid_inputs": invalid_inputs,
                 "stale": stale,
                 "open_conflicts": open_conflicts,
             },
@@ -1400,10 +1897,16 @@ def start_report_generation(
             ).order_by(WritingDocument.updated_at.desc())
         )
     if document is None:
+        title_pattern = str(
+            (scenario.output_schema or {}).get("title_pattern")
+            or (scenario.config or {}).get("output", {}).get("title_pattern")
+            or "{project_name}"
+        )
+        configured_title = title_pattern.replace("{project_name}", project.name).strip()
         document = WritingDocument(
             tenant_id=user.tenant_id,
             project_id=project.id,
-            title=payload.title or f"{project.name}报告",
+            title=payload.title or configured_title or f"{project.name}报告",
             document_type="response_plan",
             status="draft",
             created_by=user.id,
@@ -1444,20 +1947,59 @@ def start_report_generation(
             }
             for key in required_keys
         ],
+        "materials": [
+            {
+                "id": row.id,
+                "document_id": row.document_id,
+                "version_id": row.version_id,
+                "material_role": row.material_role,
+                "usage_scope": row.usage_scope,
+            }
+            for row in db.scalars(
+                select(WritingProjectMaterial).where(
+                    WritingProjectMaterial.project_id == project.id,
+                    WritingProjectMaterial.status == "active",
+                    _active(WritingProjectMaterial),
+                ).order_by(WritingProjectMaterial.created_at)
+            )
+        ],
+        "warnings": [
+            *([f"缺少输入：{', '.join(missing)}"] if missing else []),
+            *([f"输入尚未确认：{', '.join(unconfirmed)}"] if unconfirmed else []),
+        ],
     }
     # Reuse the existing, tested domain endpoints. They execute deterministic
     # formulas and the Semantica adapter; no model is involved in these values.
-    criteria_result = evaluate_project_criteria(project.id, user=user, db=db)
-    reasoning_result = reason_project(
-        project.id,
-        # The user has already confirmed every required input at this point.
-        # Persist the deterministic Semantica conclusion as a verified writing
-        # fact; the separate publication gate still protects formal release.
-        WritingReasoningRequest(mode="publish"),
-        user=user,
-        db=db,
-    )
-    computation_result = run_project_baseline_computations(project.id, user=user, db=db)
+    toolbox_config = dict((scenario.config or {}).get("toolbox") or {})
+    reasoning_enabled = toolbox_config.get("reasoning_enabled", True) is not False
+    calculation_enabled = toolbox_config.get("calculation_enabled", True) is not False
+    criteria_result: dict[str, Any] = {"items": [], "skipped": True, "reason": "disabled_by_scenario"}
+    reasoning_result: dict[str, Any] = {"conclusions": [], "skipped": True, "reason": "disabled_by_scenario"}
+    computation_result: dict[str, Any] = {"items": [], "skipped": True, "reason": "disabled_by_scenario"}
+    if reasoning_enabled:
+        try:
+            criteria_result = evaluate_project_criteria(project.id, user=user, db=db)
+            reasoning_result = reason_project(
+                project.id,
+                # The user has already confirmed every required input at this point.
+                # Persist the deterministic Semantica conclusion as a verified writing
+                # fact; the separate publication gate still protects formal release.
+                WritingReasoningRequest(mode="publish"),
+                user=user,
+                db=db,
+            )
+        except HTTPException:
+            if missing_action == "block" and unverified_action == "block":
+                raise
+            criteria_result = {"items": [], "skipped": True, "reason": "inputs_not_ready"}
+            reasoning_result = {"conclusions": [], "skipped": True, "reason": "inputs_not_ready"}
+    if calculation_enabled:
+        try:
+            computation_result = run_project_baseline_computations(project.id, user=user, db=db)
+        except HTTPException:
+            if missing_action == "block" and unverified_action == "block":
+                raise
+            computation_result = {"items": [], "skipped": True, "reason": "inputs_not_ready"}
     current_selected = db.scalar(
         select(AlternativePlan).where(
             AlternativePlan.project_id == project.id,
@@ -1774,6 +2316,7 @@ def finalize_report_generation(
     db: Session = Depends(get_db),
 ):
     run, project, document = _generation(db, run_id, user, "editor")
+    scenario, _, _ = _scenario_runtime_settings(db, project)
     if run.status == "completed":
         return _generation_payload(db, run)
     if not run.assistant_message_id:
@@ -1817,7 +2360,12 @@ def finalize_report_generation(
             snapshot["version_number"] = source_version.version_number
         citation["snapshot"] = snapshot
         citations.append(citation)
-    computations = [serialize_row(row) for row in _latest_computation_rows(db, project.id)]
+    toolbox_config = dict((scenario.config or {}).get("toolbox") or {})
+    computations = (
+        [serialize_row(row) for row in _latest_computation_rows(db, project.id)]
+        if toolbox_config.get("calculation_enabled", True)
+        else []
+    )
     inference_facts = [
         serialize_row(row)
         for row in db.scalars(
@@ -1828,7 +2376,7 @@ def finalize_report_generation(
                 _active(ProjectFact),
             ).order_by(ProjectFact.created_at.desc())
         )
-    ]
+    ] if toolbox_config.get("reasoning_enabled", True) else []
     selected_plan = db.scalar(
         select(AlternativePlan).where(
             AlternativePlan.project_id == project.id,
@@ -1845,6 +2393,7 @@ def finalize_report_generation(
         computations=computations,
         inference_facts=inference_facts,
         selected_plan=serialize_row(selected_plan) if selected_plan else None,
+        target_sections=dict(toolbox_config.get("target_sections") or {}),
     )
     binding_map = {item["block_id"]: item for item in new_bindings}
     quality = _strict_report_quality(db, project=project, content=content, bindings=binding_map)
@@ -2122,11 +2671,14 @@ def confirm_fact(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _project(db, project_id, user, "reviewer")
+    project = _project(db, project_id, user, "reviewer")
     row = _tenant_row(db, ProjectFact, fact_id, user.tenant_id, "事实")
     if row.project_id != project_id or not row.active:
         raise HTTPException(status_code=404, detail="事实不存在")
     if payload.decision == "override":
+        _, _, writing_policy = _scenario_runtime_settings(db, project)
+        if writing_policy.get("allow_manual_override", True) is False:
+            raise HTTPException(status_code=409, detail="当前写作场景不允许人工修正输入")
         previous = row
         previous.active = False
         previous.freshness_status = "superseded"
@@ -2191,6 +2743,9 @@ def preview_input_changes(
 ):
     """Calculate a dependency impact without changing facts or the document."""
     project = _project(db, project_id, user, "editor")
+    _, _, writing_policy = _scenario_runtime_settings(db, project)
+    if writing_policy.get("allow_manual_override", True) is False:
+        raise HTTPException(status_code=409, detail="当前写作场景不允许人工修正输入")
     document, _ = _document(db, payload.document_id, user, "editor")
     if document.project_id != project.id:
         raise HTTPException(status_code=404, detail="文稿不属于当前方案任务")
@@ -2367,6 +2922,9 @@ def apply_input_changes(
 ):
     """Apply a still-current preview, recalculate, and create one new document version."""
     project = _project(db, project_id, user, "editor")
+    _, _, writing_policy = _scenario_runtime_settings(db, project)
+    if writing_policy.get("allow_manual_override", True) is False:
+        raise HTTPException(status_code=409, detail="当前写作场景不允许人工修正输入")
     preview = _tenant_row(db, WritingInputChange, payload.preview_id, user.tenant_id, "影响预览")
     if preview.project_id != project.id or preview.status != "preview":
         raise HTTPException(status_code=409, detail="影响预览不存在、已取消或已经应用")
@@ -3546,6 +4104,16 @@ def create_export(
     db: Session = Depends(get_db),
 ):
     document, project = _document(db, document_id, user, "publisher")
+    scenario = _tenant_row(
+        db, ScenarioPackageVersion, project.scenario_package_version_id, user.tenant_id, "场景包版本"
+    )
+    allowed_formats = set(
+        (scenario.output_schema or {}).get("allowed_formats")
+        or (scenario.config or {}).get("output", {}).get("allowed_formats")
+        or CONTENT_TYPES
+    )
+    if payload.output_format not in allowed_formats and payload.output_format != "evidence_docx":
+        raise HTTPException(status_code=409, detail="当前写作场景没有启用该导出格式")
     version = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
     if version is None or version.deleted_at is not None:
         raise HTTPException(status_code=409, detail="请先保存一个文稿版本")

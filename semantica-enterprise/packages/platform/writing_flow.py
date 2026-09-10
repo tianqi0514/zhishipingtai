@@ -107,14 +107,18 @@ def validate_and_parse_agent_report(
     sections = parsed.get("sections")
     if not isinstance(sections, list):
         raise ValueError("Agent 分章节结果缺少 sections 数组")
-    expected = {str(item["key"]): item for item in section_plan}
+    expected = {
+        str(item["key"]): item
+        for item in section_plan
+        if str(item.get("generation_mode") or "agent") in {"agent", "mixed"}
+    }
     actual_keys = [str(item.get("section_key") or "") for item in sections if isinstance(item, dict)]
     duplicates = sorted(key for key, count in Counter(actual_keys).items() if key and count > 1)
     if duplicates:
         raise ValueError(f"Agent 重复生成章节：{', '.join(duplicates)}")
     missing = [key for key in expected if key not in actual_keys]
     unknown = [key for key in actual_keys if key not in expected]
-    if missing or unknown or len(sections) != len(section_plan):
+    if missing or unknown or len(sections) != len(expected):
         details = []
         if missing:
             details.append(f"缺少 {', '.join(missing)}")
@@ -183,21 +187,21 @@ def build_generation_prompt(
             "instruction": str(item.get("instruction") or "根据已核验资料撰写正式业务内容。"),
         }
         for item in section_plan
+        if str(item.get("generation_mode") or "agent") in {"agent", "mixed"}
     ]
-    schema_example = {
-        "sections": [
+    schema_example = {"sections": [], "warnings": []}
+    if sections:
+        schema_example["sections"] = [
             {
-                "section_key": sections[0]["section_key"] if sections else "section",
-                "title": sections[0]["title"] if sections else "章节",
+                "section_key": sections[0]["section_key"],
+                "title": sections[0]["title"],
                 "content_nodes": [{"type": "p", "text": "正式正文，只写可交付内容，并使用[1]引用真实来源。"}],
                 "citation_refs": [1],
                 "metric_refs": [],
                 "inference_refs": [],
                 "warnings": [],
             }
-        ],
-        "warnings": [],
-    }
+        ]
     length_contract = ""
     if reference_characters:
         minimum = max(1, int(reference_characters * 0.78))
@@ -276,7 +280,15 @@ def _table_node(items: list[Any], node_id: str) -> dict[str, Any]:
     return {"id": node_id, "type": "table", "children": rows}
 
 
-def _select_section(section_keys: list[str], result_key: str) -> str:
+def _select_section(
+    section_keys: list[str],
+    result_key: str,
+    target_sections: dict[str, list[str]] | None = None,
+) -> str:
+    configured = list((target_sections or {}).get(result_key) or [])
+    for candidate in configured:
+        if candidate in section_keys:
+            return candidate
     for candidate in RESULT_SECTION_HINTS.get(result_key, ()):
         if candidate in section_keys:
             return candidate
@@ -293,6 +305,7 @@ def assemble_report_content(
     computations: list[dict[str, Any]],
     inference_facts: list[dict[str, Any]],
     selected_plan: dict[str, Any] | None,
+    target_sections: dict[str, list[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Assemble normal prose and server-owned authority nodes by section."""
     section_keys = [str(item["key"]) for item in section_plan]
@@ -330,7 +343,7 @@ def assemble_report_content(
             "freshness_status": "current",
             "metadata": {"formula": result.get("operation"), "dependencies": result.get("dependencies") or {}},
         }
-        by_section[_select_section(section_keys, result_key)].append((node, binding))
+        by_section[_select_section(section_keys, result_key, target_sections)].append((node, binding))
     for fact in inference_facts:
         block_id = f"inference-{fact['id']}"
         locator = dict(fact.get("source_locator") or {})
@@ -364,7 +377,13 @@ def assemble_report_content(
             "freshness_status": "current",
             "metadata": {"rule_id": locator.get("rule_id"), "reasoning_run_id": fact.get("source_id")},
         }
-        by_section[_select_section(section_keys, str(fact.get("fact_key") or "disaster_grade"))].append((node, binding))
+        by_section[
+            _select_section(
+                section_keys,
+                str(fact.get("fact_key") or "disaster_grade"),
+                target_sections,
+            )
+        ].append((node, binding))
     if selected_plan:
         route = dict((selected_plan.get("result") or {}).get("route") or {})
         block_id = f"plan-{selected_plan['id']}"
@@ -387,17 +406,20 @@ def assemble_report_content(
             "freshness_status": "current",
             "metadata": {"algorithm": selected_plan.get("algorithm") or {}, "plan_key": selected_plan.get("plan_key")},
         }
-        by_section[_select_section(section_keys, "selected_plan")].append((node, binding))
+        by_section[_select_section(section_keys, "selected_plan", target_sections)].append((node, binding))
 
     citations_by_number = {int(item["citation_number"]): item for item in citations}
     content: list[dict[str, Any]] = [_plate_node("h1", title, f"report-{run_id}-title")]
     bindings: list[dict[str, Any]] = []
     sequence = 0
-    for section in agent_sections:
-        key = str(section["section_key"])
+    agent_by_key = {str(section["section_key"]): section for section in agent_sections}
+    for planned_section in section_plan:
+        key = str(planned_section["key"])
+        section = agent_by_key.get(key)
         sequence += 1
-        content.append(_plate_node("h2", str(section["title"]), f"report-{run_id}-section-{sequence}"))
-        for node_index, raw in enumerate(section["content_nodes"], 1):
+        content.append(_plate_node("h2", str(planned_section["title"]), f"report-{run_id}-section-{sequence}"))
+        prose_nodes = list(section.get("content_nodes") or []) if section else []
+        for node_index, raw in enumerate(prose_nodes, 1):
             node_id = f"report-{run_id}-{sequence}-{node_index}"
             if raw["type"] == "table":
                 content.append(_table_node(raw["items"], node_id))
@@ -465,6 +487,8 @@ def assemble_report_content(
             binding["metadata"] = {**binding.get("metadata", {}), "content_hash_algorithm": "canonical-json-v1", "section_key": key}
             content.append(trusted_node)
             bindings.append(binding)
+        if not prose_nodes and not by_section.get(key):
+            content.append(_plate_node("p", "", f"report-{run_id}-{sequence}-empty"))
     return content, bindings
 
 
@@ -476,6 +500,7 @@ def report_quality_review(
     expected_computation_count: int = 0,
     expected_inference_count: int = 0,
     reference_characters: int | None = None,
+    require_citations: bool = True,
 ) -> dict[str, Any]:
     text = plate_plain_text(content)
     issues: list[dict[str, Any]] = []
@@ -502,8 +527,35 @@ def report_quality_review(
         issues.append({"code": "missing_computation_nodes", "severity": "error", "message": "确定性计算结果未完整写入正文"})
     if expected_inference_count and node_types["inference_conclusion"] < expected_inference_count:
         issues.append({"code": "missing_inference_nodes", "severity": "error", "message": "规则推演结论未完整写入正文"})
-    if node_types["knowledge_citation"] == 0:
+    if require_citations and node_types["knowledge_citation"] == 0:
         issues.append({"code": "missing_citations", "severity": "error", "message": "正文没有可核验的知识引用"})
+    if require_citations:
+        citation_count_by_heading: dict[str, int] = {}
+        current_heading = ""
+        for node in content:
+            node_type = str(node.get("type") or "")
+            if node_type in HEADING_TYPES:
+                current_heading = _node_text(node).strip()
+                citation_count_by_heading.setdefault(current_heading, 0)
+                continue
+            if current_heading:
+                citation_count_by_heading[current_heading] = citation_count_by_heading.get(current_heading, 0) + sum(
+                    1
+                    for child in walk_plate_nodes([node])
+                    if str(child.get("type") or "") == "knowledge_citation"
+                )
+        for section in section_plan:
+            if section.get("citation_required") is not True:
+                continue
+            title = str(section.get("title") or "").strip()
+            if title and citation_count_by_heading.get(title, 0) == 0:
+                issues.append(
+                    {
+                        "code": "missing_section_citation",
+                        "severity": "error",
+                        "message": f"章节“{title}”没有可核验的知识引用",
+                    }
+                )
     trusted_ids = {
         str(node.get("id") or "")
         for node in walk_plate_nodes(content)

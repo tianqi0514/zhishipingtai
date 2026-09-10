@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from packages.platform.writing_configuration import business_scenario_from_contract
 from packages.platform.writing_flow import (
     assemble_report_content,
     build_generation_prompt,
@@ -18,6 +20,36 @@ SECTIONS = [
     {"key": "grading", "title": "二、灾害分级", "instruction": "说明判定。"},
     {"key": "actions", "title": "三、处置任务", "instruction": "说明任务。"},
 ]
+
+ROOT = Path(__file__).resolve().parents[2]
+MIAOBI_APP = (ROOT / "apps/miaobi-web/src/App.tsx").read_text(encoding="utf-8")
+
+
+def test_upload_from_miaobi_switches_zhiku_to_the_task_space() -> None:
+    assert "const uploadSpaceId = materials[0]?.document.space_id || knowledgeContext?.spaces[0]?.id || '';" in MIAOBI_APP
+    assert "localStorage.setItem('chuanshen.pendingSpace', uploadSpaceId)" in MIAOBI_APP
+    assert "localStorage.setItem('miaobi.pendingProject', project.id)" in MIAOBI_APP
+
+
+def test_legacy_earthquake_inputs_are_projected_as_business_labels() -> None:
+    config = business_scenario_from_contract(
+        {
+            "input_schema": {
+                "type": "object",
+                "required": ["magnitude", "rescue_available"],
+                "properties": {
+                    "magnitude": {"type": "number"},
+                    "rescue_available": {"type": "number"},
+                },
+            },
+            "chapter_template": {"chapters": SECTIONS},
+        }
+    )
+    inputs = {item["key"]: item for item in config["inputs"]}
+    assert inputs["magnitude"]["label"] == "震级"
+    assert inputs["magnitude"]["unit"] == "级"
+    assert inputs["rescue_available"]["label"] == "可用搜救人员"
+    assert inputs["rescue_available"]["unit"] == "人"
 
 
 def _agent_payload() -> str:
@@ -137,6 +169,59 @@ def test_assembly_injects_authoritative_results_into_configured_sections() -> No
     )
     assert report["ok"] is True
     assert report["metrics"]["duplicate_sentence_ratio"] == 0
+
+
+def test_toolbox_result_uses_configured_section_and_manual_section_skips_agent() -> None:
+    section_plan = [
+        {"key": "summary", "title": "一、情况概述", "generation_mode": "agent"},
+        {"key": "resources", "title": "二、资源测算", "generation_mode": "toolbox"},
+        {"key": "notes", "title": "三、人工补充", "generation_mode": "manual"},
+    ]
+    payload = json.dumps(
+        {
+            "sections": [
+                {
+                    "section_key": "summary",
+                    "title": "一、情况概述",
+                    "content_nodes": [{"type": "p", "text": "根据已核验资料形成情况概述。"}],
+                    "citation_refs": [],
+                    "metric_refs": [],
+                    "inference_refs": [],
+                    "warnings": [],
+                }
+            ],
+            "warnings": [],
+        },
+        ensure_ascii=False,
+    )
+    agent_sections = validate_and_parse_agent_report(payload, section_plan)
+    content, _ = assemble_report_content(
+        run_id="configured-run",
+        title="资源报告",
+        section_plan=section_plan,
+        agent_sections=agent_sections,
+        citations=[],
+        computations=[
+            {
+                "id": "compute-target",
+                "input_fact_ids": ["required", "available"],
+                "result": {
+                    "operation": "resource_gap",
+                    "value": 180,
+                    "dependencies": {"required": "rescue_required", "available": "rescue_available"},
+                    "output_fact": {"fact_key": "rescue_gap", "label": "搜救人员缺口", "unit": "人"},
+                },
+            }
+        ],
+        inference_facts=[],
+        selected_plan=None,
+        target_sections={"rescue_gap": ["resources"]},
+    )
+    resources_heading = next(index for index, node in enumerate(content) if node.get("type") == "h2" and node["children"][0]["text"] == "二、资源测算")
+    notes_heading = next(index for index, node in enumerate(content) if node.get("type") == "h2" and node["children"][0]["text"] == "三、人工补充")
+    assert content[resources_heading + 1]["type"] == "computed_metric"
+    assert content[notes_heading + 1]["type"] == "p"
+    assert content[notes_heading + 1]["children"][0]["text"] == ""
 
 
 def test_quality_gate_rejects_duplicate_chapter_and_platform_process() -> None:

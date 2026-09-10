@@ -1034,6 +1034,57 @@ class OntologyTerm(Base, TimestampMixin):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class OntologySuggestion(Base, TimestampMixin):
+    """Evidence-backed candidate generated from published knowledge.
+
+    Suggestions never change the active ontology directly. They must be
+    accepted by a user and are only applied when an immutable ontology
+    version is published.
+    """
+
+    __tablename__ = "ontology_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "ontology_id", "source_fingerprint", "suggestion_kind", "code",
+            name="uq_ontology_suggestion_source",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    suggestion_kind: Mapped[str] = mapped_column(String(32), index=True)
+    code: Mapped[str] = mapped_column(String(200), index=True)
+    label: Mapped[str] = mapped_column(String(500))
+    definition: Mapped[str] = mapped_column(Text, default="")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    evidence: Mapped[list] = mapped_column(JSON, default=list)
+    source_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    decided_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OntologyVersion(Base, TimestampMixin):
+    """Immutable published snapshot used by applications and audit trails."""
+
+    __tablename__ = "ontology_versions"
+    __table_args__ = (
+        UniqueConstraint("ontology_id", "version", name="uq_ontology_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    ontology_id: Mapped[str] = mapped_column(ForeignKey("ontologies.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="published", index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class GraphRelease(Base, TimestampMixin):
     __tablename__ = "graph_releases"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -1519,6 +1570,25 @@ class WritingProjectMember(Base, TimestampMixin):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     role: Mapped[str] = mapped_column(String(32), default="editor")
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class WritingProjectMaterial(Base, TimestampMixin):
+    """Pinned document version and its business role inside one writing task."""
+
+    __tablename__ = "writing_project_materials"
+    __table_args__ = (
+        UniqueConstraint("project_id", "version_id", name="uq_writing_project_material_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
+    version_id: Mapped[str] = mapped_column(ForeignKey("document_versions.id"), index=True)
+    material_role: Mapped[str] = mapped_column(String(32), default="reference", index=True)
+    usage_scope: Mapped[str] = mapped_column(String(32), default="task_only", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    material_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    added_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
 
 
 class WritingDocument(Base, TimestampMixin):

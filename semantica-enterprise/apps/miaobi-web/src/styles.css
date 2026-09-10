@@ -234,6 +234,111 @@ button {
   background: #fff4dc;
   color: #9a6900;
 }
+.project-materials {
+  margin-bottom: 14px;
+}
+.material-list {
+  display: grid;
+  gap: 8px;
+}
+.material-list article {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 180px 34px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e5e9f0;
+  border-radius: 11px;
+  padding: 10px 12px;
+  background: #fbfcfe;
+}
+.material-list article > svg {
+  color: #4978bd;
+}
+.material-list b,
+.material-list small {
+  display: block;
+}
+.material-list small { margin-top: 3px; color: #7b879b; font-size: 11px; }
+.material-list select { min-width: 0; border: 1px solid #dce2eb; border-radius: 9px; background: #fff; padding: 8px 9px; color: #3e4b61; }
+.material-empty { display: flex; align-items: center; gap: 12px; border: 1px dashed #d7dee9; border-radius: 11px; background: #fafbfd; padding: 16px; color: #748096; }
+.material-empty > svg { color: #93a1b6; }
+.material-empty div { display: flex; flex-direction: column; gap: 3px; }
+.material-empty b { color: #3d4b62; font-size: 13px; }
+.material-empty span { font-size: 12px; }
+.scenario-config-dialog { width: min(980px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: hidden; }
+.scenario-config-note { margin: 0 0 12px; border-radius: 9px; background: #f1f6fd; padding: 9px 12px; color: #4e6483; font-size: 12px; }
+.scenario-config-tabs { display: flex; gap: 5px; border-bottom: 1px solid #e7ebf1; }
+.scenario-config-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 8px 8px 0 0; background: transparent; padding: 9px 13px; color: #68758a; }
+.scenario-config-tabs button.active { border-bottom-color: #1769e0; background: #f3f7fd; color: #1769e0; font-weight: 650; }
+.scenario-config-body { min-height: 330px; max-height: calc(100vh - 250px); overflow-y: auto; padding: 16px 2px; }
+.config-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.config-section-head h3, .config-publish-grid h3, .toolbox-targets h3 { margin: 0 0 5px; color: #27364e; font-size: 15px; }
+.config-section-head p, .toolbox-targets p { margin: 0; color: #7b879a; font-size: 12px; }
+.config-list { display: grid; gap: 10px; }
+.config-row { border: 1px solid #e3e8f0; border-radius: 11px; background: #fbfcfe; padding: 10px; }
+.input-config-row { display: grid; grid-template-columns: minmax(150px, 1fr) 130px 90px auto auto 34px; align-items: center; gap: 8px; }
+.section-config-row { display: grid; grid-template-columns: minmax(300px, 1fr) 170px auto 34px; align-items: center; gap: 10px; }
+.section-config-row > div { display: grid; gap: 7px; }
+.config-row input:not([type=checkbox]), .config-row textarea, .config-row select, .config-publish-grid input:not([type=checkbox]), .config-publish-grid select, .toolbox-targets select, .gate-config-row input { width: 100%; border: 1px solid #dbe1ea; border-radius: 9px; background: #fff; padding: 8px 9px; color: #34415a; }
+.config-row textarea { min-height: 58px; resize: vertical; }
+.config-row label, .config-publish-grid label, .gate-config-row label { display: flex; align-items: center; gap: 6px; color: #5f6c80; font-size: 12px; }
+.config-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.config-toggle-card { display: flex; align-items: flex-start; gap: 10px; border: 1px solid #e1e7f0; border-radius: 12px; background: #fff; padding: 14px; }
+.config-toggle-card input { margin-top: 3px; }
+.config-toggle-card span { display: flex; flex-direction: column; gap: 4px; }
+.config-toggle-card b { color: #30405a; font-size: 13px; }
+.config-toggle-card small { color: #7b879b; line-height: 1.45; }
+.config-toolbox-layout { display: grid; gap: 16px; }
+.toolbox-targets { border-top: 1px solid #e8ecf2; padding-top: 15px; }
+.toolbox-targets > label { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(220px, 1.5fr); align-items: center; gap: 12px; margin-top: 8px; color: #536177; font-size: 12px; }
+.config-publish-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.config-publish-grid > section { display: flex; flex-direction: column; gap: 11px; border: 1px solid #e2e7ef; border-radius: 12px; padding: 15px; }
+.config-publish-grid > section > label:not(.config-check) { display: grid; align-items: initial; }
+.config-publish-grid label small { color: #8893a4; }
+.format-checks { display: flex; flex-wrap: wrap; gap: 7px; }
+.format-checks label { border: 1px solid #dfe5ee; border-radius: 999px; background: #fafbfd; padding: 6px 9px; }
+.gate-config-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; }
+.scenario-config-saved { display: flex; align-items: center; gap: 7px; border-radius: 9px; background: #e9f8ef; padding: 9px 12px; color: #17784a; font-size: 12px; }
+.material-list small {
+  margin-top: 3px;
+  color: #7b879a;
+}
+.material-list select {
+  min-width: 0;
+  border: 1px solid #dce2eb;
+  border-radius: 9px;
+  background: #fff;
+  padding: 7px 9px;
+  color: #3e4a60;
+}
+.material-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px dashed #cfd8e7;
+  border-radius: 12px;
+  padding: 16px;
+  background: #fafcff;
+  color: #647089;
+}
+.material-empty > svg {
+  flex: 0 0 auto;
+  color: #7e9dca;
+}
+.material-empty b,
+.material-empty span {
+  display: block;
+}
+.material-empty b {
+  color: #33415a;
+  margin-bottom: 4px;
+}
+.danger-icon {
+  color: #c94a4a;
+}
+.warning-text {
+  color: #a76b13;
+}
 .overview-grid,
 .two-columns,
 .plan-grid {
@@ -1086,6 +1191,9 @@ td small {
 .writing-knowledge-baseline b { overflow: hidden; color: #253c61; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .writing-knowledge-baseline em { border-radius: 999px; background: #e3eeff; padding: 3px 6px; font-size: 9px; font-style: normal; white-space: nowrap; }
 @media (max-width: 900px) {
+  .input-config-row, .section-config-row, .config-cards, .config-publish-grid { grid-template-columns: 1fr; }
+  .material-list article { grid-template-columns: 28px minmax(0, 1fr) 34px; }
+  .material-list article select { grid-column: 2 / 3; }
   .knowledge-context-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .knowledge-space-list article, .knowledge-context-foot { align-items: flex-start; flex-direction: column; }
 }

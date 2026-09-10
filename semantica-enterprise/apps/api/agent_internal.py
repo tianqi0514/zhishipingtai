@@ -399,6 +399,14 @@ def agent_knowledge_search(
     )
     if assistant is None:
         raise HTTPException(409, "当前会话没有正在生成的回答")
+    conversation_settings = dict(claims["conversation"].settings or {})
+    filters = dict(payload.filters or {})
+    material_document_ids = list(conversation_settings.get("material_document_ids") or [])
+    if material_document_ids:
+        requested_document_ids = set(filters.get("document_ids") or material_document_ids)
+        if requested_document_ids - set(material_document_ids):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "工具请求超出方案任务材料范围")
+        filters["document_ids"] = sorted(requested_document_ids)
     result = execute_hybrid_search(
         db,
         tenant_id=claims["tenant_id"],
@@ -410,17 +418,18 @@ def agent_knowledge_search(
         use_vector=tool_settings["use_vector"],
         use_graph=tool_settings["use_graph"],
         use_reranker=tool_settings["use_reranker"],
-        filters=payload.filters,
+        filters=filters,
         audit_action="agent.knowledge.search",
         knowledge_release_ids=dict(
-            (claims["conversation"].settings or {}).get("knowledge_release_ids") or {}
+            conversation_settings.get("knowledge_release_ids") or {}
         ) or None,
         retrieval_context={
             "conversation_id": payload.conversation_id,
-            "writing_project_id": (claims["conversation"].settings or {}).get("writing_project_id"),
+            "writing_project_id": conversation_settings.get("writing_project_id"),
             "knowledge_product_release_id": (
-                claims["conversation"].settings or {}
-            ).get("knowledge_product_release_id"),
+                conversation_settings.get("knowledge_product_release_id")
+            ),
+            "material_document_ids": material_document_ids,
         },
     )
     metadata = dict(assistant.message_metadata or {})

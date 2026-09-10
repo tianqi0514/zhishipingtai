@@ -19,6 +19,8 @@ from apps.api.writing_schemas import AgentWritingRequest
 from packages.platform.database import Base, get_db
 from packages.platform.models import (
     Conversation,
+    Document,
+    DocumentVersion,
     KnowledgeProduct,
     KnowledgeProductRelease,
     KnowledgeProductReleaseItem,
@@ -35,6 +37,7 @@ from packages.platform.models import (
     WritingDocument,
     WritingDocumentVersion,
     WritingProjectMember,
+    WritingProjectMaterial,
 )
 from packages.platform.security import create_access_token, hash_password
 from packages.platform.writing import content_hash
@@ -258,6 +261,211 @@ def test_project_knowledge_context_exposes_locked_zhiku_release() -> None:
         assert context["fact_count"] == 18
         assert context["spaces"][0]["graph_available"] is True
         assert context["spaces"][0]["vector_available"] is True
+
+
+def test_project_materials_pin_versions_and_removal_preserves_zhiku_document() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        release_item = db.query(KnowledgeProductReleaseItem).filter_by(product_release_id=release.id).one()
+        document = Document(
+            tenant_id=release.tenant_id,
+            space_id=release_item.space_id,
+            title="临夏州地震应急预案",
+            status="published",
+        )
+        db.add(document)
+        db.flush()
+        version = DocumentVersion(
+            tenant_id=release.tenant_id,
+            document_id=document.id,
+            version_number=1,
+            filename="临夏州地震应急预案.docx",
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size=1024,
+            sha256="9" * 64,
+            object_key="tests/linxia-plan.docx",
+            status="processed",
+        )
+        db.add(version)
+        db.flush()
+        document.current_version_id = version.id
+
+        internal_document = Document(
+            tenant_id=release.tenant_id,
+            space_id=release_item.space_id,
+            title="旧版机器契约",
+            status="published",
+        )
+        db.add(internal_document)
+        db.flush()
+        internal_version = DocumentVersion(
+            tenant_id=release.tenant_id,
+            document_id=internal_document.id,
+            version_number=1,
+            filename="linxiaearthquakeemergency.ontology.yaml",
+            content_type="application/yaml",
+            size=512,
+            sha256="8" * 64,
+            object_key="tests/internal-ontology.yaml",
+            status="processed",
+        )
+        db.add(internal_version)
+        db.flush()
+        internal_document.current_version_id = internal_version.id
+        db.commit()
+
+        candidates = client.get(f"/api/v1/writing/projects/{project['id']}/material-candidates")
+        assert candidates.status_code == 200, candidates.text
+        assert [item["filename"] for item in candidates.json()] == [version.filename]
+        assert candidates.json()[0]["already_linked"] is False
+
+        internal_add = client.post(
+            f"/api/v1/writing/projects/{project['id']}/materials",
+            json={"document_id": internal_document.id},
+        )
+        assert internal_add.status_code == 409
+        assert "系统配置或中间产物" in internal_add.json()["detail"]
+
+        created = client.post(
+            f"/api/v1/writing/projects/{project['id']}/materials",
+            json={
+                "document_id": document.id,
+                "material_role": "policy_basis",
+                "usage_scope": "space_asset",
+            },
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["version"]["id"] == version.id
+        assert created.json()["version_pinned"] is True
+
+        duplicate = client.post(
+            f"/api/v1/writing/projects/{project['id']}/materials",
+            json={"document_id": document.id},
+        )
+        assert duplicate.status_code == 409
+
+        updated = client.put(
+            f"/api/v1/writing/projects/{project['id']}/materials/{created.json()['id']}",
+            json={"material_role": "reference", "usage_scope": "task_only"},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["material_role"] == "reference"
+
+        session = client.post(
+            f"/api/v1/writing/projects/{project['id']}/agent-sessions",
+            json={"purpose": "editing", "start_new": True},
+        )
+        assert session.status_code == 200, session.text
+        conversation = db.get(Conversation, session.json()["conversation_id"])
+        assert conversation.settings["material_document_ids"] == [document.id]
+
+        removed = client.delete(
+            f"/api/v1/writing/projects/{project['id']}/materials/{created.json()['id']}"
+        )
+        assert removed.status_code == 200, removed.text
+        assert removed.json() == {"deleted": True, "document_preserved": True}
+        assert db.get(Document, document.id).deleted_at is None
+        assert db.get(DocumentVersion, version.id).deleted_at is None
+        assert db.get(WritingProjectMaterial, created.json()["id"]).status == "removed"
+
+
+def test_business_scenario_config_round_trip_creates_executable_version() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        detail = client.get(f"/api/v1/writing/projects/{project['id']}").json()
+        packages = client.get("/api/v1/writing/scenario-packages").json()
+        package_id = packages[0]["id"]
+        current = client.get(f"/api/v1/writing/scenario-packages/{package_id}/business-config")
+        assert current.status_code == 200, current.text
+        config = current.json()["config"]
+        assert config["inputs"]
+        assert config["sections"]
+        assert next(item for item in config["inputs"] if item["key"] == "magnitude")["label"] == "地震震级"
+        assert all(item["runtime_effect"] for item in current.json()["setting_effects"])
+
+        config["sections"][0]["purpose"] = "说明方案编制目的、适用范围和知识依据。"
+        config["toolbox"]["target_sections"]["rescue_gap"] = [config["sections"][0]["key"]]
+        config["writing_policy"]["allow_manual_override"] = False
+        config["output"]["allowed_formats"] = ["docx"]
+        config["activate"] = True
+        validated = client.post(
+            f"/api/v1/writing/scenario-packages/{package_id}/business-config/validate",
+            json=config,
+        )
+        assert validated.status_code == 200, validated.text
+        assert validated.json()["valid"] is True
+        saved = client.put(
+            f"/api/v1/writing/scenario-packages/{package_id}/business-config",
+            json=config,
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["version"]["status"] == "active"
+        assert saved.json()["config"]["sections"][0]["purpose"].startswith("说明方案编制目的")
+        assert detail["scenario_package_version_id"] != saved.json()["version"]["id"]
+
+        pinned = client.post(
+            "/api/v1/writing/projects",
+            json={
+                "code": "configured-earthquake",
+                "name": "已配置地震报告",
+                "scenario_package_version_id": saved.json()["version"]["id"],
+                "knowledge_product_release_id": release.id,
+            },
+        )
+        assert pinned.status_code == 200, pinned.text
+        pinned_detail = client.get(f"/api/v1/writing/projects/{pinned.json()['id']}")
+        assert pinned_detail.status_code == 200, pinned_detail.text
+        assert pinned_detail.json()["scenario"]["business_config"]["output"]["allowed_formats"] == ["docx"]
+        assert pinned_detail.json()["scenario"]["business_config"]["toolbox"]["target_sections"]["rescue_gap"] == [config["sections"][0]["key"]]
+
+        fact = client.post(
+            f"/api/v1/writing/projects/{pinned.json()['id']}/facts",
+            json={
+                "fact_key": "magnitude",
+                "label": "震级",
+                "fact_type": "official_brief",
+                "value": {"number": 6.2},
+                "unit": "级",
+                "source_type": "official_brief",
+                "verification_status": "verified",
+            },
+        )
+        assert fact.status_code == 200, fact.text
+        blocked_override = client.post(
+            f"/api/v1/writing/projects/{pinned.json()['id']}/facts/{fact.json()['id']}/confirm",
+            json={"decision": "override", "new_value": {"number": 6.3}, "reason": "测试配置约束"},
+        )
+        assert blocked_override.status_code == 409
+
+        writing_document = WritingDocument(
+            tenant_id=release.tenant_id,
+            project_id=pinned.json()["id"],
+            title="导出约束测试",
+            status="draft",
+            created_by=release.created_by,
+        )
+        db.add(writing_document)
+        db.flush()
+        writing_version = WritingDocumentVersion(
+            tenant_id=release.tenant_id,
+            document_id=writing_document.id,
+            version=1,
+            content=[{"id": "title", "type": "h1", "children": [{"text": "导出约束测试"}]}],
+            content_hash=content_hash([{"id": "title", "type": "h1", "children": [{"text": "导出约束测试"}]}]),
+            scenario_package_version_id=saved.json()["version"]["id"],
+            knowledge_product_release_id=release.id,
+            status="draft",
+            created_by=release.created_by,
+        )
+        db.add(writing_version)
+        db.flush()
+        writing_document.current_version_id = writing_version.id
+        db.commit()
+        blocked_export = client.post(
+            f"/api/v1/writing/documents/{writing_document.id}/exports",
+            json={"output_format": "pdf"},
+        )
+        assert blocked_export.status_code == 409
 
 
 def test_writing_project_fact_computation_and_local_stale_propagation() -> None:
@@ -591,6 +799,7 @@ def test_project_knowledge_search_is_locked_to_product_release(monkeypatch) -> N
         assert captured["retrieval_context"] == {
             "writing_project_id": project["id"],
             "knowledge_product_release_id": release.id,
+            "material_document_ids": [],
         }
 
 

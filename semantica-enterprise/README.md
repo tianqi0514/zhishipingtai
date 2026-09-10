@@ -177,6 +177,7 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [Plate 完整版集成](docs/miaobi/MIAOBI_PLATE_INTEGRATION.md)
 - [完整 Plate 编辑器重构](docs/miaobi/FULL_PLATE_EDITOR_REDESIGN.md)
 - [妙笔 15 分钟上手演示](docs/miaobi/MIAOBI_15_MINUTE_HANDS_ON_DEMO.md)
+- [妙笔与传神智库的产品边界](docs/miaobi/MIAOBI_ZHIKU_INTEGRATION_BOUNDARY.md)
 - [从上传到报告质量验收](docs/miaobi/MIAOBI_UPLOAD_TO_REPORT_ACCEPTANCE.md)
 - [妙笔 API](docs/miaobi/MIAOBI_API.md)
 - [Semantica 推演集成](docs/miaobi/MIAOBI_SEMANTICA_INTEGRATION.md)

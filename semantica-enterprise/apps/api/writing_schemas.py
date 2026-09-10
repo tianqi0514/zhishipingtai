@@ -73,6 +73,120 @@ class WritingProjectUpdate(StrictModel):
     config: dict[str, Any] | None = None
 
 
+class WritingProjectMaterialCreate(StrictModel):
+    document_id: str
+    version_id: str | None = None
+    material_role: Literal["policy_basis", "task_data", "reference", "attachment"] = "reference"
+    usage_scope: Literal["task_only", "space_asset"] = "task_only"
+
+
+class WritingProjectMaterialUpdate(StrictModel):
+    material_role: Literal["policy_basis", "task_data", "reference", "attachment"] | None = None
+    usage_scope: Literal["task_only", "space_asset"] | None = None
+
+
+class ScenarioInputSetting(StrictModel):
+    key: str
+    label: str = Field(min_length=1, max_length=200)
+    data_type: Literal["string", "number", "integer", "boolean", "object", "array"] = "string"
+    unit: str | None = Field(default=None, max_length=64)
+    required: bool = True
+    confirmation_required: bool = True
+    source_guidance: str = Field(default="", max_length=500)
+    minimum: float | None = None
+    maximum: float | None = None
+
+    _normalize_key = field_validator("key")(_code)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError("输入项最小值不能大于最大值")
+        return self
+
+
+class ScenarioSectionSetting(StrictModel):
+    key: str
+    title: str = Field(min_length=1, max_length=300)
+    purpose: str = Field(min_length=1, max_length=1000)
+    generation_mode: Literal["agent", "toolbox", "mixed", "manual"] = "agent"
+    required_inputs: list[str] = Field(default_factory=list)
+    toolbox_outputs: list[str] = Field(default_factory=list)
+    citation_required: bool = True
+
+    _normalize_key = field_validator("key")(_code)
+
+
+class ScenarioToolboxSetting(StrictModel):
+    reasoning_enabled: bool = True
+    rule_set_ids: list[str] = Field(default_factory=list)
+    calculation_enabled: bool = True
+    formula_ids: list[str] = Field(default_factory=list)
+    target_sections: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ScenarioWritingPolicy(StrictModel):
+    missing_input_action: Literal["block", "warn"] = "block"
+    unverified_fact_action: Literal["block", "warn"] = "block"
+    require_citations: bool = True
+    allow_manual_override: bool = True
+
+
+class ScenarioOutputSetting(StrictModel):
+    title_pattern: str = Field(default="{project_name}", min_length=1, max_length=300)
+    allowed_formats: list[Literal["docx", "pdf", "json", "xlsx", "geojson"]] = Field(
+        default_factory=lambda: ["docx", "pdf"]
+    )
+
+    @field_validator("allowed_formats")
+    @classmethod
+    def formats_must_be_unique(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("至少启用一种导出格式")
+        if len(value) != len(set(value)):
+            raise ValueError("导出格式不能重复")
+        return value
+
+
+class ScenarioBusinessConfig(StrictModel):
+    inputs: list[ScenarioInputSetting]
+    sections: list[ScenarioSectionSetting]
+    toolbox: ScenarioToolboxSetting = Field(default_factory=ScenarioToolboxSetting)
+    writing_policy: ScenarioWritingPolicy = Field(default_factory=ScenarioWritingPolicy)
+    output: ScenarioOutputSetting = Field(default_factory=ScenarioOutputSetting)
+    decision_gates: list[dict[str, Any]]
+    comparison_dimensions: list[dict[str, Any]] = Field(default_factory=list)
+    minimum_plan_count: int = Field(default=2, ge=2, le=5)
+    default_plan_count: int = Field(default=3, ge=2, le=5)
+    activate: bool = False
+
+    @model_validator(mode="after")
+    def validate_business_references(self):
+        input_keys = [item.key for item in self.inputs]
+        section_keys = [item.key for item in self.sections]
+        if not input_keys:
+            raise ValueError("至少配置一个报告输入项")
+        if not section_keys:
+            raise ValueError("至少配置一个报告章节")
+        if len(input_keys) != len(set(input_keys)):
+            raise ValueError("输入项编码不能重复")
+        if len(section_keys) != len(set(section_keys)):
+            raise ValueError("章节编码不能重复")
+        unknown_inputs = sorted(
+            {key for section in self.sections for key in section.required_inputs} - set(input_keys)
+        )
+        if unknown_inputs:
+            raise ValueError(f"章节引用了未配置的输入项：{', '.join(unknown_inputs)}")
+        unknown_sections = sorted(
+            {key for keys in self.toolbox.target_sections.values() for key in keys} - set(section_keys)
+        )
+        if unknown_sections:
+            raise ValueError(f"推演工具引用了未配置的章节：{', '.join(unknown_sections)}")
+        if self.default_plan_count < self.minimum_plan_count:
+            raise ValueError("默认方案数量不能小于最少方案数量")
+        return self
+
+
 class WritingProjectReleaseRebase(StrictModel):
     knowledge_product_release_id: str
     reason: str = Field(min_length=2, max_length=1000)
