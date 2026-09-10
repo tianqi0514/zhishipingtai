@@ -402,11 +402,14 @@ def agent_knowledge_search(
     conversation_settings = dict(claims["conversation"].settings or {})
     filters = dict(payload.filters or {})
     material_document_ids = list(conversation_settings.get("material_document_ids") or [])
-    if material_document_ids:
-        requested_document_ids = set(filters.get("document_ids") or material_document_ids)
-        if requested_document_ids - set(material_document_ids):
+    allowed_document_ids = list(conversation_settings.get("allowed_document_ids") or material_document_ids)
+    if allowed_document_ids:
+        requested_document_ids = set(filters.get("document_ids") or allowed_document_ids)
+        if requested_document_ids - set(allowed_document_ids):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "工具请求超出方案任务材料范围")
         filters["document_ids"] = sorted(requested_document_ids)
+    elif filters.get("document_ids"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "工具请求超出方案任务材料范围")
     result = execute_hybrid_search(
         db,
         tenant_id=claims["tenant_id"],
@@ -430,6 +433,7 @@ def agent_knowledge_search(
                 conversation_settings.get("knowledge_product_release_id")
             ),
             "material_document_ids": material_document_ids,
+            "allowed_document_ids": allowed_document_ids,
         },
     )
     metadata = dict(assistant.message_metadata or {})

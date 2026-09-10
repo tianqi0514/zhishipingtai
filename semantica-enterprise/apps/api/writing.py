@@ -352,6 +352,42 @@ def _is_internal_writing_configuration(document: Document, version: DocumentVers
     return bool(tags & {"system-configuration", "internal-contract", "系统配置", "内部契约"})
 
 
+def _project_allowed_document_ids(
+    db: Session,
+    *,
+    project_id: str,
+    tenant_id: str,
+    space_ids: list[str],
+) -> tuple[list[str], list[str]]:
+    """Return explicit materials and the safe effective writing scope.
+
+    Older tasks did not persist material selections. They retain release-wide
+    compatibility, but legacy ontology/spec/chunk contracts are never exposed
+    to the writing Agent as report evidence.
+    """
+    selected = _project_material_document_ids(db, project_id)
+    if selected:
+        return selected, selected
+    allowed: list[str] = []
+    documents = list(
+        db.scalars(
+            select(Document).where(
+                Document.tenant_id == tenant_id,
+                Document.space_id.in_(space_ids),
+                Document.current_version_id.is_not(None),
+                _active(Document),
+            )
+        )
+    )
+    for document in documents:
+        version = db.get(DocumentVersion, document.current_version_id)
+        if version is None or version.deleted_at is not None:
+            continue
+        if not _is_internal_writing_configuration(document, version):
+            allowed.append(document.id)
+    return selected, sorted(set(allowed))
+
+
 def _section_plan(version: ScenarioPackageVersion) -> list[dict[str, Any]]:
     rows = (version.chapter_template or {}).get("chapters") or []
     result = []
@@ -1400,13 +1436,20 @@ def search_project_knowledge(
     """Search the immutable Knowledge Product release bound to this project."""
     project = _project(db, project_id, user)
     space_ids, knowledge_release_ids = _release_scope(db, project, user)
-    material_document_ids = _project_material_document_ids(db, project.id)
+    material_document_ids, allowed_document_ids = _project_allowed_document_ids(
+        db,
+        project_id=project.id,
+        tenant_id=user.tenant_id,
+        space_ids=space_ids,
+    )
     effective_filters = dict(payload.filters or {})
-    if material_document_ids:
-        requested_document_ids = set(effective_filters.get("document_ids") or material_document_ids)
-        if requested_document_ids - set(material_document_ids):
+    if allowed_document_ids:
+        requested_document_ids = set(effective_filters.get("document_ids") or allowed_document_ids)
+        if requested_document_ids - set(allowed_document_ids):
             raise HTTPException(status_code=403, detail="检索条件包含未加入当前方案任务的材料")
         effective_filters["document_ids"] = sorted(requested_document_ids)
+    elif effective_filters.get("document_ids"):
+        raise HTTPException(status_code=403, detail="检索条件包含当前方案任务不可用的材料")
     try:
         result = execute_hybrid_search(
             db,
@@ -1426,6 +1469,8 @@ def search_project_knowledge(
                 "writing_project_id": project.id,
                 "knowledge_product_release_id": project.knowledge_product_release_id,
                 "material_document_ids": material_document_ids,
+                "allowed_document_ids": allowed_document_ids,
+                "retrieval_scope": "task_materials" if material_document_ids else "knowledge_product_release",
             },
         )
     except ValueError as exc:
@@ -1543,7 +1588,12 @@ def create_writing_agent_session(
         existing.status = "archived"
 
     space_ids, knowledge_release_ids = _release_scope(db, project, user)
-    material_document_ids = _project_material_document_ids(db, project.id)
+    material_document_ids, allowed_document_ids = _project_allowed_document_ids(
+        db,
+        project_id=project.id,
+        tenant_id=user.tenant_id,
+        space_ids=space_ids,
+    )
     harness_session_id = f"miaobi-{uuid.uuid4().hex}"
     session = WritingAgentSession(
         tenant_id=user.tenant_id,
@@ -1570,6 +1620,7 @@ def create_writing_agent_session(
             "knowledge_product_release_id": project.knowledge_product_release_id,
             "knowledge_release_ids": knowledge_release_ids,
             "material_document_ids": material_document_ids,
+            "allowed_document_ids": allowed_document_ids,
             "space_ids": space_ids,
             "use_keyword": True,
             "use_vector": True,

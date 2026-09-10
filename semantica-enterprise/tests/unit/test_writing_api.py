@@ -358,6 +358,7 @@ def test_project_materials_pin_versions_and_removal_preserves_zhiku_document() -
         assert session.status_code == 200, session.text
         conversation = db.get(Conversation, session.json()["conversation_id"])
         assert conversation.settings["material_document_ids"] == [document.id]
+        assert conversation.settings["allowed_document_ids"] == [document.id]
 
         removed = client.delete(
             f"/api/v1/writing/projects/{project['id']}/materials/{created.json()['id']}"
@@ -367,6 +368,16 @@ def test_project_materials_pin_versions_and_removal_preserves_zhiku_document() -
         assert db.get(Document, document.id).deleted_at is None
         assert db.get(DocumentVersion, version.id).deleted_at is None
         assert db.get(WritingProjectMaterial, created.json()["id"]).status == "removed"
+
+        fallback_session = client.post(
+            f"/api/v1/writing/projects/{project['id']}/agent-sessions",
+            json={"purpose": "editing", "start_new": True},
+        )
+        assert fallback_session.status_code == 200, fallback_session.text
+        fallback_conversation = db.get(Conversation, fallback_session.json()["conversation_id"])
+        assert fallback_conversation.settings["material_document_ids"] == []
+        assert fallback_conversation.settings["allowed_document_ids"] == [document.id]
+        assert internal_document.id not in fallback_conversation.settings["allowed_document_ids"]
 
 
 def test_business_scenario_config_round_trip_creates_executable_version() -> None:
@@ -800,6 +811,8 @@ def test_project_knowledge_search_is_locked_to_product_release(monkeypatch) -> N
             "writing_project_id": project["id"],
             "knowledge_product_release_id": release.id,
             "material_document_ids": [],
+            "allowed_document_ids": [],
+            "retrieval_scope": "knowledge_product_release",
         }
 
 

@@ -426,4 +426,4 @@ Python 回归在该镜像 Python 3.13.15 内只读挂载当前源码执行，共
 - 报告章节生成按 `agent/toolbox/mixed/manual` 区分。Agent 只生成允许的章节，工具箱结果由服务端插入配置目标章节；关闭的推演或计算工具不会产生对应运行和可信块。
 - 重写 15 分钟演示脚本，明确语义模型由知识生成、报告规范内置于妙笔、Chunk 属于内部加工结果，并增加真实材料选择、场景配置、右侧依据和局部更新演示。
 - 最终浏览器回归发现妙笔跳转智库上传时仍沿用此前浏览的全局空间，可能造成误传。修复为携带任务材料或知识产品 Release 所属空间，智库加载后真实切换空间；客户样本任务已验证自动进入“妙笔·客户样本盲测空间”。
-- 本机最终镜像 `sha256:06fa21fc3ddc0170cfecdd3a72c2df23998992b48d917b1e112b7bd92d6d1aba` 完成重建。最终 Python 单元回归收集并通过 556 项，Plate 组件 14/14、TypeScript 与生产构建通过；13 个当前启用服务全部 running/healthy，浏览器三档桌面分辨率无整体横向溢出，Console 为 0 error、0 warning。
+- 本机最终镜像 `sha256:f4899f1e758cabad689cf6aeef16af638eefe5291e3c807f322e3f08c6b419b2` 完成重建。最终 Python 单元回归收集并通过 556 项，Plate 组件 14/14、TypeScript 与生产构建通过；13 个当前启用服务全部 running/healthy，浏览器三档桌面分辨率无整体横向溢出，Console 为 0 error、0 warning。旧任务未显式选择材料时仍可按知识产品 Release 写作，但服务端会先建立业务文档白名单，Ontology、Report Spec 和 Chunks 等内部契约不会进入 Agent 检索范围。
