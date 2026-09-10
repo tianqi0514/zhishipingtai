@@ -482,8 +482,12 @@ def validate_plate_content(content: list[dict[str, Any]], bindings: dict[str, di
         if block_id:
             if block_id in block_ids:
                 issues.append({"code": "duplicate_block_id", "block_id": block_id, "message": "正文块标识重复"})
+                continue
             block_ids.add(block_id)
         if node_type not in TRUSTED_BLOCK_TYPES:
+            binding = bindings.get(block_id)
+            if binding and binding.get("freshness_status") == "stale":
+                issues.append({"code": "stale_paragraph", "block_id": block_id, "message": "本段使用的输入或关系已变化，请重新核对并接受修改建议"})
             continue
         if not block_id:
             issues.append({"code": "missing_block_id", "message": "可信业务块缺少稳定标识"})
@@ -531,6 +535,8 @@ def affected_dependency_ids(
         for binding in bindings
         if str(binding.get("fact_id") or "") in changed_fact_ids
         or str(binding.get("computation_run_id") or "") in affected_runs
+        or changed_fact_ids.intersection((binding.get("metadata_json") or binding.get("metadata") or {}).get("input_fact_ids") or [])
+        or affected_runs.intersection((binding.get("metadata_json") or binding.get("metadata") or {}).get("computation_run_ids") or [])
     }
     return {
         "fact_ids": sorted(changed_fact_ids),

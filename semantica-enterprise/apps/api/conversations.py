@@ -31,6 +31,8 @@ from packages.platform.models import (
     User,
     WritingAgentSession,
     WritingEventProjection,
+    WritingGenerationRun,
+    WritingAgentEdit,
 )
 
 
@@ -678,6 +680,19 @@ def _project_event(
         if event_type == "turn_failed" and not already_terminal:
             assistant.error_code = str(payload.get("code") or "AGENT_TURN_FAILED")
             assistant.error_message = str(payload.get("message") or payload.get("reason") or "生成失败")[:1000]
+        if writing_session is not None and assistant.status in {"failed", "cancelled"}:
+            edit = db.scalar(select(WritingAgentEdit).where(WritingAgentEdit.assistant_message_id == assistant.id, WritingAgentEdit.status == "generating"))
+            if edit:
+                edit.status = "failed"
+            generation = db.scalar(select(WritingGenerationRun).where(
+                WritingGenerationRun.assistant_message_id == assistant.id,
+                WritingGenerationRun.status == "agent_running"))
+            if generation:
+                generation.status = "agent_failed" if assistant.status == "failed" else "cancelled"
+                generation.stage = generation.status
+                generation.error_code = assistant.error_code
+                generation.error_message = assistant.error_message or "本次写作已停止"
+                generation.finished_at = datetime.now(timezone.utc)
         conversation.status = "active"
         conversation.last_message_at = datetime.now(timezone.utc)
         for credential in db.scalars(

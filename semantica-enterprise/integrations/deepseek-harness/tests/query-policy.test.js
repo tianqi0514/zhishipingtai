@@ -20,6 +20,14 @@ test('allows conversational questions without weakening knowledge retrieval', ()
   assert.equal(requiresKnowledgeSearch('它的主要优势是什么？'), true)
 })
 
+test('scoped text revision does not misclassify selected numbers as a live query', () => {
+  const prompt = '[妙笔局部修订]\n缩写：车辆数量和到达时间待现场确认。'
+  assert.deepEqual(evidenceRequirements(prompt, { writing_revision_action: 'shorten' }), ['writing_get_project_context'])
+  assert.ok(evidenceRequirements(prompt).includes('structured_execute_query'))
+  assert.ok(evidenceRequirements(prompt, { writing_revision_action: 'fact_check' }).includes('structured_execute_query'))
+  assert.ok(evidenceRequirements('实时车辆数量是多少？', { writing_revision_action: 'shorten' }).includes('structured_execute_query'))
+})
+
 
 test('requires deterministic structured evidence for numeric questions', () => {
   assert.equal(requiresStructuredQuery('2026 年 NexusOne 的销售总额是多少？'), true)

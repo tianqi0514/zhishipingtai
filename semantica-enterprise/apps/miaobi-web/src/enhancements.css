@@ -298,3 +298,33 @@
   .toolbox-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .task-intro-card { align-items: flex-start; flex-direction: column; }
 }
+/* Chapter evidence keeps the prose clean; details stay in task/right panels. */
+.chapter-evidence-panel { background:#fff; border:1px solid #e4e8ef; border-radius:12px; padding:18px; margin-bottom:16px; }
+.chapter-evidence-panel header,.chapter-evidence-panel footer { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.chapter-evidence-panel h3 { margin:0 0 4px; }
+.chapter-evidence-panel small,.relation-proof small { display:block; color:#748094; font-size:12px; margin-top:5px; }
+.chapter-evidence-panel details { margin:12px 0; }
+.chapter-evidence-panel summary,.paragraph-evidence-list summary,.chapter-knowledge-settings summary { cursor:pointer; line-height:1.7; }
+.relation-proof { border-left:2px solid #dce8fa; padding-left:12px; }
+.relation-proof .status { margin-right:8px; }
+.chapter-knowledge-settings { margin-top:10px; grid-column:1/-1; }
+.chapter-knowledge-settings fieldset { border:0; margin:10px 0; padding:0; }
+.chapter-knowledge-settings legend { font-size:12px; color:#68778d; }
+.chapter-knowledge-settings label.knowledge-chip { display:inline-flex; gap:5px; align-items:center; font-size:12px; padding:4px 8px; background:#f4f7fb; border-radius:8px; margin:3px; }
+.knowledge-chip input { width:auto!important; }
+.paragraph-evidence-list { margin:12px 0 20px; }
+.paragraph-evidence-list>details { border:1px solid #e7ebf0; border-radius:10px; padding:10px; margin:8px 0; overflow-wrap:anywhere; }
+.paragraph-evidence-list small { display:block; color:#778398; margin:3px 0; }
+.paragraph-evidence-list summary { font-size:13px; }
+.paragraph-source { border-top:1px solid #edf0f5; padding-top:8px; margin-top:8px; }
+.paragraph-source button { display:block; text-align:left; white-space:normal; }
+.source-preview { max-height:380px; overflow:auto; border:1px solid #dce7f7; padding:12px; border-radius:10px; }
+.source-preview p { white-space:pre-wrap; }
+.editor-toolbar { flex-wrap:wrap; overflow:visible; }
+.document-pane { min-width:0; }
+@media (max-width:1480px) {
+  .writing-layout { grid-template-columns:minmax(0,1fr) 330px; }
+  .outline-pane { display:none; }
+}
+.active-paragraph { border-color:#76a8ef!important; background:#f7faff; }
+.assistant-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }

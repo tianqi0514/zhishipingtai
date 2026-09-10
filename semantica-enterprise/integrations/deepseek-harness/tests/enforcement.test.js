@@ -143,6 +143,24 @@ test('numeric questions require structured execution, not prose search', () => {
   assert.match(steered[0].content[0].text, /structured_schema_search/)
 })
 
+test('revision enforcement resumes editing instead of asking for a tool summary', () => {
+  const { listeners, sections } = fixture()
+  const steered = []
+  const agent = {
+    session: { events: [{ type: 'user/message', data: {
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: '[妙笔局部修订]\n请缩写车辆数量待确认。\n<chuanshen-retrieval-settings>{"writing_revision_action":"shorten"}</chuanshen-retrieval-settings>' }],
+    } }] },
+    steer(message) { steered.push(message) },
+  }
+  listeners.get('agent/turn-stopping')({ agent, turn: 9, signal: new AbortController().signal })
+  assert.equal(steered.length, 1)
+  assert.match(steered[0].content[0].text, /shorten 编辑任务/)
+  assert.match(steered[0].content[0].text, /不要总结工具调用成功/)
+  assert.doesNotMatch(steered[0].content[0].text, /Plan\/IR/)
+  assert.match(sections[1].text, /缩写必须实质压缩/)
+})
+
 
 test('mixed metric definition questions require both evidence channels', () => {
   const { listeners } = fixture()

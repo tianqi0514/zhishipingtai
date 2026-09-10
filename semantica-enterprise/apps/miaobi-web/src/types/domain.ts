@@ -125,6 +125,7 @@ export type ProjectMaterialCandidate = {
 };
 
 export type WritingDocument = {
+  current_version_id?: string;
   id: string;
   project_id: string;
   title: string;

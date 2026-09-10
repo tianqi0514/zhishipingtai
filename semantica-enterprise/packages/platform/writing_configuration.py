@@ -61,6 +61,7 @@ def compile_business_scenario(payload: dict[str, Any]) -> dict[str, Any]:
             "required_inputs": list(item.get("required_inputs") or []),
             "toolbox_outputs": list(item.get("toolbox_outputs") or []),
             "citation_required": bool(item.get("citation_required", True)),
+            "knowledge": dict(item.get("knowledge") or {}),
         }
         for item in payload["sections"]
     ]
@@ -136,6 +137,7 @@ def business_scenario_from_contract(contract: dict[str, Any]) -> dict[str, Any]:
                 "required_inputs": list(item.get("required_inputs") or []),
                 "toolbox_outputs": list(item.get("toolbox_outputs") or []),
                 "citation_required": bool(item.get("citation_required", True)),
+                "knowledge": dict(item.get("knowledge") or {}),
             }
         )
     config = dict(contract.get("config") or {})

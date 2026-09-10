@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { DeepSeekHarness } from '/opt/deepseek-harness/packages/sdk/client/src/index.ts'
-import { evidenceRequirements } from './query-policy.js'
+import { evidenceRequirements, WRITING_REVISION_ACTIONS } from './query-policy.js'
 
 const PORT = Number(process.env.PORT || 8090)
 const PLATFORM_API = (process.env.PLATFORM_API || 'http://api:8080/api/v1').replace(/\/$/, '')
@@ -36,6 +36,7 @@ function retrievalSettings(value) {
   const settings = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
   const configuredTopK = Number(settings.top_k)
   return {
+    writing_revision_action: WRITING_REVISION_ACTIONS.has(settings.writing_revision_action) ? settings.writing_revision_action : null,
     use_keyword: settings.use_keyword !== false,
     use_vector: settings.use_vector !== false,
     use_graph: settings.use_graph !== false,

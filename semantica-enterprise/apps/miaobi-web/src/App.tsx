@@ -30,6 +30,7 @@ import { createFrameDeltaBuffer } from './streaming';
 import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeContext, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ProjectMaterial, ProjectMaterialCandidate, ScenarioPackage, WritingAgentSession, WritingDocument, WritingGenerationRun, WritingInputChange } from './types/domain';
 import type { MarkdownSuggestionInsertion } from './editor/MiaobiEditor';
 import { ScenarioConfigDialog } from './components/ScenarioConfigDialog';
+import { ChapterEvidencePanel, ParagraphEvidenceList } from './components/ChapterEvidence';
 
 type Product = { id: string; name: string; code: string };
 type Release = { id: string; version: number; status: string };
@@ -135,7 +136,9 @@ export function App() {
     setProjectId(next);
   };
 
+  const detailRequest = useRef(0);
   const loadProjectDetails = async (id: string) => {
+    const request = ++detailRequest.current;
     const [detail, factRows, planRows, documentRows, computationRows, gateRows, context, materialRows] = await Promise.all([
       api<Project>(`/writing/projects/${id}`),
       api<Fact[]>(`/writing/projects/${id}/facts`),
@@ -146,6 +149,8 @@ export function App() {
       api<KnowledgeContext>(`/writing/projects/${id}/knowledge-context`),
       api<ProjectMaterial[]>(`/writing/projects/${id}/materials`),
     ]);
+    const fullDocument = documentRows.length ? await api<WritingDocument>(`/writing/documents/${documentRows[0].id}`) : null;
+    if (request !== detailRequest.current) return;
     setProject(detail);
     setFacts(factRows);
     setPlans(planRows);
@@ -154,7 +159,7 @@ export function App() {
     setGates(gateRows);
     setKnowledgeContext(context);
     setMaterials(materialRows);
-    setDocument(documentRows.length ? await api<WritingDocument>(`/writing/documents/${documentRows[0].id}`) : null);
+    setDocument(fullDocument);
   };
 
   useEffect(() => {
@@ -171,15 +176,17 @@ export function App() {
       setMaterials([]);
       return;
     }
+    setProject(null); setDocument(null); setSelectedBinding(null); setError('');
     sessionStorage.setItem('miaobi-project', projectId);
     loadProjectDetails(projectId).catch((reason) => setError(reason instanceof Error ? reason.message : '方案任务加载失败'));
+    return () => { detailRequest.current += 1; };
   }, [projectId]);
 
   useEffect(() => {
     const openBinding = (event: Event) => {
       const detail = (event as CustomEvent<Record<string, unknown>>).detail || {};
       setSelectedBinding(detail);
-      setAssistantTab(String(detail.type) === 'knowledge_citation' ? 'evidence' : 'calculation');
+      setAssistantTab('evidence');
     };
     window.addEventListener('miaobi:open-binding', openBinding);
     return () => window.removeEventListener('miaobi:open-binding', openBinding);
@@ -230,7 +237,7 @@ export function App() {
         {!selected ? <Welcome onCreate={() => setCreateOpen(true)} /> : (
           <>
             {tab !== 'writing' && <PageHeader project={selected} tab={tab} />}
-            {tab === 'task' && <TaskWorkspace project={project || selected} materials={materials} facts={facts} computations={computations} plans={plans} document={document} knowledgeContext={knowledgeContext} onChanged={() => loadProjectDetails(selected.id)} onOpenEditor={() => setTab('writing')} onError={setError} />}
+            {tab === 'task' && project && <TaskWorkspace key={project.id} project={project || selected} materials={materials} facts={facts} computations={computations} plans={plans} document={document} knowledgeContext={knowledgeContext} onChanged={() => loadProjectDetails(selected.id)} onOpenEditor={() => setTab('writing')} onError={setError} />}
             {tab === 'writing' && (
               <div className="writing-layout">
                 <section className="outline-pane"><b>文稿目录</b>{document ? <Outline content={document.current_version?.content || []} /> : <p>创建文稿后自动生成目录。</p>}<div className="missing-box"><AlertTriangle size={16} /><span>缺失项会在这里提示，不会由模型静默补齐。</span></div></section>
@@ -240,7 +247,7 @@ export function App() {
                 <aside className="assistant-pane">
                   {knowledgeContext && <button type="button" className="writing-knowledge-baseline" onClick={() => setTab('task')} title="查看当前文稿使用的传神智库知识版本"><BookOpenCheck size={16} /><span><small>当前知识基线</small><b>{knowledgeContext.product.name} · V{knowledgeContext.release.version}</b></span><em>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份任务材料` : `${knowledgeContext.document_count} 项知识资产`}</em><ChevronRight size={15} /></button>}
                   <div className="assistant-tabs">
-                    {([['assistant','妙笔助手'],['evidence','引用依据'],['calculation','计算与推演'],['review','审校问题']] as const).map(([key,label]) => <button type="button" key={key} className={assistantTab === key ? 'active' : ''} onClick={() => setAssistantTab(key)}>{label}</button>)}
+                    {([['assistant','妙笔助手'],['evidence','来源与计算'],['review','审校发布']] as const).map(([key,label]) => <button type="button" key={key} className={assistantTab === key ? 'active' : ''} onClick={() => setAssistantTab(key)}>{label}</button>)}
                   </div>
                   <AssistantPanel tab={assistantTab} project={selected} document={document} facts={facts} plans={plans} computations={computations} gates={gates} selectedBinding={selectedBinding} onInsert={setInsertionRequest} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />
                 </aside>
@@ -251,7 +258,7 @@ export function App() {
       </main>
       {error && <div className="toast" role="alert">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
       {createOpen && <CreateProjectDialog onClose={() => setCreateOpen(false)} onCreated={async (row) => { setCreateOpen(false); await loadProjects(); setProjectId(row.id); setTab('task'); }} onError={setError} />}
-      {scenarioConfigOpen && project?.scenario?.package_id && <ScenarioConfigDialog packageId={project.scenario.package_id} onClose={() => setScenarioConfigOpen(false)} onSaved={() => loadProjectDetails(project.id)} onError={setError} />}
+      {scenarioConfigOpen && project?.scenario?.package_id && <ScenarioConfigDialog packageId={project.scenario.package_id} versionId={project.scenario.version_id} onClose={() => setScenarioConfigOpen(false)} onSaved={() => loadProjectDetails(project.id)} onError={setError} />}
     </div>
   );
 }
@@ -286,31 +293,35 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
     return Boolean(fact && ['current', 'manual_override'].includes(fact.freshness_status) && (!confirmationRequired || fact.verification_status === 'verified'));
   });
   const verified = readyKeys.length;
-  const ready = readyKeys.length > 0 && readyKeys.length === (requiredKeys.length || requiredFacts.length);
+  const ready = materials.length > 0 && readyKeys.length === (requiredKeys.length || requiredFacts.length);
+  const pending = Math.max(0, (requiredKeys.length || requiredFacts.length) - verified);
+  const nextLabel = !materials.length ? '请先选择报告材料' : ready ? '输入已确认，下一步' : `还有 ${pending} 项待确认`;
+  const reportExists = Boolean(document?.current_version && document.current_version.change_summary !== '创建报告草稿');
   const latest = new Map<string, ComputationRun>();
   computations.forEach((item) => {
     const key = item.result.output_fact?.fact_key;
     if (key && !latest.has(key)) latest.set(key, item);
   });
   const steps = [
-    { key: 'inputs' as const, index: 1, title: '输入确认', detail: ready ? `${verified} 项关键输入已确认` : `${Math.max(0, (requiredKeys.length || requiredFacts.length) - verified)} 项待处理`, done: ready },
+    { key: 'inputs' as const, index: 1, title: '输入确认', detail: !materials.length ? '等待选择材料' : ready ? `${verified} 项关键输入已确认` : `${pending} 项待处理`, done: ready },
     { key: 'toolbox' as const, index: 2, title: '分析计算', detail: latest.size ? `${latest.size} 项结果` : '系统自动推演与测算', done: latest.size > 0 },
-    { key: 'report' as const, index: 3, title: '报告编辑', detail: document ? '报告草稿已生成' : '等待生成', done: Boolean(document) },
+    { key: 'report' as const, index: 3, title: '报告编辑', detail: reportExists ? '报告草稿已生成' : '等待完成正文生成', done: reportExists },
   ];
   return <div className="task-workspace">
     <section className="workflow-strip" aria-label="报告生成流程">
-      {steps.map((item) => <button type="button" key={item.key} className={stage === item.key ? 'active' : ''} onClick={() => item.key === 'report' && document ? onOpenEditor() : setStage(item.key)}>
+      {steps.map((item) => <button type="button" key={item.key} className={stage === item.key ? 'active' : ''} onClick={() => item.key === 'report' && reportExists ? onOpenEditor() : setStage(item.key)}>
         <span className={item.done ? 'flow-number done' : 'flow-number'}>{item.done ? <CheckCircle2 size={17} /> : item.index}</span><span><b>{item.title}</b><small>{item.detail}</small></span>
       </button>)}
     </section>
     {stage === 'inputs' && <>
-      <section className="task-intro-card"><div><span className="eyebrow">第一步</span><h2>准备材料并确认报告输入</h2><p>先明确这份报告使用哪些业务材料，再核对从材料中提取的关键输入。</p></div><div className="task-intro-actions"><button type="button" className="primary" disabled={!ready} onClick={() => setStage('toolbox')}>{ready ? '输入已确认，下一步' : `还有 ${Math.max(0, (requiredKeys.length || requiredFacts.length) - verified)} 项待确认`}<ChevronRight size={16} /></button></div></section>
+      <section className="task-intro-card"><div><span className="eyebrow">第一步</span><h2>准备材料并确认报告输入</h2><p>先明确这份报告使用哪些业务材料，再核对从材料中提取的关键输入。</p></div><div className="task-intro-actions"><button type="button" className="primary" disabled={!ready} onClick={() => setStage('toolbox')}>{nextLabel}<ChevronRight size={16} /></button></div></section>
       {knowledgeContext && <section className="compact-knowledge-baseline"><BookOpenCheck size={18} /><div><b>{knowledgeContext.product.name} · V{knowledgeContext.release.version}</b><small>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份已选业务材料` : '尚未选择任务材料'} · {knowledgeContext.chunk_count} 个已发布知识片段</small></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前版本' : '有新版本'}</span></section>}
       <MaterialsPanel project={project} materials={materials} knowledgeContext={knowledgeContext} onChanged={onChanged} onError={onError} />
       <Facts project={project} facts={facts} requiredKeys={requiredKeys} document={document} onChanged={onChanged} onError={onError} />
     </>}
+    {stage === 'toolbox' && <ChapterEvidencePanel projectId={project.id} onChanged={onChanged} />}
     {stage === 'toolbox' && <ReportGenerationPanel project={project} facts={facts} computations={computations} plans={plans} document={document} ready={ready} onChanged={onChanged} onOpenEditor={onOpenEditor} onBack={() => setStage('inputs')} onError={onError} />}
-    {stage === 'report' && (document ? <section className="report-ready-card"><CheckCircle2 /><div><h2>报告已经生成</h2><p>进入完整 Plate 编辑器继续修改，右侧可查看依据、计算和 Agent 建议。</p></div><button type="button" className="primary" onClick={onOpenEditor}>打开报告编辑器<ChevronRight size={16} /></button></section> : <EmptyAction title="报告尚未生成" detail="请先确认输入，再由推演工具箱完成计算并生成报告。" action="返回输入确认" onClick={() => setStage('inputs')} />)}
+    {stage === 'report' && (reportExists ? <section className="report-ready-card"><CheckCircle2 /><div><h2>报告已经生成</h2><p>继续修改正文并核对右侧依据。</p></div><button type="button" className="primary" onClick={onOpenEditor}>打开报告编辑器<ChevronRight size={16} /></button></section> : <EmptyAction title="报告尚未生成" detail="请在分析计算中查看生成状态或重试。" action="返回分析计算" onClick={() => setStage('toolbox')} />)}
   </div>;
 }
 
@@ -473,7 +484,7 @@ function ReportGenerationPanel({ project, facts, computations, plans, document, 
     setRunning(false);
     setStageLabel('本次生成已停止，可重新开始');
   };
-  const progress = running ? Math.max(5, run?.progress || 5) : run?.progress || (document ? 100 : 0);
+  const progress = run?.progress || (document?.current_version?.change_summary !== '创建报告草稿' && document ? 100 : 0);
   const latest = new Map<string, ComputationRun>();
   computations.forEach((item) => {
     const key = item.result.output_fact?.fact_key;
@@ -616,7 +627,7 @@ function Facts({ project, facts, requiredKeys = [], document, onChanged, onError
     } catch (failure) { onError(failure instanceof Error ? failure.message : '补充输入失败'); }
     finally { setSubmitting(false); }
   };
-  return <><div className="content-card"><div className="card-toolbar"><div className="search"><Search size={16} /><input placeholder="搜索输入项" value={query} onChange={(event) => setQuery(event.target.value)} /></div><div className="task-intro-actions"><a className="secondary" href="/#assets">从材料提取</a><button type="button" className={pendingOnly ? 'primary compact' : 'secondary'} onClick={() => setPendingOnly((value) => !value)}>{pendingOnly ? '显示全部输入' : '只看待确认'}</button></div></div><div className="table-scroll"><table><thead><tr><th>输入项</th><th>当前值</th><th>来源</th><th>版本</th><th>状态</th><th>操作</th></tr></thead><tbody>{visible.map((fact) => <tr key={fact.id}><td><b>{fact.label}</b></td><td>{formatValue(fact.value)} {fact.unit || ''}</td><td>{sourceLabel(fact.source_type)}</td><td>v{fact.version}</td><td><span className={`status ${fact.verification_status}`}>{!requiresConfirmation(fact) ? '无需确认' : fact.verification_status === 'verified' ? '已确认' : fact.verification_status === 'rejected' ? '已驳回' : '待确认'}</span></td><td><div className="row-actions">{requiresConfirmation(fact) && fact.verification_status !== 'verified' && <><button type="button" onClick={() => openDecision(fact, 'confirm')}>确认</button><button type="button" onClick={() => openDecision(fact, 'reject')}>驳回</button></>}{allowManualOverride && <button type="button" onClick={() => openDecision(fact, 'override')}>修正</button>}</div></td></tr>)}{!pendingOnly && missingKeys.map((key) => { const field = project.input_contract?.properties?.[key] || {}; return <tr className="missing-input-row" key={key}><td><b>{field.title || key}</b></td><td>—</td><td>尚未提供</td><td>—</td><td><span className="status missing">缺少</span></td><td><button type="button" onClick={() => setMissingInput({ key, label: field.title || key, type: field.type || 'string', unit: field.unit, value: '' })}>填写</button></td></tr>; })}</tbody></table></div>{!visible.length && !missingKeys.length && <div className="empty-table">没有符合当前条件的输入</div>}</div>{missingInput && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setMissingInput(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="补充缺失输入"><div className="dialog-head"><div><span className="eyebrow">缺失输入</span><h2>{missingInput.label}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setMissingInput(null)}>×</button></div><label>当前值<input autoFocus type={['number', 'integer'].includes(missingInput.type) ? 'number' : 'text'} value={missingInput.value} onChange={(event) => setMissingInput({ ...missingInput, value: event.target.value })} /></label><p className="field-help">手工补充后状态为“待确认”，需再次核对后才会参与报告生成。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setMissingInput(null)}>取消</button><button type="button" className="primary" disabled={submitting || !missingInput.value.trim()} onClick={() => void createMissing()}>{submitting ? '保存中…' : '保存待确认'}</button></div></section></div>}{decision && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setDecision(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true"><div className="dialog-head"><div><span className="eyebrow">输入确认</span><h2>{decision.mode === 'confirm' ? '确认输入' : decision.mode === 'reject' ? '暂不采用' : '修正输入'}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setDecision(null)}>×</button></div><div className="fact-preview"><b>{decision.fact.label}</b><span>{formatValue(decision.fact.value)} {decision.fact.unit || ''}</span></div>{decision.mode === 'override' && <label>修正后的值<input value={overrideValue} onChange={(event) => setOverrideValue(event.target.value)} autoFocus /></label>}<label>处理理由<textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={3} /></label><p className="field-help">{document && decision.mode === 'override' ? '系统会先计算这项变化影响哪些结果和报告章节，确认“应用”后才生效。' : '系统保留原值和操作记录，已确认输入才会参与报告生成。'}</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setDecision(null)}>取消</button><button type="button" className="primary" disabled={submitting || reason.trim().length < 2 || (decision.mode === 'override' && !overrideValue.trim())} onClick={() => void submit()}>{submitting ? '处理中…' : document && decision.mode === 'override' ? '查看影响' : '确认处理'}</button></div></section></div>}{impactPreview && <div className="dialog-backdrop" role="presentation"><section className="dialog impact-dialog" role="dialog" aria-modal="true"><div className="dialog-head"><div><span className="eyebrow">变更预览</span><h2>确认后才会更新报告</h2></div></div><div className="impact-changes">{impactPreview.changes.map((item) => <div key={item.fact_key}><b>{item.label}</b><span>{formatValue(item.old_value)} → {formatValue(item.new_value)} {item.unit || ''}</span></div>)}</div><h3>受影响的计算</h3>{impactPreview.impact.calculations?.length ? <div className="impact-calculations">{impactPreview.impact.calculations.map((item) => <div key={item.result_key}><b>{item.label}</b><span>{item.old_value} → <strong>{item.new_value}</strong> {item.unit || ''}</span></div>)}</div> : <p className="field-help">没有受影响的确定性计算。</p>}<p className="field-help">将更新 {impactPreview.impact.report_blocks?.length || 0} 个正文可信内容；其他结果保持不变。系统不会静默覆盖全文。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => void cancelImpact()}>取消</button><button type="button" className="primary" disabled={submitting} onClick={() => void applyImpact()}>{submitting ? '应用中…' : '应用本次变化'}</button></div></section></div>}</>;
+  return <><div className="content-card"><div className="card-toolbar"><div className="search"><Search size={16} /><input placeholder="搜索输入项" value={query} onChange={(event) => setQuery(event.target.value)} /></div><div className="task-intro-actions"><a className="secondary" href="/#assets">从材料提取</a><button type="button" className={pendingOnly ? 'primary compact' : 'secondary'} onClick={() => setPendingOnly((value) => !value)}>{pendingOnly ? '显示全部输入' : '只看待确认'}</button></div></div><div className="table-scroll"><table><thead><tr><th>输入项</th><th>当前值</th><th>来源</th><th>版本</th><th>状态</th><th>操作</th></tr></thead><tbody>{visible.map((fact) => <tr key={fact.id}><td><b>{fact.label}</b></td><td>{formatValue(fact.value)} {fact.unit || ''}</td><td>{sourceLabel(fact.source_type)}</td><td>v{fact.version}</td><td><span className={`status ${fact.verification_status}`}>{!requiresConfirmation(fact) ? '无需确认' : fact.verification_status === 'verified' ? '已确认' : fact.verification_status === 'rejected' ? '已驳回' : '待确认'}</span></td><td><div className="row-actions">{requiresConfirmation(fact) && fact.verification_status !== 'verified' && <><button type="button" onClick={() => openDecision(fact, 'confirm')}>确认</button><button type="button" onClick={() => openDecision(fact, 'reject')}>驳回</button></>}{allowManualOverride && <button type="button" onClick={() => openDecision(fact, 'override')}>修正</button>}</div></td></tr>)}{!pendingOnly && missingKeys.map((key) => { const field = project.input_contract?.properties?.[key] || {}; return <tr className="missing-input-row" key={key}><td><b>{field.title || key}</b></td><td>—</td><td>尚未提供</td><td>—</td><td><span className="status missing">缺少</span></td><td><button type="button" onClick={() => setMissingInput({ key, label: field.title || key, type: field.type || 'string', unit: field.unit, value: '' })}>填写</button></td></tr>; })}</tbody></table></div>{!visible.length && !missingKeys.length && <div className="empty-table">没有符合当前条件的输入</div>}</div>{missingInput && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setMissingInput(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="补充缺失输入"><div className="dialog-head"><div><span className="eyebrow">缺失输入</span><h2>{missingInput.label}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setMissingInput(null)}>×</button></div><label>当前值<input autoFocus type={['number', 'integer'].includes(missingInput.type) ? 'number' : 'text'} value={missingInput.value} onChange={(event) => setMissingInput({ ...missingInput, value: event.target.value })} /></label><p className="field-help">手工补充后状态为“待确认”，需再次核对后才会参与报告生成。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setMissingInput(null)}>取消</button><button type="button" className="primary" disabled={submitting || !missingInput.value.trim()} onClick={() => void createMissing()}>{submitting ? '保存中…' : '保存待确认'}</button></div></section></div>}{decision && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setDecision(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true"><div className="dialog-head"><div><span className="eyebrow">输入确认</span><h2>{decision.mode === 'confirm' ? '确认输入' : decision.mode === 'reject' ? '暂不采用' : '修正输入'}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setDecision(null)}>×</button></div><div className="fact-preview"><b>{decision.fact.label}</b><span>{formatValue(decision.fact.value)} {decision.fact.unit || ''}</span></div>{decision.mode === 'override' && <label>修正后的值<input value={overrideValue} onChange={(event) => setOverrideValue(event.target.value)} autoFocus /></label>}<label>处理理由<textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={3} /></label><p className="field-help">{document && decision.mode === 'override' ? '系统会先计算这项变化影响哪些结果和报告章节，确认“应用”后才生效。' : '系统保留原值和操作记录，已确认输入才会参与报告生成。'}</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setDecision(null)}>取消</button><button type="button" className="primary" disabled={submitting || reason.trim().length < 2 || (decision.mode === 'override' && !overrideValue.trim())} onClick={() => void submit()}>{submitting ? '处理中…' : document && decision.mode === 'override' ? '查看影响' : '确认处理'}</button></div></section></div>}{impactPreview && <div className="dialog-backdrop" role="presentation"><section className="dialog impact-dialog" role="dialog" aria-modal="true"><div className="dialog-head"><div><span className="eyebrow">变更预览</span><h2>确认后才会更新报告</h2></div></div><div className="impact-changes">{impactPreview.changes.map((item) => <div key={item.fact_key}><b>{item.label}</b><span>{formatValue(item.old_value)} → {formatValue(item.new_value)} {item.unit || ''}</span></div>)}</div><h3>受影响的计算</h3>{impactPreview.impact.calculations?.length ? <div className="impact-calculations">{impactPreview.impact.calculations.map((item) => <div key={item.result_key}><b>{item.label}</b><span>{item.old_value} → <strong>{item.new_value}</strong> {item.unit || ''}</span></div>)}</div> : <p className="field-help">没有受影响的确定性计算。</p>}<p className="field-help">影响 {impactPreview.impact.report_blocks?.length || 0} 个段落或测算项：测算值更新，相关正文标记为待核对，不自动改写。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => void cancelImpact()}>取消</button><button type="button" className="primary" disabled={submitting} onClick={() => void applyImpact()}>{submitting ? '应用中…' : '应用本次变化'}</button></div></section></div>}</>;
 }
 
 function Reasoning({ project, facts, computations, gates, onChanged, onError }: { project: Project; facts: Fact[]; computations: ComputationRun[]; gates: DecisionGate[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {
@@ -1028,8 +1039,9 @@ function EvidencePanel({ project, document, selectedBinding, onInsert, onError }
     if (!selectedBinding || String(selectedBinding.type) !== 'knowledge_citation') return;
     const chunkId = String(selectedBinding.chunk_id || '');
     const queryRunId = String(selectedBinding.query_run_id || '');
-    if (!chunkId || !queryRunId) return;
-    api<Record<string, unknown>>(`/writing/projects/${project.id}/knowledge/fragments/${chunkId}?query_run_id=${encodeURIComponent(queryRunId)}`)
+    if (!chunkId) return;
+    const sourcePath = queryRunId ? `/writing/projects/${project.id}/knowledge/fragments/${chunkId}?query_run_id=${encodeURIComponent(queryRunId)}` : `/writing/projects/${project.id}/chapter-evidence/source/${chunkId}`;
+    api<Record<string, unknown>>(sourcePath)
       .then(setFragment)
       .catch((reason) => onError(reason instanceof Error ? reason.message : '来源片段加载失败'));
   }, [project.id, selectedBinding]);
@@ -1088,7 +1100,7 @@ function EvidencePanel({ project, document, selectedBinding, onInsert, onError }
     finally { setInserting(''); }
   };
 
-  return <div className="assistant-content"><h3>引用依据</h3>{selectedBinding && String(selectedBinding.type) === 'knowledge_citation' && <BindingInspector binding={selectedBinding} detail={fragment} />}<p>检索范围固定为当前方案任务锁定的知识产品版本。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{cleanEvidenceText(item.snippet || item.text || '无摘要')}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前锁定版本中没有检索到依据。</div>}</div></div>;
+  return <div className="assistant-content"><h3>引用依据</h3>{document && <ParagraphEvidenceList documentId={document.id} versionId={document.current_version_id || undefined} projectId={project.id} />}{selectedBinding && <BindingInspector binding={selectedBinding} detail={fragment} />}<p>检索范围固定为当前方案任务锁定的知识产品版本。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{cleanEvidenceText(item.snippet || item.text || '无摘要')}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前锁定版本中没有检索到依据。</div>}</div></div>;
 }
 
 function BindingInspector({ binding, detail }: { binding: Record<string, unknown>; detail?: Record<string, unknown> | null }) {
@@ -1098,7 +1110,7 @@ function BindingInspector({ binding, detail }: { binding: Record<string, unknown
   const evidenceIds = Array.isArray(binding.evidence_ids) ? binding.evidence_ids : [];
   const sourceVersion = displaySourceVersion(detail?.document_version || binding.source_version);
   const structuralPath = displayStructuralPath(detail?.structural_path || locator.structural_path);
-  return <section className="binding-inspector" aria-label="当前正文依据"><div className="binding-inspector-title"><span>当前正文标记</span><b>{String(binding.label || '可信内容')}</b></div><p>{String(detail?.text || text || '正在读取完整依据…')}</p><dl><div><dt>来源</dt><dd>{String(detail?.document_title || binding.source_title || sourceLabel(String(binding.type || '')))}</dd></div>{Boolean(detail?.page_number || locator.page_number) && <div><dt>位置</dt><dd>第 {String(detail?.page_number || locator.page_number)} 页</dd></div>}{Boolean(structuralPath) && <div><dt>结构</dt><dd>{structuralPath}</dd></div>}{Boolean(binding.formula) && <div><dt>公式</dt><dd>{String(binding.formula)}</dd></div>}{Boolean(sourceVersion) && <div><dt>版本</dt><dd>{sourceVersion}</dd></div>}<div><dt>状态</dt><dd>{binding.freshness_status === 'current' ? '依据有效' : '需要核验或更新'}</dd></div>{evidenceIds.length > 0 && <div><dt>前提</dt><dd>{evidenceIds.length} 条已绑定事实</dd></div>}</dl></section>;
+  return <section className="binding-inspector" aria-label="当前正文依据"><div className="binding-inspector-title"><span>当前正文标记</span><b>{String(binding.label || '可信内容')}</b></div><p>{String(detail?.text || text || '正在读取完整依据…')}</p><dl><div><dt>来源</dt><dd>{String(detail?.document_title || binding.source_title || sourceLabel(String(binding.type || '')))}</dd></div>{Boolean(detail?.page_number || locator.page_number) && <div><dt>位置</dt><dd>第 {String(detail?.page_number || locator.page_number)} 页</dd></div>}{Boolean(structuralPath) && <div><dt>结构</dt><dd>{structuralPath}</dd></div>}{Boolean(binding.formula) && <div><dt>公式</dt><dd>{binding.formula === 'resource_gap' ? '缺口 = max(0, 需求 − 可用)' : String(binding.formula)}</dd></div>}{Boolean(sourceVersion) && <div><dt>版本</dt><dd>{sourceVersion}</dd></div>}<div><dt>状态</dt><dd>{binding.freshness_status === 'current' ? '依据有效' : '需要核验或更新'}</dd></div>{evidenceIds.length > 0 && <div><dt>前提</dt><dd>{evidenceIds.length} 条已绑定事实</dd></div>}</dl></section>;
 }
 
 function Outline({ content }: { content: Array<Record<string, unknown>> }) {
@@ -1151,8 +1163,8 @@ function CreateProjectDialog({ onClose, onCreated, onError }: { onClose: () => v
   return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="create-title"><div className="dialog-head"><div><span className="eyebrow">第一步</span><h2 id="create-title">创建方案任务</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><label>任务名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：积石山县地震应急处置方案" autoFocus /></label><label>任务编码<input value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-') })} placeholder="jishishan-earthquake" /></label><label>业务场景<select value={form.scenario_version_id} onChange={(event) => setForm({ ...form, scenario_version_id: event.target.value })}>{packages.filter((item) => item.current_version_id).map((item) => <option key={item.id} value={item.current_version_id}>{item.name}{item.code !== 'earthquake-response-plan' ? '（模板待业务确认）' : ''}</option>)}</select></label>{selectedScenario && <p className="field-help">{selectedScenario.description || '场景包锁定输入、规则、公式、工具和输出结构。'}</p>}<label>知识产品<select value={form.product_id} onChange={(event) => void selectProduct(event.target.value)}>{products.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>知识产品版本<select value={form.release_id} onChange={(event) => setForm({ ...form, release_id: event.target.value })}><option value="">请选择已发布版本</option>{releases.filter((item) => item.status === 'published').map((item) => <option key={item.id} value={item.id}>Release {item.version}</option>)}</select></label><div className="dialog-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button type="button" className="primary" disabled={submitting} onClick={() => void submit()}>{submitting ? '创建中…' : '创建并进入任务'}</button></div></section></div>;
 }
 
-function statusLabel(value: string) { return ({ draft: '准备中', preparing: '数据准备', ready: '可推演', reasoning: '推演中', writing: '撰写中', reviewing: '审校中', published: '已发布' } as Record<string,string>)[value] || value; }
-function sourceLabel(value: string) { return ({ official_brief: '官方简报', policy_document: '预案原文', database_query: '实时数据库', computation: '确定性测算', semantica_inference: '规则推演', model_extraction: '模型抽取', manual_input: '人工补充', manual_override: '人工覆盖' } as Record<string,string>)[value] || value; }
+function statusLabel(value: string) { return ({ draft: '准备中', preparing: '数据准备', ready: '任务已创建', reasoning: '推演中', writing: '撰写中', reviewing: '审校中', published: '已发布' } as Record<string,string>)[value] || value; }
+function sourceLabel(value: string) { return ({ official_brief: '官方简报', policy_document: '预案原文', database_query: '实时数据库', computation: '确定性测算', computed_metric: '确定性测算', inference_conclusion: '规则结论', alternative_plan: '已采用方案', knowledge_citation: '来源文档', semantica_inference: '规则推演', model_extraction: '模型抽取', manual_input: '人工补充', manual_override: '人工覆盖' } as Record<string,string>)[value] || value; }
 function formatValue(value: Record<string, unknown>) {
   if (typeof value.boolean === 'boolean') return value.boolean ? '成立' : '不成立';
   return String(value.number ?? value.text ?? value.value ?? '—');

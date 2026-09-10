@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import jwt
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -929,7 +930,14 @@ def test_writing_agent_session_is_idempotent_and_release_scoped() -> None:
             "harness_session_id": conversation.harness_session_id,
             "tenant_id": conversation.tenant_id,
             "sub": conversation.user_id,
+            "space_ids": conversation.settings["space_ids"],
         }
+        # The production gateway signs a scoped credential. A manually built
+        # token without that scope must fail, even when its user has access.
+        for restricted in ({k: v for k, v in claims.items() if k != "space_ids"}, {**claims, "space_ids": []}):
+            with pytest.raises(HTTPException) as denied:
+                agent_writing_context(AgentWritingRequest(conversation_id=conversation.id), claims=restricted, db=db)
+            assert denied.value.status_code == 403
         context = agent_writing_context(
             AgentWritingRequest(conversation_id=conversation.id), claims=claims, db=db
         )

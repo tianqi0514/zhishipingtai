@@ -8,6 +8,11 @@ const DIRECT_RESPONSE_PATTERNS = [
 const RETRIEVAL_SETTINGS_PATTERN = /<chuanshen-retrieval-settings>(\{[^<]*\})<\/chuanshen-retrieval-settings>/gu
 const FORMAL_WRITING_TASK_PATTERN = /^\[妙笔正式报告生成\]/u
 const WRITING_TASK_PATTERN = /^\[妙笔写作任务\]/u
+export const WRITING_REVISION_ACTIONS = new Set(['expand', 'rewrite', 'shorten', 'formalize', 'simplify', 'tone', 'to_list', 'heading'])
+
+export function isTextRevision(input, settings = {}) {
+  return String(input || '').trim().startsWith('[妙笔局部修订]') && WRITING_REVISION_ACTIONS.has(settings.writing_revision_action)
+}
 
 
 function currentUserText(events) {
@@ -106,6 +111,12 @@ export function requiresKnowledgeReason(input) {
 
 export function evidenceRequirements(input, settings = {}) {
   const query = String(input || '').trim()
+  // Selected prose may mention numbers and risk without asking to discover
+  // new facts. Only the authenticated writing endpoint sets this contract.
+  // Keep fact checking and adding evidence on the normal evidence path.
+  if (isTextRevision(query, settings)) {
+    return ['writing_get_project_context']
+  }
   // A formal report prompt contains section contracts, target lengths and
   // resource quantities. Those numbers describe the writing contract; they
   // are not, by themselves, a request to query a live business database.

@@ -105,6 +105,13 @@ class ScenarioInputSetting(StrictModel):
         return self
 
 
+class SectionKnowledgeRequirement(StrictModel):
+    ontology_version_id: str | None = None
+    entity_types: list[str] = Field(default_factory=list, max_length=20)
+    predicates: list[str] = Field(default_factory=list, max_length=20)
+    rule_version_ids: list[str] = Field(default_factory=list, max_length=10)
+
+
 class ScenarioSectionSetting(StrictModel):
     key: str
     title: str = Field(min_length=1, max_length=300)
@@ -113,6 +120,7 @@ class ScenarioSectionSetting(StrictModel):
     required_inputs: list[str] = Field(default_factory=list)
     toolbox_outputs: list[str] = Field(default_factory=list)
     citation_required: bool = True
+    knowledge: SectionKnowledgeRequirement = Field(default_factory=SectionKnowledgeRequirement)
 
     _normalize_key = field_validator("key")(_code)
 

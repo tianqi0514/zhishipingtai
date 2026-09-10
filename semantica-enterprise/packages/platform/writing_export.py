@@ -96,6 +96,15 @@ def _unique_citation_bindings(bindings: list[dict[str, Any]]) -> list[dict[str, 
     return [unique[number] for number in sorted(unique)]
 
 
+def bindings_for_content(content: list[dict[str, Any]], bindings: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Historical generations can reuse citation numbers, never block IDs.
+    Export only bindings present in the chosen immutable document version.
+    """
+    from .writing import walk_plate_nodes
+    visible = {node.get("id") for node in walk_plate_nodes(content) if node.get("id")}
+    return {key: binding for key, binding in bindings.items() if key in visible}
+
+
 def _set_run_font(run, size: float = 11, bold: bool = False) -> None:
     font_name = _cjk_font_name()
     run.font.name = font_name
@@ -177,9 +186,6 @@ def _configure_docx(document: Document, title: str) -> None:
     title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     _remove_paragraph_borders(title_paragraph)
     _set_run_font(title_paragraph.add_run(title), 22, True)
-    subtitle = document.add_paragraph()
-    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _set_run_font(subtitle.add_run("应急处置方案"), 12, False)
 
     header = section.header.paragraphs[0]
     header.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -242,8 +248,6 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
     document = Document()
     formal_title = _display_title(title)
     _configure_docx(document, formal_title)
-    opening = document.add_paragraph()
-    _set_run_font(opening.add_run("本方案依据已锁定的知识版本、已核验事实、确定性计算和规则推演结果形成。发布前须完成业务确认。"), 11)
     for index, node in enumerate(content):
         node_type = str(node.get("type") or "p")
         text = _node_text(node).strip()
@@ -305,12 +309,21 @@ def build_evidence_docx(
     intro = document.add_paragraph()
     _set_run_font(intro.add_run("本文件记录报告使用的知识版本、已核验输入、确定性测算、规则推演和正文来源。它用于核验，不属于正式报告正文。"), 11)
 
+    bound_conclusions = {
+        str(ref.get("ref"))
+        for binding in bindings
+        for ref in (binding.get("metadata_json") or {}).get("knowledge_evidence") or []
+        if ref.get("kind") == "inference" and ref.get("ref")
+    } | {
+        str(binding.get("source_id") or binding.get("block_id"))
+        for binding in bindings if binding.get("block_type") == "inference_conclusion"
+    }
     summary_rows = [
         ("知识产品版本", str(audit_summary.get("knowledge_product_release") or "-")),
         ("场景包版本", str(audit_summary.get("scenario_package_version") or "-")),
         ("已核验事实", str(audit_summary.get("verified_fact_count") or 0)),
         ("确定性计算", str(audit_summary.get("computation_count") or 0)),
-        ("规则推演", str(audit_summary.get("reasoning_count") or 0)),
+        ("正文规则结论", str(len(bound_conclusions))),
         ("采用方案", str(audit_summary.get("selected_plan") or "未选择")),
     ]
     heading = document.add_paragraph(style="Heading 1")
@@ -360,11 +373,27 @@ def build_evidence_docx(
     for item in _unique_citation_bindings(bindings):
         metadata = item.get("metadata_json") or {}
         number = metadata.get("citation_number") or "-"
+        semantic = metadata.get("knowledge_evidence") or []
+        if semantic:
+            for reference in semantic:
+                kind = "规则结论" if reference.get("kind") == "inference" else "已有关系"
+                paragraph = document.add_paragraph()
+                paragraph.paragraph_format.keep_with_next = True
+                _set_run_font(paragraph.add_run(f"[{number}] {kind}：{reference.get('text') or '请在平台核验'}"), 10, True)
+                for index, premise in enumerate(reference.get("premises") or [], 1):
+                    source = premise.get("source") or {}
+                    location = _display_source_locator(source.get("page_number"), source.get("structural_path"))
+                    version_label = f"，版本 {source['version_number']}" if source.get("version_number") else ""
+                    paragraph = document.add_paragraph()
+                    paragraph.paragraph_format.left_indent = Pt(10)
+                    paragraph.paragraph_format.space_after = Pt(3)
+                    _set_run_font(paragraph.add_run(f"前提{index}：{premise.get('text') or '来源关系'}。来源：{source.get('title') or '知识材料'}{version_label}，{location}。"), 10)
+            continue
         source = metadata.get("source_title") or "知识材料"
         page = metadata.get("page_number")
         path_value = metadata.get("structural_path")
         location = _display_source_locator(page, path_value)
-        paragraph = document.add_paragraph(style="List Number")
+        paragraph = document.add_paragraph()
         paragraph.paragraph_format.space_after = Pt(1.5)
         paragraph.paragraph_format.line_spacing = 1.0
         _set_run_font(paragraph.add_run(f"[{number}] {source}，{location}。"), 10)

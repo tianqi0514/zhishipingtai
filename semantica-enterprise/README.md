@@ -180,6 +180,8 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 - [妙笔与传神智库的产品边界](docs/miaobi/MIAOBI_ZHIKU_INTEGRATION_BOUNDARY.md)
 - [从上传到报告质量验收](docs/miaobi/MIAOBI_UPLOAD_TO_REPORT_ACCEPTANCE.md)
 - [妙笔 API](docs/miaobi/MIAOBI_API.md)
+- [章节依据写作：产品流程与边界](docs/miaobi/MIAOBI_SEMANTIC_WRITING_UPGRADE.md)
+- [章节依据写作：本轮真实验收记录](docs/miaobi/MIAOBI_SEMANTIC_WRITING_TEST_REPORT.md)
 - [Semantica 推演集成](docs/miaobi/MIAOBI_SEMANTICA_INTEGRATION.md)
 - [DeepSeek Harness 写作 Agent](docs/miaobi/MIAOBI_DSH_INTEGRATION.md)
 - [确定性计算引擎](docs/miaobi/MIAOBI_COMPUTATION_ENGINE.md)

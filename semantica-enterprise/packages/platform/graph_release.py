@@ -11,6 +11,7 @@ from .config import get_settings
 from .curation import effective_chunk_payloads, effective_entity, effective_fact
 from .knowledge_processing import version_in_graph_projection
 from .models import CanonicalEntity, Chunk, Document, DocumentVersion, Fact, GraphRelease, InferredFact
+from .writing import content_hash
 
 
 def publish_graph_snapshot(
@@ -130,6 +131,37 @@ def publish_graph_snapshot(
         and row.object_entity_id in active_entity_ids
     ]
     validation = validate_graph(graph_entities, graph_relations)
+    # A release must not dereference mutable Fact/entity rows later. Store the
+    # effective, evidence-linked assertions (including literal properties) that
+    # were actually accepted at this publication boundary. No source text or
+    # connector credentials are copied into the snapshot.
+    names = {row.id: value for row, value in entities}
+    evidence_facts = []
+    for row, value in asserted:
+        chunk = db.get(Chunk, row.source_chunk_id) if row.source_chunk_id else None
+        document = db.get(Document, chunk.document_id) if chunk else None
+        version = db.get(DocumentVersion, chunk.version_id) if chunk else None
+        payload = effective_chunk_payloads(db, [chunk])[0] if chunk else None
+        evidence_facts.append({
+            "id": row.id, "space_id": space_id,
+            "subject_entity_id": value["subject_entity_id"],
+            "subject_name": names[value["subject_entity_id"]]["canonical_name"],
+            "subject_type": names[value["subject_entity_id"]]["entity_type"],
+            "predicate": value["predicate"],
+            "object_entity_id": value.get("object_entity_id"),
+            "object_name": names.get(value.get("object_entity_id"), {}).get("canonical_name"),
+            "object_type": names.get(value.get("object_entity_id"), {}).get("entity_type"),
+            "object_value": value.get("object_value"),
+            "confidence": value.get("confidence", 1),
+            "source_chunk_id": row.source_chunk_id,
+            "source": {"chunk_id": chunk.id, "document_id": chunk.document_id,
+                       "version_id": chunk.version_id, "title": document.title,
+                       "version_number": version.version_number,
+                       "page_number": chunk.page_number, "structural_path": chunk.structural_path,
+                       "content_hash": chunk.content_hash, "effective_hash": payload["effective_hash"]} if chunk and document and version and payload else None,
+        })
+    evidence_snapshot = {"version": 1, "facts": evidence_facts}
+    evidence_snapshot["checksum"] = content_hash(evidence_facts)
     serious = [
         item for item in validation.get("issues", []) if item.get("severity") in {"critical", "error"}
     ]
@@ -155,6 +187,7 @@ def publish_graph_snapshot(
         fact_count=len(graph_relations),
         validation_report={
             **validation,
+            "evidence_snapshot": evidence_snapshot,
             "asserted_facts": len([row for row, effective in asserted if effective.get("object_entity_id")]),
             "curated_entities": len([value for _, value in entities if "manual" in value.get("field_origins", {}).values()]),
             "curated_facts": len([value for _, value in asserted if "manual" in value.get("field_origins", {}).values()]),

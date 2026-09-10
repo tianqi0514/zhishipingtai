@@ -270,6 +270,12 @@ def _writing_tool_context(
         raise HTTPException(status.HTTP_409_CONFLICT, "妙笔文稿映射不可用")
     if require_document and document is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "当前妙笔助手会话尚未绑定文稿")
+    from apps.api.writing import _project, _release_scope
+    current_user = db.get(User, claims.get("sub"))
+    _project(db, project.id, current_user)
+    writing_spaces, _ = _release_scope(db, project, current_user)
+    if not set(writing_spaces).issubset(set(claims.get("space_ids") or [])):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "内部凭据不覆盖当前报告知识范围")
     return session, project, document
 
 
@@ -534,6 +540,21 @@ def agent_graph_query(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "工具请求超出凭据知识空间范围")
     entity_term = payload.entity_query.strip().casefold()
     relation_term = payload.relation_query.strip().casefold()
+    conversation = db.get(Conversation, payload.conversation_id)
+    if (conversation.settings or {}).get("writing_project_id"):
+        # Writing cannot mix a fixed report release with mutable current graph
+        # facts. Its graph tool returns only the confirmed chapter evidence.
+        from packages.platform.writing_knowledge import applied_packet
+        _, writing_project, _ = _writing_tool_context(db, claims, payload.conversation_id)
+        packet = applied_packet(db, writing_project) or {}
+        references = [r for r in packet.get("references", {}).values()
+                      if (not entity_term or entity_term in r["text"].casefold())
+                      and (not relation_term or relation_term in r["text"].casefold())
+                      and all((chunk := db.get(Chunk, s["chunk_id"])) is not None and chunk.space_id in spaces for s in r["sources"])][:payload.limit]
+        return {"entities": [], "facts": references,
+                "evidence_chunk_ids": sorted({s["chunk_id"] for r in references for s in r["sources"]}),
+                "graph_release": packet.get("graph_releases"),
+                "warnings": [] if references else ["当前报告已确认的章节依据中没有匹配关系，请先准备依据或检索原文。"]}
     entity_rows = list(
         db.scalars(
             select(CanonicalEntity).where(
@@ -838,6 +859,7 @@ def agent_writing_context(
     db: Session = Depends(get_db),
 ):
     session, project, document = _writing_tool_context(db, claims, payload.conversation_id)
+    from packages.platform.writing_knowledge import applied_packet
     facts = list(
         db.scalars(
             select(ProjectFact).where(
@@ -866,6 +888,7 @@ def agent_writing_context(
     audit(db, claims["tenant_id"], claims["sub"], "agent.writing.context", "writing_agent_session", session.id)
     db.commit()
     return {
+        "chapter_evidence": applied_packet(db, project),
         "project": {
             "name": project.name,
             "status": project.status,

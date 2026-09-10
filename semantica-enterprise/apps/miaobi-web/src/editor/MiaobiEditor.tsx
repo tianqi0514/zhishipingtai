@@ -789,7 +789,7 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
             saveTimer.current = window.setTimeout(() => void save(), 1800);
           }}
         >
-          {editorReady ? <><FloatingFormatToolbar readOnly={collaboration?.read_only} /><PlateContent className="editor-page" readOnly={collaboration?.read_only} onContextMenu={openAgentContextMenu} placeholder="开始撰写方案…… 输入 / 可打开完整指令菜单；选中文字后右键可扩写、改写或缩写" /></> : <div className="editor-collaboration-loading">正在恢复协同文稿…</div>}
+          {editorReady ? <><FloatingFormatToolbar readOnly={collaboration?.read_only} /><PlateContent onMouseUp={() => { const index = editor.selection?.anchor.path[0]; const node = index === undefined ? null : editor.children[index]; if (node?.id) window.dispatchEvent(new CustomEvent('miaobi:paragraph-selected', { detail: String(node.id) })); }} className="editor-page" readOnly={collaboration?.read_only} onContextMenu={openAgentContextMenu} placeholder="开始撰写方案…… 输入 / 可打开完整指令菜单；选中文字后右键可扩写、改写或缩写" /></> : <div className="editor-collaboration-loading">正在恢复协同文稿…</div>}
           {collaboration && <CollaborationStatus />}
         </Plate>
       </div>
