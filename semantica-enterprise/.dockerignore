@@ -1,5 +1,7 @@
 .git
 .env
+.local-dev
+compose.override.yaml
 .cache
 .venv
 .demo-build

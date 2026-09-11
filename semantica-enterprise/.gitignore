@@ -1,4 +1,6 @@
 .env
+.local-dev/
+compose.override.yaml
 .pytest_cache/
 __pycache__/
 *.py[cod]

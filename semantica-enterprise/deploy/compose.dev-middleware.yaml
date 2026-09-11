@@ -1,0 +1,93 @@
+# Dedicated instances on the server, never the online platform's data volumes.
+name: chuanshen-local-dev
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: semantica_dev
+      POSTGRES_USER: semantica_dev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes: [./data/postgres:/var/lib/postgresql/data]
+    ports: ['127.0.0.1:25432:5432']
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U semantica_dev -d semantica_dev]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, 'yes']
+    volumes: [./data/redis:/data]
+    ports: ['127.0.0.1:26379:6379']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    hostname: chuanshen-local-dev-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: semantica_dev
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?required}
+      RABBITMQ_DEFAULT_VHOST: semantica_dev
+    volumes: [./data/rabbitmq:/var/lib/rabbitmq]
+    ports: ['127.0.0.1:25672:5672']
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, check_port_connectivity]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+  minio:
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: semantica_dev
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?required}
+    volumes: [./data/minio:/data]
+    ports: ['127.0.0.1:29000:9000']
+    healthcheck:
+      test: [CMD, mc, ready, local]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  opensearch:
+    image: chuanshen-opensearch:3.6.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: 'true'
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      cluster.routing.allocation.disk.threshold_enabled: 'false'
+    volumes: [./data/opensearch:/usr/share/opensearch/data]
+    ports: ['127.0.0.1:29200:9200']
+    healthcheck:
+      test: [CMD-SHELL, 'curl -fsS http://localhost:9200/_cluster/health >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+    restart: unless-stopped
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    volumes: [./data/qdrant:/qdrant/storage]
+    ports: ['127.0.0.1:26333:6333']
+    healthcheck:
+      test: [CMD-SHELL, "bash -c ': >/dev/tcp/127.0.0.1/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  falkordb:
+    image: falkordb/falkordb:v4.18.8
+    volumes: [./data/falkordb:/var/lib/falkordb/data]
+    ports: ['127.0.0.1:26380:6379']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped

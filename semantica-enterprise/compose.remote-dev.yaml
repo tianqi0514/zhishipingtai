@@ -1,0 +1,58 @@
+# Opt in locally by symlinking compose.override.yaml to this file.
+# Production scripts explicitly use compose.yaml + compose.production.yaml.
+x-remote-app: &remote-app
+  env_file:
+    - path: ./.local-dev/app.env
+      format: raw
+
+services:
+  postgres:
+    profiles: [local-middleware]
+  redis:
+    profiles: [local-middleware]
+  rabbitmq:
+    profiles: [local-middleware]
+  minio:
+    profiles: [local-middleware]
+  opensearch:
+    profiles: [local-middleware]
+  qdrant:
+    profiles: [local-middleware]
+  falkordb:
+    profiles: [local-middleware]
+  asr-runtime:
+    profiles: [local-media]
+  dev-tunnel:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev-tunnel
+    image: chuanshen-dev-tunnel:1.0
+    environment:
+      DEV_SSH_HOST: ${DEV_SSH_HOST:-10.5.113.232}
+      DEV_SSH_USER: ${DEV_SSH_USER:-chuanshen-dev-tunnel}
+    volumes:
+      - ./.local-dev/ssh:/run/dev-ssh:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, 'for p in 5432 6379 5672 9000 9200 6333 6380; do nc -z -w 2 127.0.0.1 $$p || exit 1; done']
+      interval: 10s
+      timeout: 15s
+      retries: 6
+  api:
+    <<: *remote-app
+    environment: !reset {}
+    depends_on: !override
+      dev-tunnel:
+        condition: service_healthy
+  worker:
+    <<: *remote-app
+    environment: !reset {}
+    # Recycle a heavy child only after its current task finishes, never mid-job.
+    command: [celery, -A, 'apps.worker.celery_app:celery_app', worker, '--loglevel=INFO', '--concurrency=1', '--max-memory-per-child=524288']
+  scheduler:
+    <<: *remote-app
+    environment: !reset {}
