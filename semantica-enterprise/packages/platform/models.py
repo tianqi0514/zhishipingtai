@@ -1553,8 +1553,8 @@ class WritingProject(Base, TimestampMixin):
     scenario_package_version_id: Mapped[str] = mapped_column(
         ForeignKey("scenario_package_versions.id"), index=True
     )
-    knowledge_product_release_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_product_releases.id"), index=True
+    knowledge_product_release_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_product_releases.id"), nullable=True, index=True
     )
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
@@ -1599,6 +1599,19 @@ class WritingDocument(Base, TimestampMixin):
     project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
     title: Mapped[str] = mapped_column(String(500))
     document_type: Mapped[str] = mapped_column(String(64), default="response_plan")
+    purpose: Mapped[str] = mapped_column(Text, default="")
+    audience: Mapped[str] = mapped_column(String(300), default="")
+    applicability: Mapped[dict] = mapped_column(JSON, default=dict)
+    writing_requirements: Mapped[str] = mapped_column(Text, default="")
+    # NULL inherits every active project material; a JSON list records an
+    # explicit article-specific selection (including an intentionally empty set).
+    adopted_material_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    scenario_package_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scenario_package_versions.id"), nullable=True, index=True
+    )
+    knowledge_product_release_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_product_releases.id"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
     current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
@@ -1615,11 +1628,11 @@ class WritingDocumentVersion(Base, TimestampMixin):
     version: Mapped[int] = mapped_column(Integer)
     content: Mapped[list] = mapped_column(JSON, default=list)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
-    scenario_package_version_id: Mapped[str] = mapped_column(
-        ForeignKey("scenario_package_versions.id"), index=True
+    scenario_package_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scenario_package_versions.id"), nullable=True, index=True
     )
-    knowledge_product_release_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_product_releases.id"), index=True
+    knowledge_product_release_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_product_releases.id"), nullable=True, index=True
     )
     status: Mapped[str] = mapped_column(String(32), default="immutable", index=True)
     change_summary: Mapped[str] = mapped_column(Text, default="")

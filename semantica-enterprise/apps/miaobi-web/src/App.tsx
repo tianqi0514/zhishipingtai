@@ -15,7 +15,6 @@ import {
   Save,
   Search,
   Send,
-  Settings2,
   ShieldCheck,
   Sparkles,
   Square,
@@ -29,7 +28,6 @@ import { createClientId } from './ids';
 import { createFrameDeltaBuffer } from './streaming';
 import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeContext, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ProjectMaterial, ProjectMaterialCandidate, ScenarioPackage, WritingAgentSession, WritingDocument, WritingGenerationRun, WritingInputChange } from './types/domain';
 import type { MarkdownSuggestionInsertion } from './editor/MiaobiEditor';
-import { ScenarioConfigDialog } from './components/ScenarioConfigDialog';
 import { ChapterEvidencePanel, ParagraphEvidenceList } from './components/ChapterEvidence';
 
 type WritingSpace = { id: string; name: string; code: string; ready: boolean; knowledge_version?: number };
@@ -111,6 +109,7 @@ export function App() {
   const [facts, setFacts] = useState<Fact[]>([]);
   const [plans, setPlans] = useState<AlternativePlan[]>([]);
   const [documents, setDocuments] = useState<WritingDocument[]>([]);
+  const [documentId, setDocumentId] = useState('');
   const [computations, setComputations] = useState<ComputationRun[]>([]);
   const [gates, setGates] = useState<DecisionGate[]>([]);
   const [knowledgeContext, setKnowledgeContext] = useState<KnowledgeContext | null>(null);
@@ -120,10 +119,10 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
+  const [createDocumentOpen, setCreateDocumentOpen] = useState(false);
   const [assistantTab, setAssistantTab] = useState<'assistant' | 'evidence' | 'calculation' | 'review'>('assistant');
   const [insertionRequest, setInsertionRequest] = useState<EditorInsertion | null>(null);
   const [selectedBinding, setSelectedBinding] = useState<Record<string, unknown> | null>(null);
-  const [scenarioConfigOpen, setScenarioConfigOpen] = useState(false);
 
   const selected = projects.find((item) => item.id === projectId) || null;
 
@@ -138,22 +137,29 @@ export function App() {
   const detailRequest = useRef(0);
   const loadProjectDetails = async (id: string) => {
     const request = ++detailRequest.current;
-    const [detail, factRows, planRows, documentRows, computationRows, gateRows, context, materialRows] = await Promise.all([
+    const [detail, factRows, planRows, documentRows, computationRows, gateRows, context] = await Promise.all([
       api<Project>(`/writing/projects/${id}`),
       api<Fact[]>(`/writing/projects/${id}/facts`),
       api<AlternativePlan[]>(`/writing/projects/${id}/plans`),
       api<WritingDocument[]>(`/writing/projects/${id}/documents`),
       api<ComputationRun[]>(`/writing/projects/${id}/computations`),
       api<DecisionGate[]>(`/writing/projects/${id}/decision-gates`),
-      api<KnowledgeContext>(`/writing/projects/${id}/knowledge-context`),
-      api<ProjectMaterial[]>(`/writing/projects/${id}/materials`),
+      api<KnowledgeContext>(`/writing/projects/${id}/knowledge-context`).catch(() => null),
     ]);
-    const fullDocument = documentRows.length ? await api<WritingDocument>(`/writing/documents/${documentRows[0].id}`) : null;
+    const storedDocument = sessionStorage.getItem(`miaobi-document:${id}`);
+    const selectedDocumentId = documentRows.some((item) => item.id === storedDocument)
+      ? storedDocument!
+      : documentRows[0]?.id || '';
+    const [fullDocument, materialRows] = await Promise.all([
+      selectedDocumentId ? api<WritingDocument>(`/writing/documents/${selectedDocumentId}`) : Promise.resolve(null),
+      api<ProjectMaterial[]>(`/writing/projects/${id}/materials${selectedDocumentId ? `?document_id=${encodeURIComponent(selectedDocumentId)}` : ''}`),
+    ]);
     if (request !== detailRequest.current) return;
     setProject(detail);
     setFacts(factRows);
     setPlans(planRows);
     setDocuments(documentRows);
+    setDocumentId(selectedDocumentId);
     setComputations(computationRows);
     setGates(gateRows);
     setKnowledgeContext(context);
@@ -173,6 +179,8 @@ export function App() {
       setProject(null);
       setKnowledgeContext(null);
       setMaterials([]);
+      setDocuments([]);
+      setDocumentId('');
       return;
     }
     setProject(null); setDocument(null); setSelectedBinding(null); setError('');
@@ -191,14 +199,11 @@ export function App() {
     return () => window.removeEventListener('miaobi:open-binding', openBinding);
   }, []);
 
-  const createDocument = async () => {
-    if (!project) return;
-    const created = await api<WritingDocument>('/writing/documents', {
-      method: 'POST',
-      body: { project_id: project.id, title: `${project.name}（初稿）`, content: [] },
-    });
-    setDocument(created);
-    setDocuments([created]);
+  const openDocument = async (id: string) => {
+    const row = await api<WritingDocument>(`/writing/documents/${id}`);
+    setDocumentId(id);
+    setDocument(row);
+    if (projectId) sessionStorage.setItem(`miaobi-document:${projectId}`, id);
     setTab('writing');
   };
 
@@ -217,7 +222,8 @@ export function App() {
           </select>
           <button type="button" className="icon-button" title="刷新" onClick={() => void loadProjects()}><RefreshCw size={16} /></button>
         </div>
-        <div className="top-actions"><span className="save-state"><Save size={15} />{dirty ? '有未保存修改' : '内容已保存'}</span>{user?.is_admin && project?.scenario?.package_id && <button type="button" className="secondary" onClick={() => setScenarioConfigOpen(true)}><Settings2 size={16} />场景配置</button>}<span className="avatar">{user?.display_name?.slice(0, 1) || '用'}</span></div>
+        {tab === 'writing' && documents.length > 0 && <div className="document-switcher"><span>当前文章</span><select value={documentId} onChange={(event) => void openDocument(event.target.value)}>{documents.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select><button type="button" className="icon-button" title="新建文章" onClick={() => setCreateDocumentOpen(true)}><Plus size={16} /></button></div>}
+        <div className="top-actions"><span className="save-state"><Save size={15} />{dirty ? '有未保存修改' : '内容已保存'}</span><span className="avatar">{user?.display_name?.slice(0, 1) || '用'}</span></div>
       </header>
 
       <aside className="sidebar">
@@ -236,12 +242,13 @@ export function App() {
         {!selected ? <Welcome onCreate={() => setCreateOpen(true)} /> : (
           <>
             {tab !== 'writing' && <PageHeader project={selected} tab={tab} />}
-            {tab === 'task' && project && <TaskWorkspace key={project.id} project={project || selected} materials={materials} facts={facts} computations={computations} plans={plans} document={document} knowledgeContext={knowledgeContext} onChanged={() => loadProjectDetails(selected.id)} onOpenEditor={() => setTab('writing')} onError={setError} />}
+            {tab === 'task' && project && <TaskWorkspace key={project.id} project={project || selected} materials={materials} facts={facts} computations={computations} plans={plans} documents={documents} document={document} knowledgeContext={knowledgeContext} onChanged={() => loadProjectDetails(selected.id)} onOpenEditor={() => document ? openDocument(document.id) : setCreateDocumentOpen(true)} onOpenDocument={openDocument} onCreateDocument={() => setCreateDocumentOpen(true)} onError={setError} />}
             {tab === 'writing' && (
+              !document ? <EmptyAction title="项目中还没有文章" detail="先创建一篇文章。创建成功后会直接进入完整编辑器，资料和目录可以随后补充。" action="新建文章" onClick={() => setCreateDocumentOpen(true)} /> :
               <div className="writing-layout">
-                <section className="outline-pane"><b>文稿目录</b>{document ? <Outline content={document.current_version?.content || []} /> : <p>创建文稿后自动生成目录。</p>}<div className="missing-box"><AlertTriangle size={16} /><span>缺失项会在这里提示，不会由模型静默补齐。</span></div></section>
+                <section className="outline-pane"><b>文稿目录</b><Outline content={document.current_version?.content || []} /><div className="missing-box"><AlertTriangle size={16} /><span>缺失项会在这里提示，不会由模型静默补齐。</span></div></section>
                 <section className="document-pane">
-                  {document ? <Suspense fallback={<div className="editor-shell editor-loading">正在加载完整文稿编辑器…</div>}><MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} onRequestSource={setAssistantTab} onAgentEdit={(request) => runAgentTextEdit(document.id, request)} onAgentEditDecision={(editId, decision) => api(`/writing/agent-edits/${editId}/decision`, { method: 'POST', body: { decision } })} onAgentActivity={() => setAssistantTab('assistant')} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /></Suspense> : <EmptyAction title="还没有文稿" detail="先在“项目”中确认输入并点击“开始生成报告”。" action="前往项目" onClick={() => setTab('task')} />}
+                  <Suspense fallback={<div className="editor-shell editor-loading">正在加载完整文稿编辑器…</div>}><MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} onRequestSource={setAssistantTab} onAgentEdit={(request) => runAgentTextEdit(document.id, request)} onAgentEditDecision={(editId, decision) => api(`/writing/agent-edits/${editId}/decision`, { method: 'POST', body: { decision } })} onAgentActivity={() => setAssistantTab('assistant')} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /></Suspense>
                 </section>
                 <aside className="assistant-pane">
                   {knowledgeContext && <button type="button" className="writing-knowledge-baseline" onClick={() => setTab('task')} title="查看当前文稿使用的知识空间"><BookOpenCheck size={16} /><span><small>当前知识空间</small><b>{knowledgeContext.spaces.map((space) => space.name).join('、')}</b></span><em>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份项目材料` : `${knowledgeContext.document_count} 项知识资产`}</em><ChevronRight size={15} /></button>}
@@ -257,13 +264,13 @@ export function App() {
       </main>
       {error && <div className="toast" role="alert">{error}<button type="button" onClick={() => setError('')}>×</button></div>}
       {createOpen && <CreateProjectDialog onClose={() => setCreateOpen(false)} onCreated={async (row) => { setCreateOpen(false); await loadProjects(); setProjectId(row.id); setTab('task'); }} onError={setError} />}
-      {scenarioConfigOpen && project?.scenario?.package_id && <ScenarioConfigDialog packageId={project.scenario.package_id} versionId={project.scenario.version_id} onClose={() => setScenarioConfigOpen(false)} onSaved={() => loadProjectDetails(project.id)} onError={setError} />}
+      {createDocumentOpen && project && <CreateDocumentDialog project={project} onClose={() => setCreateDocumentOpen(false)} onCreated={async (row) => { setCreateDocumentOpen(false); await loadProjectDetails(project.id); await openDocument(row.id); }} onError={setError} />}
     </div>
   );
 }
 
 function Welcome({ onCreate }: { onCreate: () => void }) {
-  return <div className="welcome"><div className="welcome-icon"><Sparkles /></div><h1>把依据、计算和推演写进一份可信方案</h1><p>先选择知识空间，再创建写作项目；每个事实、数值和结论都能回到原始依据。</p><button type="button" className="primary" onClick={onCreate}><Plus size={17} />创建第一个项目</button></div>;
+  return <div className="welcome"><div className="welcome-icon"><Sparkles /></div><h1>从一个项目开始，写出有依据的正式文章</h1><p>可以先空白起草，也可以上传资料或复用已有知识；需要计算和推演时再按章使用。</p><button type="button" className="primary" onClick={onCreate}><Plus size={17} />创建第一个项目</button></div>;
 }
 
 function PageHeader({ project, tab }: { project: Project; tab: Tab }) {
@@ -271,16 +278,74 @@ function PageHeader({ project, tab }: { project: Project; tab: Tab }) {
   return <div className="page-header"><div><span className="eyebrow">{project.name}</span><h1>{current.label}</h1></div><span className={`status ${project.status}`}>{statusLabel(project.status)}</span></div>;
 }
 
-function TaskWorkspace({ project, materials, facts, computations, plans, document, knowledgeContext, onChanged, onOpenEditor, onError }: {
+const DOCUMENT_TYPES = [
+  { value: 'response_plan', label: '处置方案' },
+  { value: 'emergency_plan', label: '应急预案' },
+  { value: 'work_report', label: '工作报告' },
+  { value: 'summary_report', label: '总结报告' },
+  { value: 'custom', label: '其他文章' },
+];
+
+function DocumentList({ documents, activeDocumentId, onOpen, onCreate }: {
+  documents: WritingDocument[];
+  activeDocumentId: string;
+  onOpen: (id: string) => Promise<void>;
+  onCreate: () => void;
+}) {
+  return <section className="project-documents">
+    <div className="section-title-row"><div><span className="eyebrow">项目文章</span><h2>这个项目要写什么</h2></div><button type="button" className="primary compact" onClick={onCreate}><Plus size={16} />新建文章</button></div>
+    {documents.length ? <div className="document-card-list">{documents.map((item) => <button type="button" key={item.id} className={item.id === activeDocumentId ? 'document-card active' : 'document-card'} onClick={() => void onOpen(item.id)}><FileText size={20} /><span><b>{item.title}</b><small>{DOCUMENT_TYPES.find((option) => option.value === item.document_type)?.label || item.document_type} · {item.audience || '未填写读者'} · {item.current_version ? `V${item.current_version.version}` : '草稿'}</small></span><em className={`status ${item.status}`}>{statusLabel(item.status)}</em><ChevronRight size={16} /></button>)}</div> : <div className="material-empty"><FileText /><div><b>项目中还没有文章</b><span>可以先创建空白文章，再逐步补充资料和目录。</span></div><button type="button" className="secondary" onClick={onCreate}>创建第一篇文章</button></div>}
+  </section>;
+}
+
+function CreateDocumentDialog({ project, onClose, onCreated, onError }: {
+  project: Project;
+  onClose: () => void;
+  onCreated: (row: WritingDocument) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [form, setForm] = useState({
+    title: '', document_type: 'response_plan', purpose: '', audience: '',
+    region: '', organization: '', subject: '', time_range: '', writing_requirements: '',
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async () => {
+    if (!form.title.trim()) return onError('请填写文章名称');
+    setSubmitting(true);
+    try {
+      const row = await api<WritingDocument>('/writing/documents', {
+        method: 'POST',
+        body: {
+          project_id: project.id,
+          title: form.title.trim(),
+          document_type: form.document_type,
+          purpose: form.purpose.trim(),
+          audience: form.audience.trim(),
+          applicability: { region: form.region.trim(), organization: form.organization.trim(), subject: form.subject.trim(), time_range: form.time_range.trim() },
+          writing_requirements: form.writing_requirements.trim(),
+          content: [],
+        },
+      });
+      await onCreated(row);
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '文章创建失败'); }
+    finally { setSubmitting(false); }
+  };
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}><section className="dialog create-document-dialog" role="dialog" aria-modal="true" aria-labelledby="create-document-title"><div className="dialog-head"><div><span className="eyebrow">第一步 · 明确写作任务</span><h2 id="create-document-title">新建文章</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={submitting}>×</button></div><div className="document-form-grid"><label className="wide">文章名称<input autoFocus value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="例如：积石山县地震应急处置方案" /></label><label>文章类型<select value={form.document_type} onChange={(event) => setForm({ ...form, document_type: event.target.value })}>{DOCUMENT_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>给谁看<input value={form.audience} onChange={(event) => setForm({ ...form, audience: event.target.value })} placeholder="例如：应急指挥部审阅" /></label><label className="wide">写作目的<textarea value={form.purpose} onChange={(event) => setForm({ ...form, purpose: event.target.value })} placeholder="这篇文章要解决什么问题、用于什么场合" /></label><label>地区<input value={form.region} onChange={(event) => setForm({ ...form, region: event.target.value })} /></label><label>组织<input value={form.organization} onChange={(event) => setForm({ ...form, organization: event.target.value })} /></label><label>事项<input value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} /></label><label>时间范围<input value={form.time_range} onChange={(event) => setForm({ ...form, time_range: event.target.value })} placeholder="例如：2026年9月" /></label><label className="wide">其他写作要求<textarea value={form.writing_requirements} onChange={(event) => setForm({ ...form, writing_requirements: event.target.value })} placeholder="可选：结构、重点、语气或必须保留的附件" /></label></div><p className="field-help">创建后直接进入完整编辑器。资料、目录和分析计算可以随后补充，不会阻止起草。</p><div className="dialog-actions"><button type="button" className="secondary" onClick={onClose} disabled={submitting}>取消</button><button type="button" className="primary" onClick={() => void submit()} disabled={submitting}>{submitting ? '创建中…' : '创建并开始写作'}</button></div></section></div>;
+}
+
+function TaskWorkspace({ project, materials, facts, computations, plans, documents, document, knowledgeContext, onChanged, onOpenEditor, onOpenDocument, onCreateDocument, onError }: {
   project: Project;
   materials: ProjectMaterial[];
   facts: Fact[];
   computations: ComputationRun[];
   plans: AlternativePlan[];
+  documents: WritingDocument[];
   document: WritingDocument | null;
   knowledgeContext: KnowledgeContext | null;
   onChanged: () => Promise<void>;
   onOpenEditor: () => void;
+  onOpenDocument: (id: string) => Promise<void>;
+  onCreateDocument: () => void;
   onError: (message: string) => void;
 }) {
   const [stage, setStage] = useState<'inputs' | 'toolbox' | 'report'>('inputs');
@@ -294,7 +359,7 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
   const verified = readyKeys.length;
   const ready = materials.length > 0 && readyKeys.length === (requiredKeys.length || requiredFacts.length);
   const pending = Math.max(0, (requiredKeys.length || requiredFacts.length) - verified);
-  const nextLabel = !materials.length ? '请先选择报告材料' : ready ? '输入已确认，下一步' : `还有 ${pending} 项待确认`;
+  const nextLabel = ready ? '资料已就绪，开始起草' : '继续起草';
   const reportExists = Boolean(document?.current_version && document.current_version.change_summary !== '创建报告草稿');
   const latest = new Map<string, ComputationRun>();
   computations.forEach((item) => {
@@ -302,25 +367,26 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
     if (key && !latest.has(key)) latest.set(key, item);
   });
   const steps = [
-    { key: 'inputs' as const, index: 1, title: '输入确认', detail: !materials.length ? '等待选择材料' : ready ? `${verified} 项关键输入已确认` : `${pending} 项待处理`, done: ready },
-    { key: 'toolbox' as const, index: 2, title: '分析计算', detail: latest.size ? `${latest.size} 项结果` : '系统自动推演与测算', done: latest.size > 0 },
-    { key: 'report' as const, index: 3, title: '报告编辑', detail: reportExists ? '报告草稿已生成' : '等待完成正文生成', done: reportExists },
+    { key: 'inputs' as const, index: 1, title: '准备资料', detail: !materials.length ? '可先空白起草' : ready ? `${verified} 项关键信息已确认` : `${pending} 项仅影响相关内容`, done: ready },
+    { key: 'toolbox' as const, index: 2, title: '起草编辑', detail: latest.size ? `已采用 ${latest.size} 项计算结果` : '按需检索、计算和推演', done: reportExists },
+    { key: 'report' as const, index: 3, title: '检查导出', detail: reportExists ? '可进入审校与导出' : '形成草稿后检查', done: document?.status === 'published' },
   ];
   return <div className="task-workspace">
+    <DocumentList documents={documents} activeDocumentId={document?.id || ''} onOpen={onOpenDocument} onCreate={onCreateDocument} />
     <section className="workflow-strip" aria-label="报告生成流程">
       {steps.map((item) => <button type="button" key={item.key} className={stage === item.key ? 'active' : ''} onClick={() => item.key === 'report' && reportExists ? onOpenEditor() : setStage(item.key)}>
         <span className={item.done ? 'flow-number done' : 'flow-number'}>{item.done ? <CheckCircle2 size={17} /> : item.index}</span><span><b>{item.title}</b><small>{item.detail}</small></span>
       </button>)}
     </section>
     {stage === 'inputs' && <>
-      <section className="task-intro-card"><div><span className="eyebrow">第一步</span><h2>准备材料并确认报告输入</h2><p>先明确这份报告使用哪些业务材料，再核对从材料中提取的关键输入。</p></div><div className="task-intro-actions"><button type="button" className="primary" disabled={!ready} onClick={() => setStage('toolbox')}>{nextLabel}<ChevronRight size={16} /></button></div></section>
+      <section className="task-intro-card"><div><span className="eyebrow">准备资料</span><h2>选择依据，确认影响结论的关键信息</h2><p>可以先写已有依据的章节；缺失信息只影响相关内容，不妨碍打开空白文稿。</p></div><div className="task-intro-actions">{document && <button type="button" className="secondary" onClick={onOpenEditor}>打开空白文稿</button>}<button type="button" className="primary" onClick={() => setStage('toolbox')}>{nextLabel}<ChevronRight size={16} /></button></div></section>
       {knowledgeContext && <section className="compact-knowledge-baseline"><BookOpenCheck size={18} /><div><b>{knowledgeContext.spaces.map((space) => space.name).join('、')}</b><small>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份已选业务材料` : '尚未选择项目材料'} · {knowledgeContext.chunk_count} 个已发布知识片段</small></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前版本' : '有新版本'}</span></section>}
-      <MaterialsPanel project={project} materials={materials} knowledgeContext={knowledgeContext} onChanged={onChanged} onError={onError} />
+      <MaterialsPanel project={project} document={document} materials={materials} knowledgeContext={knowledgeContext} onChanged={onChanged} onError={onError} />
       <Facts project={project} facts={facts} requiredKeys={requiredKeys} document={document} onChanged={onChanged} onError={onError} />
     </>}
     {stage === 'toolbox' && <ChapterEvidencePanel projectId={project.id} onChanged={onChanged} />}
-    {stage === 'toolbox' && <ReportGenerationPanel project={project} facts={facts} computations={computations} plans={plans} document={document} ready={ready} onChanged={onChanged} onOpenEditor={onOpenEditor} onBack={() => setStage('inputs')} onError={onError} />}
-    {stage === 'report' && (reportExists ? <section className="report-ready-card"><CheckCircle2 /><div><h2>报告已经生成</h2><p>继续修改正文并核对右侧依据。</p></div><button type="button" className="primary" onClick={onOpenEditor}>打开报告编辑器<ChevronRight size={16} /></button></section> : <EmptyAction title="报告尚未生成" detail="请在分析计算中查看生成状态或重试。" action="返回分析计算" onClick={() => setStage('toolbox')} />)}
+    {stage === 'toolbox' && <ReportGenerationPanel project={project} facts={facts} computations={computations} plans={plans} document={document} onChanged={onChanged} onOpenEditor={onOpenEditor} onBack={() => setStage('inputs')} onError={onError} />}
+    {stage === 'report' && (document ? <section className="report-ready-card"><CheckCircle2 /><div><h2>{reportExists ? '文章可以检查和导出' : '文章草稿已经创建'}</h2><p>在完整编辑器中审校正文、逐段核对依据，并生成 Word 或 PDF。</p></div><button type="button" className="primary" onClick={onOpenEditor}>进入检查与导出<ChevronRight size={16} /></button></section> : <EmptyAction title="还没有文章" detail="先创建文章，再进入检查与导出。" action="新建文章" onClick={onCreateDocument} />)}
   </div>;
 }
 
@@ -328,11 +394,13 @@ const MATERIAL_ROLE_LABELS: Record<ProjectMaterial['material_role'], string> = {
   policy_basis: '政策与制度依据',
   task_data: '本次任务数据',
   reference: '写作参考材料',
+  sample_style: '样稿与格式',
   attachment: '报告附件',
 };
 
-function MaterialsPanel({ project, materials, knowledgeContext, onChanged, onError }: {
+function MaterialsPanel({ project, document, materials, knowledgeContext, onChanged, onError }: {
   project: Project;
+  document: WritingDocument | null;
   materials: ProjectMaterial[];
   knowledgeContext: KnowledgeContext | null;
   onChanged: () => Promise<void>;
@@ -343,11 +411,68 @@ function MaterialsPanel({ project, materials, knowledgeContext, onChanged, onErr
   const [selectedVersion, setSelectedVersion] = useState('');
   const [role, setRole] = useState<ProjectMaterial['material_role']>('reference');
   const [submitting, setSubmitting] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState('');
+  const [spaces, setSpaces] = useState<WritingSpace[]>([]);
+  const [spaceId, setSpaceId] = useState('');
+  const [attachingSpace, setAttachingSpace] = useState(false);
   const uploadSpaceId = materials[0]?.document.space_id || knowledgeContext?.spaces[0]?.id || '';
-  const prepareZhikuUpload = () => {
-    sessionStorage.setItem('miaobi-project', project.id);
-    localStorage.setItem('miaobi.pendingProject', project.id);
-    if (uploadSpaceId) localStorage.setItem('chuanshen.pendingSpace', uploadSpaceId);
+  const loadSpaces = async () => {
+    try {
+      const rows = await api<WritingSpace[]>('/writing/spaces');
+      const readySpaces = rows.filter((item) => item.ready);
+      setSpaces(readySpaces);
+      setSpaceId((current) => current || readySpaces[0]?.id || '');
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '知识空间加载失败'); }
+  };
+  const attachSpace = async () => {
+    if (!spaceId || attachingSpace) return;
+    setAttachingSpace(true);
+    try {
+      await api(`/writing/projects/${project.id}/knowledge-space`, { method: 'POST', body: { space_id: spaceId } });
+      await onChanged();
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '资料来源添加失败'); }
+    finally { setAttachingSpace(false); }
+  };
+  const waitForKnowledge = async (documentId: string) => {
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      const current = await api<{ status: string; current_version_id?: string; versions?: Array<{ id: string; status: string; parse_summary?: Record<string, unknown> }> }>(`/documents/${documentId}`);
+      const version = current.versions?.find((item) => item.id === current.current_version_id) || current.versions?.[0];
+      const knowledgeStatus = String(version?.parse_summary?.knowledge_status || '');
+      if (knowledgeStatus === 'published') return version;
+      if (knowledgeStatus === 'partial_failed') throw new Error('资料解析完成，但部分知识加工失败，请在任务中心查看原因');
+      setUploadStatus(version?.status === 'ready' ? '正在建立检索索引…' : '正在解析资料…');
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    }
+    throw new Error('资料仍在后台加工，可稍后刷新本页查看进度');
+  };
+  const upload = async (file: File | undefined) => {
+    if (!file || uploading) return;
+    if (!uploadSpaceId) {
+      onError('当前项目未选择知识空间。可先空白写作，或新建一个带知识空间的项目后上传资料。');
+      return;
+    }
+    setUploading(true);
+    setUploadStatus('正在上传…');
+    try {
+      const formData = new FormData();
+      formData.set('space_id', uploadSpaceId);
+      formData.set('knowledge_processing_mode', 'both');
+      formData.set('file', file);
+      const uploaded = await api<{ document: { id: string }; version: { id: string } }>('/documents/upload', { method: 'POST', body: formData });
+      const version = await waitForKnowledge(uploaded.document.id);
+      setUploadStatus('正在固定本次写作使用的资料版本…');
+      await api(`/writing/projects/${project.id}/knowledge-release/refresh`, { method: 'POST' });
+      await api(`/writing/projects/${project.id}/materials`, {
+        method: 'POST',
+        body: { document_id: uploaded.document.id, version_id: version?.id || uploaded.version.id, material_role: role, usage_scope: 'task_only' },
+      });
+      setUploadStatus('资料已就绪');
+      await onChanged();
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : '资料上传失败');
+      setUploadStatus('');
+    } finally { setUploading(false); }
   };
   const loadCandidates = async () => {
     try {
@@ -384,22 +509,33 @@ function MaterialsPanel({ project, materials, knowledgeContext, onChanged, onErr
       await onChanged();
     } catch (reason) { onError(reason instanceof Error ? reason.message : '移除材料失败'); }
   };
+  const toggleForArticle = async (material: ProjectMaterial) => {
+    if (!document) return;
+    const adopted = new Set(materials.filter((item) => item.adopted_by_article !== false).map((item) => item.id));
+    if (material.adopted_by_article === false) adopted.add(material.id);
+    else adopted.delete(material.id);
+    try {
+      await api(`/writing/documents/${document.id}/materials`, { method: 'PUT', body: { material_ids: [...adopted] } });
+      await onChanged();
+    } catch (reason) { onError(reason instanceof Error ? reason.message : '文章资料范围更新失败'); }
+  };
   return <>
     <section className="content-card project-materials">
-      <div className="card-toolbar"><div><span className="eyebrow">本报告使用的材料</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><a className="secondary" href="/#documents" onClick={prepareZhikuUpload} title={knowledgeContext?.spaces[0] ? `上传到 ${knowledgeContext.spaces[0].name}` : '上传到传神智库'}><Upload size={15} />上传到智库</a><button type="button" className="primary compact" onClick={() => void loadCandidates()}>从智库选择</button></div></div>
-      {materials.length ? <div className="material-list">{materials.map((material) => <article key={material.id}><FileText size={20} /><div><b>{material.document.title}</b><small>{material.version.filename} · 固定 V{material.version.version_number}{material.current_document_version ? '' : ' · 历史版本'}</small></div><select aria-label={`设置${material.document.title}的材料角色`} value={material.material_role} onChange={(event) => void updateRole(material, event.target.value as ProjectMaterial['material_role'])}>{Object.entries(MATERIAL_ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><button type="button" className="icon-button danger-icon" title="从任务移除" onClick={() => void remove(material)}><Trash2 size={16} /></button></article>)}</div> : <div className="material-empty"><FileText /><div><b>先选择本次报告真正使用的材料</b><span>资料上传、解析和治理仍在传神智库完成；加入后，妙笔检索会限定在这些固定版本内。</span></div></div>}
+      <div className="card-toolbar"><div><span className="eyebrow">项目资料池</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><label className={`secondary upload-button ${uploading || !uploadSpaceId ? 'disabled' : ''}`} title={uploadSpaceId ? '文件将由知识底座完成真实解析、切片和索引' : '未选择知识空间时仍可空白写作'}><Upload size={15} />{uploading ? '处理中…' : '上传资料'}<input type="file" disabled={uploading || !uploadSpaceId} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; void upload(file); }} /></label><button type="button" className="primary compact" disabled={!uploadSpaceId} onClick={() => void loadCandidates()}>选择已有资料</button></div></div>
+      {uploadStatus && <p className="upload-progress" role="status">{uploadStatus}</p>}
+      {materials.length ? <div className="material-list">{materials.map((material) => <article key={material.id}><label className="article-material-check" title={document ? '控制当前文章是否采用这份材料' : '先创建文章'}><input type="checkbox" checked={material.adopted_by_article !== false} disabled={!document} onChange={() => void toggleForArticle(material)} /><span>用于本文</span></label><div><b>{material.document.title}</b><small>{material.version.filename} · 固定 V{material.version.version_number}{material.current_document_version ? '' : ' · 历史版本'}</small></div><select aria-label={`设置${material.document.title}的材料角色`} value={material.material_role} onChange={(event) => void updateRole(material, event.target.value as ProjectMaterial['material_role'])}>{Object.entries(MATERIAL_ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><button type="button" className="icon-button danger-icon" title="从项目资料池移除" onClick={() => void remove(material)}><Trash2 size={16} /></button></article>)}</div> : <div className="material-empty"><FileText /><div><b>{uploadSpaceId ? '上传本次业务资料，或选择已有资料' : '可先从空白文稿开始'}</b><span>{uploadSpaceId ? '妙笔会调用知识底座完成解析和检索；样稿只学习结构与表达，不作为业务事实。' : '编辑和导出可以直接使用；需要检索依据或上传资料时，再添加一个资料来源。'}</span></div>{!uploadSpaceId && <button type="button" className="secondary" onClick={() => void loadSpaces()}>添加资料来源</button>}</div>}
+      {!uploadSpaceId && spaces.length > 0 && <div className="attach-space-row"><label>选择知识空间<select value={spaceId} onChange={(event) => setSpaceId(event.target.value)}>{spaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><button type="button" className="primary compact" disabled={!spaceId || attachingSpace} onClick={() => void attachSpace()}>{attachingSpace ? '添加中…' : '确认添加'}</button></div>}
     </section>
     {open && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="从智库选择材料"><div className="dialog-head"><div><span className="eyebrow">固定材料版本</span><h2>从智库选择</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setOpen(false)}>×</button></div><label>材料<select autoFocus value={selectedVersion} onChange={(event) => setSelectedVersion(event.target.value)}><option value="">请选择已完成加工的材料</option>{candidates.map((item) => <option key={item.version_id} value={item.version_id} disabled={item.already_linked || !['processed', 'published', 'ready'].includes(item.processing_status)}>{item.title} · V{item.version_number}{item.already_linked ? '（已加入）' : !['processed', 'published', 'ready'].includes(item.processing_status) ? '（加工中）' : ''}</option>)}</select></label><label>在报告中的用途<select value={role} onChange={(event) => setRole(event.target.value as ProjectMaterial['material_role'])}>{Object.entries(MATERIAL_ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><p className="field-help">选择的是文档固定版本。后续智库出现新版本时，系统不会静默替换本报告依据。</p>{!candidates.length && <p className="field-help warning-text">当前知识空间没有可选择的文档，请先到传神智库上传并完成知识加工。</p>}<div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setOpen(false)}>取消</button><button type="button" className="primary" disabled={submitting || !selectedVersion} onClick={() => void add()}>{submitting ? '加入中…' : '加入当前任务'}</button></div></section></div>}
   </>;
 }
 
-export function ReportGenerationPanel({ project, facts, computations, plans, document, ready, onChanged, onOpenEditor, onBack, onError }: {
+export function ReportGenerationPanel({ project, facts, computations, plans, document, onChanged, onOpenEditor, onBack, onError }: {
   project: Project;
   facts: Fact[];
   computations: ComputationRun[];
   plans: AlternativePlan[];
   document: WritingDocument | null;
-  ready: boolean;
   onChanged: () => Promise<void>;
   onOpenEditor: () => void;
   onBack: () => void;
@@ -424,14 +560,14 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
   }, [document?.id, project.id]);
 
   const start = async () => {
-    if (!ready || running) return;
+    if (running) return;
     setRunning(true);
     onError('');
     setStageLabel('正在核验输入并运行推演工具箱');
     let activeRunId: string | undefined;
     try {
       const created = await api<WritingGenerationRun>(`/writing/projects/${project.id}/generate-report`, {
-        method: 'POST', body: { document_id: document?.id || null },
+        method: 'POST', body: { document_id: document?.id || null, allow_partial: true },
       });
       activeRunId = created.id;
       setRun(created);
@@ -508,7 +644,7 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
   const selectedPlan = plans.find((item) => item.status === 'selected');
   const conclusion = facts.find((item) => item.fact_type === 'semantica_inference' && item.freshness_status === 'current');
   return <div className="toolbox-page">
-    <section className="task-intro-card"><div><span className="eyebrow">第二步</span><h2>系统自动完成分析计算并生成报告</h2><p>一次执行规则推演、确定性测算、方案比较、知识检索和正文生成；数值与结论由服务端写入指定章节。</p></div><div className="task-intro-actions"><button type="button" className="secondary" disabled={running} onClick={onBack}>返回检查输入</button><button type="button" className="primary generation-button" disabled={!ready || running} onClick={() => void start()}><Sparkles size={17} />{running ? stageLabel : document ? '重新生成报告' : '开始生成报告'}</button>{running && <button type="button" className="danger-soft" onClick={() => void stop()}><Square size={15} />停止</button>}</div></section>
+    <section className="task-intro-card"><div><span className="eyebrow">起草编辑</span><h2>根据当前文章需要生成初稿</h2><p>系统只生成已具备资料和已确认信息的章节；缺少信息的章节会明确保留为待补充，不会阻止整篇起草。</p></div><div className="task-intro-actions"><button type="button" className="secondary" disabled={running} onClick={onBack}>返回准备资料</button>{document && <button type="button" className="secondary" disabled={running} onClick={onOpenEditor}>直接编辑</button>}<button type="button" className="primary generation-button" disabled={running} onClick={() => void start()}><Sparkles size={17} />{running ? stageLabel : document ? '生成可写章节' : '创建并生成初稿'}</button>{running && <button type="button" className="danger-soft" onClick={() => void stop()}><Square size={15} />停止</button>}</div></section>
     {(running || run) && <section className="generation-progress"><div><b>{stageLabel}</b><span>{progress}%</span></div><progress max="100" value={progress} /><small>进度来自真实后端任务与 Agent 事件，不使用固定动画伪造阶段。</small></section>}
     <section className="toolbox-summary-grid">
       <article><span>输入数据</span><b>{facts.filter((item) => item.verification_status === 'verified').length}/{facts.length}</b><small>只有已确认输入参与计算</small></article>
@@ -997,7 +1133,7 @@ function WritingAssistant({ project, document, onInsert, onError }: { project: P
           body: {
             block_id: reference.id, block_type: reference.type, source_type: 'policy_document',
             source_id: reference.source_id, source_version: reference.source_version,
-            knowledge_product_release_id: project.knowledge_product_release_id,
+            knowledge_product_release_id: document.knowledge_product_release_id || project.knowledge_product_release_id,
             chunk_id: reference.chunk_id, query_run_id: reference.query_run_id,
             content_hash: await sha256(reference), block_content: reference,
             verification_status: 'verified', freshness_status: 'current',
@@ -1067,7 +1203,7 @@ function EvidencePanel({ project, document, selectedBinding, onInsert, onError }
     try {
       setResult(await api<KnowledgeSearchResponse>(`/writing/projects/${project.id}/knowledge/search`, {
         method: 'POST',
-        body: { query: query.trim(), top_k: 8, use_keyword: true, use_vector: true, use_graph: true, use_reranker: false },
+        body: { query: query.trim(), document_id: document?.id, top_k: 8, use_keyword: true, use_vector: true, use_graph: true, use_reranker: false },
       }));
     } catch (reason) { onError(reason instanceof Error ? reason.message : '知识检索失败'); }
     finally { setSearching(false); }
@@ -1100,7 +1236,7 @@ function EvidencePanel({ project, document, selectedBinding, onInsert, onError }
           source_type: 'policy_document',
           source_id: item.document_id,
           source_version: item.version_id,
-          knowledge_product_release_id: project.knowledge_product_release_id,
+          knowledge_product_release_id: document.knowledge_product_release_id || project.knowledge_product_release_id,
           chunk_id: item.chunk_id,
           query_run_id: result.query_id,
           content_hash: await sha256(reference),
@@ -1138,38 +1274,31 @@ function Metric({ label, value }: { label: string; value: string }) { return <di
 function EmptyAction({ title, detail, action, onClick }: { title: string; detail: string; action?: string; onClick?: () => void }) { return <div className="empty-action"><FileText /><h2>{title}</h2><p>{detail}</p>{action && onClick && <button type="button" className="primary" onClick={onClick}>{action}</button>}</div>; }
 
 function CreateProjectDialog({ onClose, onCreated, onError }: { onClose: () => void; onCreated: (project: Project) => void; onError: (message: string) => void }) {
-  const [packages, setPackages] = useState<ScenarioPackage[]>([]);
   const [spaces, setSpaces] = useState<WritingSpace[]>([]);
-  const [form, setForm] = useState({ name: '', code: '', scenario_version_id: '', space_id: '' });
+  const [form, setForm] = useState({ name: '', subject: '', space_id: '' });
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    Promise.all([api<ScenarioPackage[]>('/writing/scenario-packages'), api<WritingSpace[]>('/writing/spaces')])
-      .then(async ([scenarioRows, spaceRows]) => {
-        const detailed = await Promise.all(scenarioRows.map((item) => api<ScenarioPackage>(`/writing/scenario-packages/${item.id}`)));
-        setPackages(detailed);
+    api<WritingSpace[]>('/writing/spaces')
+      .then((spaceRows) => {
         setSpaces(spaceRows);
-        const firstVersion = detailed.find((item) => item.current_version_id)?.current_version_id || '';
-        const firstSpace = spaceRows.find((item) => item.ready)?.id || '';
-        setForm((current) => ({ ...current, scenario_version_id: firstVersion, space_id: firstSpace }));
+        setForm((current) => ({ ...current, space_id: '' }));
       }).catch((reason) => onError(reason instanceof Error ? reason.message : '创建表单加载失败'));
   }, []);
 
-  const selectedScenario = useMemo(() => packages.find((item) => item.current_version_id === form.scenario_version_id), [packages, form.scenario_version_id]);
-
   const submit = async () => {
-    if (!form.name.trim() || !form.code.trim() || !form.scenario_version_id || !form.space_id) return onError('请填写项目名称、编码并选择知识空间');
+    if (!form.name.trim()) return onError('请填写项目名称');
     setSubmitting(true);
     try {
       const applicationId = new URLSearchParams(window.location.search).get('application_id');
-      const project = await api<Project>('/writing/projects', { method: 'POST', body: { code: form.code, name: form.name, application_id: applicationId || undefined, scenario_package_version_id: form.scenario_version_id, space_id: form.space_id } });
+      const project = await api<Project>('/writing/projects', { method: 'POST', body: { name: form.name.trim(), application_id: applicationId || undefined, space_id: form.space_id || undefined, config: { subject: form.subject.trim() } } });
       onCreated(project);
     } catch (reason) {
       onError(reason instanceof ApiError ? reason.message : '创建项目失败');
     } finally { setSubmitting(false); }
   };
 
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="create-title"><div className="dialog-head"><div><span className="eyebrow">选择空间 → 新建项目</span><h2 id="create-title">新建写作项目</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><label>知识空间<select value={form.space_id} onChange={(event) => setForm({ ...form, space_id: event.target.value })}><option value="">请选择已完成知识加工的空间</option>{spaces.map((item) => <option key={item.id} value={item.id} disabled={!item.ready}>{item.name}{item.ready ? ` · 知识版本 V${item.knowledge_version}` : '（尚未完成加工）'}</option>)}</select></label><label>项目名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：积石山县地震应急处置方案" autoFocus /></label><label>项目编码<input value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-') })} placeholder="jishishan-earthquake" /></label><label>写作模板<select value={form.scenario_version_id} onChange={(event) => setForm({ ...form, scenario_version_id: event.target.value })}>{packages.filter((item) => item.current_version_id).map((item) => <option key={item.id} value={item.current_version_id}>{item.name}{item.code !== 'earthquake-response-plan' ? '（模板待业务确认）' : ''}</option>)}</select></label>{selectedScenario && <p className="field-help">{selectedScenario.description || '模板定义报告结构、需要确认的输入和可用推演工具。'}</p>}<div className="dialog-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button type="button" className="primary" disabled={submitting} onClick={() => void submit()}>{submitting ? '创建中…' : '新建项目'}</button></div></section></div>;
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title"><div className="dialog-head"><div><span className="eyebrow">第一步</span><h2 id="create-title">新建写作项目</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={onClose}>×</button></div><label>项目名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：积石山县地震应急材料" autoFocus /></label><label>事项说明（可选）<textarea value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} placeholder="用一句话说明这个项目围绕什么事项开展" rows={3} /></label><label>已有知识空间（可选）<select value={form.space_id} onChange={(event) => setForm({ ...form, space_id: event.target.value })}><option value="">暂不选择，先空白写作</option>{spaces.map((item) => <option key={item.id} value={item.id} disabled={!item.ready}>{item.name}{item.ready ? '' : '（尚未完成加工）'}</option>)}</select></label><p className="field-help">知识空间只用于复用已有资料。创建项目后也可以在妙笔中直接上传本次材料。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={onClose}>取消</button><button type="button" className="primary" disabled={submitting || !form.name.trim()} onClick={() => void submit()}>{submitting ? '创建中…' : '创建项目'}</button></div></section></div>;
 }
 
 function statusLabel(value: string) { return ({ draft: '准备中', preparing: '数据准备', ready: '任务已创建', reasoning: '推演中', writing: '撰写中', reviewing: '审校中', published: '已发布' } as Record<string,string>)[value] || value; }

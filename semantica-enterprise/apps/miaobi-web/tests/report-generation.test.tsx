@@ -29,7 +29,7 @@ const renderPanel = (document: WritingDocument | null = null) => {
   const onChanged = vi.fn(async () => {});
   const onOpenEditor = vi.fn();
   const view = render(<ReportGenerationPanel project={project} facts={[]} computations={[]} plans={[]}
-    document={document} ready onChanged={onChanged} onOpenEditor={onOpenEditor} onBack={vi.fn()} onError={onError} />);
+    document={document} onChanged={onChanged} onOpenEditor={onOpenEditor} onBack={vi.fn()} onError={onError} />);
   return { ...view, onError, onChanged, onOpenEditor };
 };
 
@@ -51,14 +51,14 @@ describe('报告生成失败恢复', () => {
       .mockResolvedValueOnce(json(failed));
     const { onError, onChanged, onOpenEditor } = renderPanel();
     await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: '开始生成报告' }));
+    fireEvent.click(screen.getByRole('button', { name: '创建并生成初稿' }));
 
     expect(await screen.findByText('上次生成失败，可重新生成')).toBeInTheDocument();
     expect(screen.getByRole('progressbar')).toHaveAttribute('value', '100');
     expect(screen.getByText('100%')).toBeInTheDocument();
     expect(screen.queryByText('正在执行报告质量检查')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '开始生成报告' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '创建并生成初稿' })).toBeEnabled();
     expect(screen.getByText('报告没有通过质量门，未覆盖当前正文')).toBeInTheDocument();
     expect(onError).toHaveBeenLastCalledWith(issueMessage);
     expect(request).toHaveBeenLastCalledWith('/api/v1/writing/generation-runs/run-1', expect.any(Object));
@@ -68,7 +68,7 @@ describe('报告生成失败恢复', () => {
     request.mockResolvedValueOnce(json({ ...created, id: 'run-2' }))
       .mockResolvedValueOnce(stream())
       .mockResolvedValueOnce(json({ ...created, id: 'run-2', status: 'completed', progress: 100 }));
-    fireEvent.click(screen.getByRole('button', { name: '开始生成报告' }));
+    fireEvent.click(screen.getByRole('button', { name: '创建并生成初稿' }));
     await waitFor(() => expect(onOpenEditor).toHaveBeenCalledOnce());
     expect(onChanged).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenLastCalledWith('');
@@ -87,7 +87,7 @@ describe('报告生成失败恢复', () => {
     expect(screen.getAllByText(message)).toHaveLength(2);
     expect(container.querySelector('img')).toBeNull();
     expect(screen.getByRole('progressbar')).toHaveAttribute('value', '100');
-    expect(screen.getByRole('button', { name: '开始生成报告' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '创建并生成初稿' })).toBeEnabled();
   });
 
   it('状态刷新也失败时保留首个真实错误，不继续显示质量检查中或伪造完成进度', async () => {
@@ -98,9 +98,9 @@ describe('报告生成失败恢复', () => {
       .mockRejectedValueOnce(new Error('状态读取失败'));
     const { onError } = renderPanel();
     await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: '开始生成报告' }));
+    fireEvent.click(screen.getByRole('button', { name: '创建并生成初稿' }));
     expect(await screen.findByText('本次生成未完成，可重新生成')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('button', { name: '开始生成报告' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: '创建并生成初稿' })).toBeEnabled());
     expect(screen.getByRole('progressbar')).toHaveAttribute('value', '45');
     expect(onError).toHaveBeenLastCalledWith(issueMessage);
     expect(screen.queryByText('报告已生成')).not.toBeInTheDocument();
@@ -113,10 +113,10 @@ describe('报告生成失败恢复', () => {
       .mockResolvedValueOnce(json({ ...created, status: 'agent_failed', progress: 45 }));
     const { onError } = renderPanel();
     await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: '开始生成报告' }));
+    fireEvent.click(screen.getByRole('button', { name: '创建并生成初稿' }));
     expect(await screen.findByText('上次生成失败，可重新生成')).toBeInTheDocument();
     expect(onError).toHaveBeenLastCalledWith('写作服务暂时不可用，请重试。');
-    expect(screen.getByRole('button', { name: '开始生成报告' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '创建并生成初稿' })).toBeEnabled();
   });
 
   it('后端尚未终止时保留真实进度，但前端中断后不声称仍在生成', async () => {
@@ -126,8 +126,8 @@ describe('报告生成失败恢复', () => {
       .mockResolvedValueOnce(json({ ...created, status: 'agent_running', progress: 60 }));
     renderPanel();
     await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: '开始生成报告' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: '开始生成报告' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '创建并生成初稿' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '创建并生成初稿' })).toBeEnabled());
     expect(screen.getByText('本次生成未完成，可重新生成')).toBeInTheDocument();
     expect(screen.getByRole('progressbar')).toHaveAttribute('value', '60');
     expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument();

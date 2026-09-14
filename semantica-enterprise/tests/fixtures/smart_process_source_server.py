@@ -74,7 +74,9 @@ def create_git_fixture(root: Path) -> Path:
     work = root / "work"
     bare = root / GIT_REPOSITORY_NAME
     work.mkdir(parents=True, exist_ok=True)
-    _run_git("init", "--initial-branch=main", cwd=work)
+    # macOS system Git 2.21 predates ``git init --initial-branch``.
+    _run_git("init", cwd=work)
+    _run_git("symbolic-ref", "HEAD", "refs/heads/main", cwd=work)
     for relative, content in GIT_FILES.items():
         target = work / relative
         target.parent.mkdir(parents=True, exist_ok=True)

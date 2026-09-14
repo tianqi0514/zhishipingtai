@@ -278,8 +278,8 @@ export const EditorKit = [
   ...TrustedBlockKit,
 ];
 
-const EMPTY_VALUE: Value = [
-  { id: 'title', type: KEYS.h1, children: [{ text: '应急处置方案' }] },
+const emptyValue = (title: string): Value => [
+  { id: 'title', type: KEYS.h1, children: [{ text: title || '未命名文章' }] },
   { id: 'intro', type: KEYS.p, children: [{ text: '请从左侧目录选择章节，或使用右侧妙笔助手生成有依据的草稿。' }] },
 ];
 
@@ -388,7 +388,7 @@ export function materializeMarkdownSuggestion(editor: PlateEditor, request: Mark
 
 export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource, onAgentEdit, onAgentEditDecision, onAgentActivity, insertionRequest, onInserted }: Props) {
   const initial = normalizeCollaborativeValue(
-    (document.current_version?.content?.length ? document.current_version.content : EMPTY_VALUE) as Value,
+    (document.current_version?.content?.length ? document.current_version.content : emptyValue(document.title)) as Value,
   ).value;
   const [collaboration, setCollaboration] = useState<CollaborationAccess | null>(null);
   const [collaborationError, setCollaborationError] = useState('');

@@ -55,23 +55,20 @@ class ScenarioPackageVersionCreate(StrictModel):
 
 
 class WritingProjectCreate(StrictModel):
-    code: str
+    code: str | None = None
     name: str = Field(min_length=1, max_length=300)
     application_id: str | None = None
-    scenario_package_version_id: str
+    scenario_package_version_id: str | None = None
     # The business UI selects a knowledge space.  The release id remains an
     # internal/backward-compatible option for existing API clients.
     space_id: str | None = None
     knowledge_product_release_id: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
 
-    _normalize_code = field_validator("code")(_code)
-
-    @model_validator(mode="after")
-    def validate_knowledge_scope(self):
-        if not self.space_id and not self.knowledge_product_release_id:
-            raise ValueError("请选择知识空间")
-        return self
+    @field_validator("code")
+    @classmethod
+    def normalize_optional_code(cls, value: str | None) -> str | None:
+        return _code(value) if value else None
 
 
 class WritingProjectUpdate(StrictModel):
@@ -85,12 +82,12 @@ class WritingProjectUpdate(StrictModel):
 class WritingProjectMaterialCreate(StrictModel):
     document_id: str
     version_id: str | None = None
-    material_role: Literal["policy_basis", "task_data", "reference", "attachment"] = "reference"
+    material_role: Literal["policy_basis", "task_data", "reference", "sample_style", "attachment"] = "reference"
     usage_scope: Literal["task_only", "space_asset"] = "task_only"
 
 
 class WritingProjectMaterialUpdate(StrictModel):
-    material_role: Literal["policy_basis", "task_data", "reference", "attachment"] | None = None
+    material_role: Literal["policy_basis", "task_data", "reference", "sample_style", "attachment"] | None = None
     usage_scope: Literal["task_only", "space_asset"] | None = None
 
 
@@ -209,6 +206,11 @@ class WritingProjectReleaseRebase(StrictModel):
     reason: str = Field(min_length=2, max_length=1000)
 
 
+class WritingProjectSpaceAttach(StrictModel):
+    space_id: str
+    reason: str = Field(default="为写作项目添加资料来源", min_length=2, max_length=1000)
+
+
 class WritingMemberCreate(StrictModel):
     user_id: str
     role: Literal["viewer", "commenter", "editor", "reviewer", "publisher", "owner"] = "editor"
@@ -301,12 +303,34 @@ class WritingDocumentCreate(StrictModel):
     project_id: str
     title: str = Field(min_length=1, max_length=500)
     document_type: str = Field(default="response_plan", min_length=1, max_length=64)
+    purpose: str = Field(default="", max_length=4000)
+    audience: str = Field(default="", max_length=300)
+    applicability: dict[str, Any] = Field(default_factory=dict)
+    writing_requirements: str = Field(default="", max_length=8000)
+    scenario_package_version_id: str | None = None
+    knowledge_product_release_id: str | None = None
     content: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class WritingDocumentUpdate(StrictModel):
     title: str | None = Field(default=None, min_length=1, max_length=500)
+    document_type: str | None = Field(default=None, min_length=1, max_length=64)
+    purpose: str | None = Field(default=None, max_length=4000)
+    audience: str | None = Field(default=None, max_length=300)
+    applicability: dict[str, Any] | None = None
+    writing_requirements: str | None = Field(default=None, max_length=8000)
     status: Literal["draft", "reviewing", "ready", "published", "archived"] | None = None
+
+
+class WritingDocumentMaterialsUpdate(StrictModel):
+    material_ids: list[str] = Field(default_factory=list, max_length=500)
+
+    @field_validator("material_ids")
+    @classmethod
+    def unique_material_ids(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("文章资料不能重复")
+        return value
 
 
 class WritingDocumentVersionCreate(StrictModel):
@@ -406,6 +430,7 @@ class WritingCommentResolve(StrictModel):
 
 class WritingKnowledgeSearch(StrictModel):
     query: str = Field(min_length=1, max_length=4000)
+    document_id: str | None = None
     top_k: int = Field(default=8, ge=1, le=30)
     use_keyword: bool = True
     use_vector: bool = True
@@ -433,6 +458,8 @@ class WritingAgentMessageCreate(StrictModel):
 class WritingGenerateReportRequest(StrictModel):
     document_id: str | None = None
     title: str | None = Field(default=None, min_length=1, max_length=500)
+    section_keys: list[str] = Field(default_factory=list)
+    allow_partial: bool = True
 
 
 class WritingInputValueChange(StrictModel):

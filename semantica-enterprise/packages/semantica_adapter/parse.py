@@ -1078,9 +1078,14 @@ def _parse_archive(
     elements: list[ContentElementData] = []
     members: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="semantica-zip-") as temporary_directory:
-        root = Path(temporary_directory)
+        # macOS exposes /var through the /private/var symlink.  Normalise both
+        # sides before computing the display path so a safe extracted member is
+        # not rejected merely because pathlib sees two spellings of the same
+        # temporary directory.
+        root = Path(temporary_directory).resolve()
         extracted = safe_extract_zip(path, root, limits=limits, depth=depth)
         for member in allowed_archive_members(extracted):
+            member = member.resolve()
             relative = member.relative_to(root).as_posix()
             if policy.get("skip_archive_media") and member.suffix.lower() in (_AUDIO_SUFFIXES | _VIDEO_SUFFIXES | {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".gif"}):
                 members.append({

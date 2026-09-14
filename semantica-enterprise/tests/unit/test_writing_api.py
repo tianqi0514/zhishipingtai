@@ -10,7 +10,7 @@ import jwt
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -264,6 +264,137 @@ def test_project_knowledge_context_exposes_locked_zhiku_release() -> None:
         assert context["spaces"][0]["vector_available"] is True
 
 
+def test_writer_can_create_blank_project_without_technical_scope() -> None:
+    with writing_client() as (client, db, release):
+        _create_project(client, release.id)  # seeds the tenant's active writing template
+        response = client.post(
+            "/api/v1/writing/projects",
+            json={"name": "空白写作项目", "config": {"subject": "先起草，稍后补充资料"}},
+        )
+        assert response.status_code == 200, response.text
+        project = response.json()
+        assert project["code"].startswith("writing-")
+        assert project["knowledge_product_release_id"] is None
+        detail = client.get(f"/api/v1/writing/projects/{project['id']}")
+        assert detail.status_code == 200
+        assert detail.json()["scenario"]["package_name"] == "通用写作"
+        assert detail.json()["input_contract"]["required"] == []
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={
+                "project_id": project["id"],
+                "title": "空白文章",
+                "document_type": "custom",
+                "purpose": "内部讨论",
+                "audience": "项目组",
+                "content": [{"id": "blank-p", "type": "p", "children": [{"text": "可以直接编辑。"}]}],
+            },
+        )
+        assert document.status_code == 200, document.text
+        assert document.json()["purpose"] == "内部讨论"
+        assert document.json()["current_version"]["knowledge_product_release_id"] is None
+        search = client.post(
+            f"/api/v1/writing/projects/{project['id']}/knowledge/search",
+            json={"query": "尚未添加的资料", "document_id": document.json()["id"]},
+        )
+        assert search.status_code == 409
+        assert "尚未选择知识空间" in search.text
+
+        release_item = db.scalar(
+            select(KnowledgeProductReleaseItem).where(
+                KnowledgeProductReleaseItem.product_release_id == release.id
+            )
+        )
+        attached = client.post(
+            f"/api/v1/writing/projects/{project['id']}/knowledge-space",
+            json={"space_id": release_item.space_id},
+        )
+        assert attached.status_code == 200, attached.text
+        assert attached.json()["knowledge_product_release_id"]
+        refreshed_document = client.get(f"/api/v1/writing/documents/{document.json()['id']}")
+        assert refreshed_document.status_code == 200
+        assert refreshed_document.json()["knowledge_product_release_id"] == attached.json()["knowledge_product_release_id"]
+
+
+def test_multiple_articles_keep_independent_business_scope() -> None:
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        first = client.post(
+            "/api/v1/writing/documents",
+            json={
+                "project_id": project["id"],
+                "title": "应急预案修订稿",
+                "document_type": "emergency_plan",
+                "purpose": "制度修订",
+                "audience": "管理层",
+                "applicability": {"region": "积石山县", "time_range": "长期"},
+                "writing_requirements": "保持预案体例",
+            },
+        )
+        second = client.post(
+            "/api/v1/writing/documents",
+            json={
+                "project_id": project["id"],
+                "title": "本次事件处置方案",
+                "document_type": "response_plan",
+                "purpose": "现场执行",
+                "audience": "应急指挥人员",
+                "applicability": {"region": "积石山县", "time_range": "本次事件"},
+                "writing_requirements": "突出任务、责任和时限",
+            },
+        )
+        assert first.status_code == 200, first.text
+        assert second.status_code == 200, second.text
+        rows = client.get(f"/api/v1/writing/projects/{project['id']}/documents").json()
+        by_title = {row["title"]: row for row in rows}
+        assert by_title["应急预案修订稿"]["purpose"] == "制度修订"
+        assert by_title["本次事件处置方案"]["purpose"] == "现场执行"
+        assert by_title["应急预案修订稿"]["applicability"] != by_title["本次事件处置方案"]["applicability"]
+
+
+def test_report_generation_can_start_ready_sections_without_global_input_gate() -> None:
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={"project_id": project["id"], "title": "分章节起草", "content": []},
+        )
+        assert document.status_code == 200, document.text
+        response = client.post(
+            f"/api/v1/writing/projects/{project['id']}/generate-report",
+            json={"document_id": document.json()["id"], "allow_partial": True},
+        )
+        assert response.status_code == 200, response.text
+        run = response.json()
+        assert run["status"] == "awaiting_agent"
+        assert run["section_plan"]
+        assert run["input_snapshot"]["facts"] == []
+
+
+def test_report_generation_does_not_overwrite_an_edited_document() -> None:
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={"project_id": project["id"], "title": "已人工编辑的文章", "content": []},
+        ).json()
+        saved = client.post(
+            f"/api/v1/writing/documents/{document['id']}/versions",
+            json={
+                "content": [{"id": "manual-p", "type": "p", "children": [{"text": "这是作者已经确认的正文。"}]}],
+                "change_summary": "人工修改正文",
+                "publish": False,
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        response = client.post(
+            f"/api/v1/writing/projects/{project['id']}/generate-report",
+            json={"document_id": document["id"], "allow_partial": True},
+        )
+        assert response.status_code == 409
+        assert "不能用整篇生成覆盖" in response.text
+
+
 def test_writing_project_is_created_from_a_knowledge_space() -> None:
     with writing_client() as (client, db, release):
         seeded = _create_project(client, release.id)
@@ -370,6 +501,26 @@ def test_project_materials_pin_versions_and_removal_preserves_zhiku_document() -
         assert created.status_code == 200, created.text
         assert created.json()["version"]["id"] == version.id
         assert created.json()["version_pinned"] is True
+
+        article = client.post(
+            "/api/v1/writing/documents",
+            json={"project_id": project["id"], "title": "仅采用选定资料的文章"},
+        ).json()
+        inherited = client.get(
+            f"/api/v1/writing/projects/{project['id']}/materials?document_id={article['id']}"
+        )
+        assert inherited.status_code == 200, inherited.text
+        assert inherited.json()[0]["adopted_by_article"] is True
+        cleared = client.put(
+            f"/api/v1/writing/documents/{article['id']}/materials",
+            json={"material_ids": []},
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["material_ids"] == []
+        explicit = client.get(
+            f"/api/v1/writing/projects/{project['id']}/materials?document_id={article['id']}"
+        )
+        assert explicit.json()[0]["adopted_by_article"] is False
 
         duplicate = client.post(
             f"/api/v1/writing/projects/{project['id']}/materials",

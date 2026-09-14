@@ -155,6 +155,7 @@ from packages.platform.models import (
     Tenant,
     User,
     UserRole,
+    WritingBlockBinding,
 )
 from packages.platform.knowledge_search import execute_hybrid_search
 from packages.platform.knowledge_processing import normalize_processing_mode
@@ -3987,6 +3988,54 @@ def list_curation_decisions(
     return {"total": total, "items": [serialize_row(row) for row in rows]}
 
 
+def _invalidate_writing_bindings_for_curation(
+    db: Session,
+    *,
+    decision: CurationDecision,
+) -> int:
+    """Make writing impact explicit when a governed source changes.
+
+    Curation never rewrites prose.  It invalidates every registered direct
+    chunk binding so 妙笔 can show an impact preview and generate reviewable
+    changes against the new effective source.
+    """
+    chunk_ids: set[str] = set()
+    if decision.target_type == "chunk":
+        chunk_ids.add(decision.target_id)
+    elif decision.target_type == "content_element" and decision.version_id:
+        chunk_ids.update(
+            str(value)
+            for value in db.scalars(
+                select(Chunk.id).where(
+                    Chunk.version_id == decision.version_id,
+                    Chunk.element_id == decision.target_id,
+                    _active(Chunk),
+                )
+            )
+        )
+    if not chunk_ids:
+        return 0
+    rows = list(
+        db.scalars(
+            select(WritingBlockBinding).where(
+                WritingBlockBinding.tenant_id == decision.tenant_id,
+                WritingBlockBinding.chunk_id.in_(chunk_ids),
+                WritingBlockBinding.freshness_status == "current",
+                _active(WritingBlockBinding),
+            )
+        )
+    )
+    for binding in rows:
+        binding.freshness_status = "stale"
+        binding.metadata_json = {
+            **(binding.metadata_json or {}),
+            "stale_reason": "governed_source_changed",
+            "curation_decision_id": decision.id,
+            "source_change_requires_preview": True,
+        }
+    return len(rows)
+
+
 @router.post("/curation/decisions")
 def add_curation_decision(payload: CurationDecisionCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_space_permission(db, user, payload.space_id, "write")
@@ -4010,6 +4059,7 @@ def add_curation_decision(payload: CurationDecisionCreate, user: User = Depends(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(409, str(exc)) from exc
+    stale_writing_bindings = _invalidate_writing_bindings_for_curation(db, decision=decision)
     job: Job | None = None
     if payload.auto_publish:
         if payload.target_type == "document_profile":
@@ -4023,7 +4073,7 @@ def add_curation_decision(payload: CurationDecisionCreate, user: User = Depends(
                 version_id=context.version_id,
                 rebuild_from_elements=payload.target_type == "content_element",
             )
-    audit(db, user.tenant_id, user.id, "curation.decision.create", "curation_decision", decision.id, {"target_type": payload.target_type, "target_id": context.target_id, "operation": decision.operation, "scope": decision.scope})
+    audit(db, user.tenant_id, user.id, "curation.decision.create", "curation_decision", decision.id, {"target_type": payload.target_type, "target_id": context.target_id, "operation": decision.operation, "scope": decision.scope, "stale_writing_bindings": stale_writing_bindings})
     db.commit()
     if job:
         _dispatch_curation_job(db, job, batch)
@@ -4038,6 +4088,7 @@ def rollback_curation_decision(decision_id: str, user: User = Depends(get_curren
         rollback_decision(db, user=user, decision=decision)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+    stale_writing_bindings = _invalidate_writing_bindings_for_curation(db, decision=decision)
     batch = CurationBatch(tenant_id=user.tenant_id, space_id=decision.space_id, name="回滚人工治理", created_by=user.id)
     db.add(batch)
     db.flush()
@@ -4047,7 +4098,7 @@ def rollback_curation_decision(decision_id: str, user: User = Depends(get_curren
         job = None
     else:
         job = _queue_curation_projection(db, user=user, batch=batch, version_id=decision.version_id, rebuild_from_elements=decision.target_type == "content_element")
-    audit(db, user.tenant_id, user.id, "curation.decision.rollback", "curation_decision", decision.id, {"target_type": decision.target_type, "target_id": decision.target_id})
+    audit(db, user.tenant_id, user.id, "curation.decision.rollback", "curation_decision", decision.id, {"target_type": decision.target_type, "target_id": decision.target_id, "stale_writing_bindings": stale_writing_bindings})
     db.commit()
     if job:
         _dispatch_curation_job(db, job, batch)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,7 +113,7 @@ def test_sitemap_does_not_pass_empty_regex_patterns() -> None:
     ingestor = MagicMock()
     ingestor.crawl_sitemap.return_value = []
     with (
-        patch("semantica.ingest.web_ingestor.WebIngestor", return_value=ingestor),
+        patch.object(importlib.import_module("semantica.ingest.web_ingestor"), "WebIngestor", return_value=ingestor),
         patch("packages.semantica_adapter.ingest._assert_network_target"),
     ):
         result = ingest_source(
@@ -146,7 +147,7 @@ def test_sitemap_snapshot_is_stable_across_fetch_times_and_url_order() -> None:
         ],
     ]
     with (
-        patch("semantica.ingest.web_ingestor.WebIngestor", return_value=ingestor),
+        patch.object(importlib.import_module("semantica.ingest.web_ingestor"), "WebIngestor", return_value=ingestor),
         patch("packages.semantica_adapter.ingest._assert_network_target"),
     ):
         first = ingest_source(
@@ -302,7 +303,7 @@ def test_mcp_adapter_adds_streamable_http_accept_header() -> None:
     ingestor = MagicMock()
     ingestor.ingest_all_resources.return_value = []
     with (
-        patch("semantica.ingest.mcp_ingestor.MCPIngestor", return_value=ingestor),
+        patch.object(importlib.import_module("semantica.ingest.mcp_ingestor"), "MCPIngestor", return_value=ingestor),
         patch("packages.semantica_adapter.ingest._assert_network_target"),
     ):
         ingest_source(

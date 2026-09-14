@@ -25,7 +25,7 @@ export type Project = {
   name: string;
   status: string;
   scenario_package_version_id: string;
-  knowledge_product_release_id: string;
+  knowledge_product_release_id?: string;
   role?: string;
   facts?: number;
   pending_gates?: number;
@@ -103,11 +103,12 @@ export type ProjectMaterial = {
   project_id: string;
   document_id: string;
   version_id: string;
-  material_role: 'policy_basis' | 'task_data' | 'reference' | 'attachment';
+  material_role: 'policy_basis' | 'task_data' | 'reference' | 'sample_style' | 'attachment';
   usage_scope: 'task_only' | 'space_asset';
   status: string;
   version_pinned: boolean;
   current_document_version: boolean;
+  adopted_by_article?: boolean | null;
   document: { id: string; space_id: string; title: string; status: string; tags: string[] };
   version: { id: string; version_number: number; filename: string; content_type: string; size: number; status: string };
 };
@@ -129,6 +130,14 @@ export type WritingDocument = {
   id: string;
   project_id: string;
   title: string;
+  document_type?: string;
+  purpose?: string;
+  audience?: string;
+  applicability?: { region?: string; organization?: string; subject?: string; time_range?: string };
+  writing_requirements?: string;
+  adopted_material_ids?: string[] | null;
+  scenario_package_version_id?: string;
+  knowledge_product_release_id?: string;
   status: string;
   current_version?: {
     id: string;

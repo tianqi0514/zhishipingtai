@@ -30,6 +30,7 @@ from apps.api.writing_schemas import (
     ScenarioBusinessConfig,
     WritingBlockBindingUpsert,
     WritingDocumentCreate,
+    WritingDocumentMaterialsUpdate,
     WritingDocumentUpdate,
     WritingDocumentValidate,
     WritingDocumentVersionCreate,
@@ -49,6 +50,7 @@ from apps.api.writing_schemas import (
     WritingProjectMaterialCreate,
     WritingProjectMaterialUpdate,
     WritingProjectReleaseRebase,
+    WritingProjectSpaceAttach,
     WritingProjectUpdate,
     WritingRecomputeRequest,
     WritingReasoningRequest,
@@ -154,7 +156,9 @@ def _active(model: type) -> Any:
     return model.deleted_at.is_(None)
 
 
-def _tenant_row(db: Session, model: type, row_id: str, tenant_id: str, label: str):
+def _tenant_row(db: Session, model: type, row_id: str | None, tenant_id: str, label: str):
+    if not row_id:
+        raise HTTPException(status_code=404, detail=f"{label}不存在")
     row = db.get(model, row_id)
     if row is None or row.deleted_at is not None or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail=f"{label}不存在")
@@ -245,7 +249,19 @@ def _release_scope(
     project: WritingProject,
     user: User,
 ) -> tuple[list[str], dict[str, str]]:
+    if not project.knowledge_product_release_id:
+        raise HTTPException(
+            status_code=409,
+            detail="当前项目尚未选择知识空间；可以继续空白写作，使用资料检索或智能生成前请先添加资料来源",
+        )
     release = _release_for_user(db, project.knowledge_product_release_id, user)
+    return _release_scope_from_release(db, release)
+
+
+def _release_scope_from_release(
+    db: Session,
+    release: KnowledgeProductRelease,
+) -> tuple[list[str], dict[str, str]]:
     items = list(
         db.scalars(
             select(KnowledgeProductReleaseItem).where(
@@ -407,16 +423,29 @@ def _material_payload(
     }
 
 
-def _project_material_document_ids(db: Session, project_id: str) -> list[str]:
-    return list(
-        db.scalars(
-            select(WritingProjectMaterial.document_id).where(
-                WritingProjectMaterial.project_id == project_id,
-                WritingProjectMaterial.status == "active",
-                _active(WritingProjectMaterial),
-            ).distinct()
-        )
+def _project_material_rows(
+    db: Session,
+    project_id: str,
+    writing_document: WritingDocument | None = None,
+) -> list[WritingProjectMaterial]:
+    query = select(WritingProjectMaterial).where(
+        WritingProjectMaterial.project_id == project_id,
+        WritingProjectMaterial.status == "active",
+        _active(WritingProjectMaterial),
     )
+    if writing_document is not None and writing_document.adopted_material_ids is not None:
+        if not writing_document.adopted_material_ids:
+            return []
+        query = query.where(WritingProjectMaterial.id.in_(writing_document.adopted_material_ids))
+    return list(db.scalars(query.order_by(WritingProjectMaterial.created_at)))
+
+
+def _project_material_document_ids(
+    db: Session,
+    project_id: str,
+    writing_document: WritingDocument | None = None,
+) -> list[str]:
+    return sorted({row.document_id for row in _project_material_rows(db, project_id, writing_document)})
 
 
 _INTERNAL_WRITING_MATERIAL_SUFFIXES = (
@@ -466,6 +495,7 @@ def _project_allowed_document_ids(
     project_id: str,
     tenant_id: str,
     space_ids: list[str],
+    writing_document: WritingDocument | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return explicit materials and the safe effective writing scope.
 
@@ -473,7 +503,9 @@ def _project_allowed_document_ids(
     compatibility, but legacy ontology/spec/chunk contracts are never exposed
     to the writing Agent as report evidence.
     """
-    selected = _project_material_document_ids(db, project_id)
+    selected = _project_material_document_ids(db, project_id, writing_document)
+    if writing_document is not None and writing_document.adopted_material_ids is not None:
+        return selected, selected
     if selected:
         return selected, selected
     allowed: list[str] = []
@@ -578,11 +610,13 @@ def _latest_computation_rows(db: Session, project_id: str) -> list[ComputationRu
 def _scenario_runtime_settings(
     db: Session,
     project: WritingProject,
+    document: WritingDocument | None = None,
 ) -> tuple[ScenarioPackageVersion, dict[str, Any], dict[str, Any]]:
+    scenario_id = (document.scenario_package_version_id if document else None) or project.scenario_package_version_id
     scenario = _tenant_row(
         db,
         ScenarioPackageVersion,
-        project.scenario_package_version_id,
+        scenario_id,
         project.tenant_id,
         "场景包版本",
     )
@@ -663,10 +697,11 @@ def _strict_report_quality(
     db: Session,
     *,
     project: WritingProject,
+    document: WritingDocument | None = None,
     content: list[dict[str, Any]],
     bindings: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    scenario, scenario_config, writing_policy = _scenario_runtime_settings(db, project)
+    scenario, scenario_config, writing_policy = _scenario_runtime_settings(db, project, document)
     toolbox = dict(scenario_config.get("toolbox") or {})
     computations = _latest_computation_rows(db, project.id) if toolbox.get("calculation_enabled", True) else []
     inference_count = 0
@@ -712,7 +747,7 @@ def _generated_report_quality(
     )
     if generated is None:
         return None
-    return _strict_report_quality(db, project=project, content=content, bindings=bindings)
+    return _strict_report_quality(db, project=project, document=document, content=content, bindings=bindings)
 
 
 def _ensure_formula_version(db: Session, user: User, operation: str) -> ComputationDefinitionVersion:
@@ -1229,28 +1264,93 @@ def list_projects(user: User = Depends(get_current_user), db: Session = Depends(
     return [serialize_row(row) for row in db.scalars(query.order_by(WritingProject.updated_at.desc()))]
 
 
+def _generic_writing_scenario(db: Session, user: User) -> ScenarioPackageVersion:
+    """Return the neutral internal contract used by an ordinary blank project."""
+    code = "generic-writing"
+    package = db.scalar(
+        select(ScenarioPackage).where(
+            ScenarioPackage.tenant_id == user.tenant_id,
+            ScenarioPackage.code == code,
+            _active(ScenarioPackage),
+        )
+    )
+    if package is not None and package.current_version_id:
+        current = db.get(ScenarioPackageVersion, package.current_version_id)
+        if current is not None and current.status == "active":
+            return current
+    if package is None:
+        package = ScenarioPackage(
+            tenant_id=user.tenant_id,
+            code=code,
+            name="通用写作",
+            disaster_type="general",
+            description="妙笔内部通用写作契约",
+            status="active",
+            enabled=True,
+        )
+        db.add(package)
+        db.flush()
+    contract = {
+        "input_schema": {"type": "object", "required": [], "properties": {}},
+        "ontology_mapping": {},
+        "rule_set_ids": [],
+        "formula_ids": [],
+        "tool_ids": [],
+        "chapter_template": {"chapters": [
+            {"key": "background", "title": "一、背景与目的", "generation_mode": "agent", "instruction": "说明写作背景、目的和适用范围。", "citation_required": False},
+            {"key": "main", "title": "二、主要内容", "generation_mode": "agent", "instruction": "根据已选资料和写作要求形成主体内容。", "citation_required": False},
+            {"key": "actions", "title": "三、后续安排", "generation_mode": "agent", "instruction": "形成清楚、可执行的后续安排；依据不足时明确待确认。", "citation_required": False},
+        ]},
+        "output_schema": {"title_pattern": "{project_name}"},
+        "review_rules": {"missing_input_action": "warn", "unverified_fact_action": "warn", "require_citations": False},
+        "decision_gates": [],
+        "comparison_dimensions": [],
+        "config": {"minimum_plan_count": 0, "default_plan_count": 0, "toolbox": {"reasoning_enabled": False, "calculation_enabled": False, "target_sections": {}}, "writing_policy": {"missing_input_action": "warn", "unverified_fact_action": "warn", "require_citations": False, "allow_manual_override": True}, "internal": True},
+    }
+    version_number = int(
+        db.scalar(select(func.max(ScenarioPackageVersion.version)).where(ScenarioPackageVersion.scenario_package_id == package.id)) or 0
+    ) + 1
+    version = ScenarioPackageVersion(
+        tenant_id=user.tenant_id,
+        scenario_package_id=package.id,
+        version=version_number,
+        checksum=content_hash(contract),
+        status="active",
+        created_by=user.id,
+        **contract,
+    )
+    db.add(version)
+    db.flush()
+    package.current_version_id = version.id
+    return version
+
+
 @router.post("/projects")
 def create_project(
     payload: WritingProjectCreate,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    version = _tenant_row(
-        db, ScenarioPackageVersion, payload.scenario_package_version_id, user.tenant_id, "场景包版本"
+    version = (
+        _tenant_row(db, ScenarioPackageVersion, payload.scenario_package_version_id, user.tenant_id, "场景包版本")
+        if payload.scenario_package_version_id
+        else _generic_writing_scenario(db, user)
     )
     if version.status != "active":
         raise HTTPException(status_code=409, detail="方案任务只能使用已激活的场景包版本")
-    release = (
-        _release_for_space(db, payload.space_id, user)
-        if payload.space_id
-        else _release_for_user(db, str(payload.knowledge_product_release_id), user)
-    )
+    release = None
+    if payload.space_id:
+        release = _release_for_space(db, payload.space_id, user)
+    elif payload.knowledge_product_release_id:
+        release = _release_for_user(db, payload.knowledge_product_release_id, user)
     if payload.application_id:
         application = _tenant_row(db, Application, payload.application_id, user.tenant_id, "应用")
         if not user.is_admin and application.owner_id != user.id:
             raise HTTPException(status_code=403, detail="无权将任务绑定到该应用")
     values = payload.model_dump(exclude={"space_id"})
-    values["knowledge_product_release_id"] = release.id
+    values["code"] = payload.code or f"writing-{uuid.uuid4().hex[:12]}"
+    values["scenario_package_version_id"] = version.id
+    values["knowledge_product_release_id"] = release.id if release else None
     row = WritingProject(tenant_id=user.tenant_id, owner_id=user.id, status="draft", **values)
     db.add(row)
     db.flush()
@@ -1365,10 +1465,16 @@ def list_project_material_candidates(
 @router.get("/projects/{project_id}/materials")
 def list_project_materials(
     project_id: str,
+    document_id: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     project = _project(db, project_id, user)
+    writing_document = None
+    if document_id:
+        writing_document, _ = _document(db, document_id, user)
+        if writing_document.project_id != project.id:
+            raise HTTPException(status_code=404, detail="文章不属于当前项目")
     rows = list(
         db.scalars(
             select(WritingProjectMaterial).where(
@@ -1384,8 +1490,39 @@ def list_project_materials(
         version = _tenant_row(db, DocumentVersion, row.version_id, user.tenant_id, "材料版本")
         if not has_space_permission(db, user, document.space_id, "read"):
             continue
-        result.append(_material_payload(row, document, version))
+        material = _material_payload(row, document, version)
+        if writing_document is not None:
+            material["adopted_by_article"] = (
+                writing_document.adopted_material_ids is None
+                or row.id in set(writing_document.adopted_material_ids or [])
+            )
+        result.append(material)
     return result
+
+
+@router.put("/documents/{document_id}/materials")
+def set_document_materials(
+    document_id: str,
+    payload: WritingDocumentMaterialsUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    document, project = _document(db, document_id, user, "editor")
+    available = {row.id for row in _project_material_rows(db, project.id)}
+    if set(payload.material_ids) - available:
+        raise HTTPException(status_code=422, detail="文章资料包含已移除或不属于当前项目的材料")
+    document.adopted_material_ids = list(payload.material_ids)
+    audit(
+        db,
+        user.tenant_id,
+        user.id,
+        "writing.document.materials.update",
+        "writing_document",
+        document.id,
+        {"material_count": len(payload.material_ids)},
+    )
+    db.commit()
+    return {"document_id": document.id, "material_ids": document.adopted_material_ids}
 
 
 @router.post("/projects/{project_id}/materials")
@@ -1593,12 +1730,22 @@ def search_project_knowledge(
 ):
     """Search the immutable Knowledge Product release bound to this project."""
     project = _project(db, project_id, user)
-    space_ids, knowledge_release_ids = _release_scope(db, project, user)
+    document = None
+    if payload.document_id:
+        document, _ = _document(db, payload.document_id, user)
+        if document.project_id != project.id:
+            raise HTTPException(status_code=404, detail="文章不属于当前项目")
+    release_id = (document.knowledge_product_release_id if document else None) or project.knowledge_product_release_id
+    if not release_id:
+        raise HTTPException(status_code=409, detail="当前文章尚未选择知识空间，不能检索资料")
+    release = _release_for_user(db, release_id, user)
+    space_ids, knowledge_release_ids = _release_scope_from_release(db, release)
     material_document_ids, allowed_document_ids = _project_allowed_document_ids(
         db,
         project_id=project.id,
         tenant_id=user.tenant_id,
         space_ids=space_ids,
+        writing_document=document,
     )
     effective_filters = dict(payload.filters or {})
     if allowed_document_ids:
@@ -1625,16 +1772,17 @@ def search_project_knowledge(
             knowledge_release_ids=knowledge_release_ids,
             retrieval_context={
                 "writing_project_id": project.id,
-                "knowledge_product_release_id": project.knowledge_product_release_id,
+                "knowledge_product_release_id": release.id,
                 "material_document_ids": material_document_ids,
                 "allowed_document_ids": allowed_document_ids,
                 "retrieval_scope": "task_materials" if material_document_ids else "knowledge_product_release",
+                **({"writing_document_id": document.id} if document else {}),
             },
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
-    result["knowledge_product_release_id"] = project.knowledge_product_release_id
+    result["knowledge_product_release_id"] = release.id
     result["snapshot_locked"] = True
     return result
 
@@ -1651,10 +1799,21 @@ def get_project_fragment(
     project = _project(db, project_id, user)
     run = _tenant_row(db, QueryRun, query_run_id, user.tenant_id, "检索记录")
     policy = dict(run.retrieval_policy or {})
+    policy_document_id = str(policy.get("writing_document_id") or "")
+    allowed_release_ids = {str(project.knowledge_product_release_id or "")}
+    if policy_document_id:
+        writing_document = db.get(WritingDocument, policy_document_id)
+        if (
+            writing_document is None
+            or writing_document.project_id != project.id
+            or writing_document.deleted_at is not None
+        ):
+            raise HTTPException(status_code=403, detail="该检索记录不属于当前文章")
+        allowed_release_ids.add(str(writing_document.knowledge_product_release_id or ""))
     if (
         run.user_id != user.id
         or policy.get("writing_project_id") != project.id
-        or policy.get("knowledge_product_release_id") != project.knowledge_product_release_id
+        or str(policy.get("knowledge_product_release_id") or "") not in allowed_release_ids
     ):
         raise HTTPException(status_code=403, detail="该检索记录不属于当前方案任务")
     item = next(
@@ -1668,7 +1827,9 @@ def get_project_fragment(
     if item is None:
         raise HTTPException(status_code=404, detail="该片段不在本次检索结果中")
     chunk = _tenant_row(db, Chunk, chunk_id, user.tenant_id, "知识片段")
-    space_ids, _ = _release_scope(db, project, user)
+    policy_release_id = str(policy.get("knowledge_product_release_id") or "")
+    policy_release = _release_for_user(db, policy_release_id, user)
+    space_ids, _ = _release_scope_from_release(db, policy_release)
     if chunk.space_id not in space_ids:
         raise HTTPException(status_code=403, detail="知识片段超出项目知识空间范围")
     document = db.get(Document, chunk.document_id)
@@ -1681,7 +1842,7 @@ def get_project_fragment(
         raise HTTPException(status_code=404, detail="知识片段已被人工屏蔽") from exc
     return {
         "query_run_id": run.id,
-        "knowledge_product_release_id": project.knowledge_product_release_id,
+        "knowledge_product_release_id": policy.get("knowledge_product_release_id"),
         "chunk_id": chunk.id,
         "document_id": document.id,
         "version_id": version.id,
@@ -1712,6 +1873,7 @@ def create_writing_agent_session(
     db: Session = Depends(get_db),
 ):
     project = _project(db, project_id, user, "editor")
+    document = None
     if payload.document_id:
         document, _ = _document(db, payload.document_id, user, "editor")
         if document.project_id != project.id:
@@ -1736,6 +1898,27 @@ def create_writing_agent_session(
             )
         )
         if conversation is not None:
+            release_id = (document.knowledge_product_release_id if document else None) or project.knowledge_product_release_id
+            if not release_id:
+                raise HTTPException(status_code=409, detail="当前文章尚未选择知识空间；可以继续手工编辑，使用妙笔助手前请先添加资料来源")
+            release = _release_for_user(db, release_id, user)
+            space_ids, knowledge_release_ids = _release_scope_from_release(db, release)
+            material_document_ids, allowed_document_ids = _project_allowed_document_ids(
+                db,
+                project_id=project.id,
+                tenant_id=user.tenant_id,
+                space_ids=space_ids,
+                writing_document=document,
+            )
+            conversation.settings = {
+                **(conversation.settings or {}),
+                "knowledge_product_release_id": release.id,
+                "knowledge_release_ids": knowledge_release_ids,
+                "material_document_ids": material_document_ids,
+                "allowed_document_ids": allowed_document_ids,
+                "space_ids": space_ids,
+            }
+            db.commit()
             return {
                 **serialize_row(existing),
                 "conversation_id": conversation.id,
@@ -1745,12 +1928,17 @@ def create_writing_agent_session(
     elif existing is not None:
         existing.status = "archived"
 
-    space_ids, knowledge_release_ids = _release_scope(db, project, user)
+    release_id = (document.knowledge_product_release_id if document else None) or project.knowledge_product_release_id
+    if not release_id:
+        raise HTTPException(status_code=409, detail="当前文章尚未选择知识空间；可以继续手工编辑，使用妙笔助手前请先添加资料来源")
+    release = _release_for_user(db, release_id, user)
+    space_ids, knowledge_release_ids = _release_scope_from_release(db, release)
     material_document_ids, allowed_document_ids = _project_allowed_document_ids(
         db,
         project_id=project.id,
         tenant_id=user.tenant_id,
         space_ids=space_ids,
+        writing_document=document,
     )
     harness_session_id = f"miaobi-{uuid.uuid4().hex}"
     session = WritingAgentSession(
@@ -1775,7 +1963,7 @@ def create_writing_agent_session(
             "writing_session_id": session.id,
             "writing_project_id": project.id,
             "writing_document_id": payload.document_id,
-            "knowledge_product_release_id": project.knowledge_product_release_id,
+            "knowledge_product_release_id": release.id,
             "knowledge_release_ids": knowledge_release_ids,
             "material_document_ids": material_document_ids,
             "allowed_document_ids": allowed_document_ids,
@@ -1995,6 +2183,30 @@ def start_report_generation(
     the browser can show real progress without exposing the generated prompt.
     """
     project = _project(db, project_id, user, "editor")
+    document = None
+    if payload.document_id:
+        document, _ = _document(db, payload.document_id, user, "editor")
+        if document.project_id != project.id:
+            raise HTTPException(status_code=404, detail="文章不属于当前项目")
+    if document is None:
+        document = db.scalar(
+            select(WritingDocument).where(
+                WritingDocument.project_id == project.id,
+                _active(WritingDocument),
+            ).order_by(WritingDocument.updated_at.desc())
+        )
+    if document is not None and document.current_version_id:
+        current_version = db.get(WritingDocumentVersion, document.current_version_id)
+        initial_summaries = {"创建文稿", "创建报告草稿"}
+        if current_version is not None and current_version.change_summary not in initial_summaries:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "当前文章已有正文或人工修改，不能用整篇生成覆盖",
+                    "recommended_action": "请在编辑器中选择目标章节，使用右侧妙笔助手生成修改建议后再决定是否应用",
+                    "document_version": current_version.version,
+                },
+            )
     active_run = db.scalar(
         select(WritingGenerationRun).where(
             WritingGenerationRun.project_id == project.id,
@@ -2009,14 +2221,21 @@ def start_report_generation(
             active_run = None
     if active_run is not None:
         raise HTTPException(status_code=409, detail="当前已有报告生成任务正在执行")
-    scenario = _tenant_row(
-        db, ScenarioPackageVersion, project.scenario_package_version_id, user.tenant_id, "场景包版本"
-    )
-    section_plan = _section_plan(scenario)
-    _release_scope(db, project, user)
+    scenario, _, _ = _scenario_runtime_settings(db, project, document)
+    full_section_plan = _section_plan(scenario)
+    known_section_keys = {str(item["key"]) for item in full_section_plan}
+    unknown_section_keys = set(payload.section_keys) - known_section_keys
+    if unknown_section_keys:
+        raise HTTPException(status_code=422, detail=f"文章章节不存在：{', '.join(sorted(unknown_section_keys))}")
+    section_plan = [
+        item for item in full_section_plan
+        if not payload.section_keys or str(item["key"]) in set(payload.section_keys)
+    ]
+    release_id = (document.knowledge_product_release_id if document else None) or project.knowledge_product_release_id
+    if not release_id:
+        raise HTTPException(status_code=409, detail="当前文章尚未选择知识空间；可以手工编辑，使用智能生成前请先添加资料来源")
+    _release_scope_from_release(db, _release_for_user(db, release_id, user))
     knowledge_packet = applied_packet(db, project)
-    if any(any((s.get("knowledge") or {}).get(k) for k in ("entity_types", "predicates", "rule_version_ids")) for s in section_plan) and not knowledge_packet:
-        raise HTTPException(409, "请先准备并确认章节依据，再生成报告")
     active_facts = list(
         db.scalars(
             select(ProjectFact).where(
@@ -2088,32 +2307,45 @@ def start_report_generation(
     }
     missing_action = writing_policy.get("missing_input_action", "block")
     unverified_action = writing_policy.get("unverified_fact_action", "block")
-    blocking_missing = missing if missing_action == "block" else []
-    blocking_unconfirmed = unconfirmed if unverified_action == "block" else []
-    if blocking_missing or blocking_unconfirmed or invalid_inputs or stale or open_conflicts:
+    invalid_keys = {item["key"] for item in invalid_inputs}
+    unavailable_keys = set(missing) | set(unconfirmed) | set(stale) | invalid_keys
+    unavailable_sections = []
+    ready_sections = []
+    for item in section_plan:
+        required_for_section = set(item.get("required_inputs") or [])
+        unavailable_for_section = sorted(required_for_section & unavailable_keys)
+        knowledge_required = any(
+            (item.get("knowledge") or {}).get(key)
+            for key in ("entity_types", "predicates", "rule_version_ids")
+        )
+        reasons = list(unavailable_for_section)
+        if knowledge_required and not knowledge_packet:
+            reasons.append("章节依据")
+        if reasons:
+            unavailable_sections.append({"key": item["key"], "title": item["title"], "reasons": reasons})
+        else:
+            ready_sections.append(item)
+    if unavailable_sections and not payload.allow_partial:
         raise HTTPException(
             status_code=409,
             detail={
-                "message": "请先完成报告输入确认",
-                "missing": blocking_missing,
-                "unconfirmed": blocking_unconfirmed,
+                "message": "部分章节尚未具备起草条件",
+                "missing": missing if missing_action == "block" else [],
+                "unconfirmed": unconfirmed if unverified_action == "block" else [],
                 "invalid_inputs": invalid_inputs,
                 "stale": stale,
                 "open_conflicts": open_conflicts,
+                "unavailable_sections": unavailable_sections,
             },
         )
-    document = None
-    if payload.document_id:
-        document, _ = _document(db, payload.document_id, user, "editor")
-        if document.project_id != project.id:
-            raise HTTPException(status_code=404, detail="文稿不属于当前方案任务")
-    if document is None:
-        document = db.scalar(
-            select(WritingDocument).where(
-                WritingDocument.project_id == project.id,
-                _active(WritingDocument),
-            ).order_by(WritingDocument.updated_at.desc())
+    if open_conflicts:
+        raise HTTPException(status_code=409, detail={"message": "请先处理相互冲突的关键信息", "open_conflicts": open_conflicts})
+    if not ready_sections:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "当前没有可生成的章节；请补充对应资料或确认关键信息", "unavailable_sections": unavailable_sections},
         )
+    section_plan = ready_sections
     if document is None:
         title_pattern = str(
             (scenario.output_schema or {}).get("title_pattern")
@@ -2126,6 +2358,8 @@ def start_report_generation(
             project_id=project.id,
             title=payload.title or configured_title or f"{project.name}报告",
             document_type="response_plan",
+            scenario_package_version_id=scenario.id,
+            knowledge_product_release_id=release_id,
             status="draft",
             created_by=user.id,
         )
@@ -2141,8 +2375,8 @@ def start_report_generation(
             version=1,
             content=initial_content,
             content_hash=content_hash(initial_content),
-            scenario_package_version_id=project.scenario_package_version_id,
-            knowledge_product_release_id=project.knowledge_product_release_id,
+            scenario_package_version_id=scenario.id,
+            knowledge_product_release_id=release_id,
             status="draft",
             change_summary="创建报告草稿",
             created_by=user.id,
@@ -2156,7 +2390,7 @@ def start_report_generation(
         "document_version_id": document.current_version_id,
         "chapter_evidence": knowledge_packet,
         "scenario_package_version_id": scenario.id,
-        "knowledge_product_release_id": project.knowledge_product_release_id,
+        "knowledge_product_release_id": release_id,
         "facts": [
             {
                 "id": by_key[key].id,
@@ -2166,6 +2400,7 @@ def start_report_generation(
                 "unit": by_key[key].unit,
             }
             for key in required_keys
+            if key in by_key
         ],
         "materials": [
             {
@@ -2175,17 +2410,12 @@ def start_report_generation(
                 "material_role": row.material_role,
                 "usage_scope": row.usage_scope,
             }
-            for row in db.scalars(
-                select(WritingProjectMaterial).where(
-                    WritingProjectMaterial.project_id == project.id,
-                    WritingProjectMaterial.status == "active",
-                    _active(WritingProjectMaterial),
-                ).order_by(WritingProjectMaterial.created_at)
-            )
+            for row in _project_material_rows(db, project.id, document)
         ],
         "warnings": [
             *([f"缺少输入：{', '.join(missing)}"] if missing else []),
             *([f"输入尚未确认：{', '.join(unconfirmed)}"] if unconfirmed else []),
+            *([f"本次暂不生成：{', '.join(item['title'] for item in unavailable_sections)}"] if unavailable_sections else []),
         ],
     }
     # Reuse the existing, tested domain endpoints. They execute deterministic
@@ -2209,16 +2439,12 @@ def start_report_generation(
                 db=db,
             )
         except HTTPException:
-            if missing_action == "block" and unverified_action == "block":
-                raise
             criteria_result = {"items": [], "skipped": True, "reason": "inputs_not_ready"}
             reasoning_result = {"conclusions": [], "skipped": True, "reason": "inputs_not_ready"}
     if calculation_enabled:
         try:
             computation_result = run_project_baseline_computations(project.id, user=user, db=db)
         except HTTPException:
-            if missing_action == "block" and unverified_action == "block":
-                raise
             computation_result = {"items": [], "skipped": True, "reason": "inputs_not_ready"}
     current_selected = db.scalar(
         select(AlternativePlan).where(
@@ -2228,19 +2454,21 @@ def start_report_generation(
         ).order_by(AlternativePlan.created_at.desc())
     )
     generated_plans: list[dict[str, Any]] = []
-    try:
-        generated_plans = generate_plans(
-            project.id,
-            AlternativePlanGenerate(count=int((scenario.config or {}).get("default_plan_count", 3))),
-            user=user,
-            db=db,
-        )
-    except HTTPException as exc:
-        # A valid report can still be generated when the scenario has no route
-        # network. Preserve a visible warning instead of inventing a plan.
-        if exc.status_code != 422:
-            raise
-        generated_plans = []
+    plan_count = int((scenario.config or {}).get("default_plan_count", 0))
+    if plan_count >= 2:
+        try:
+            generated_plans = generate_plans(
+                project.id,
+                AlternativePlanGenerate(count=min(plan_count, 3)),
+                user=user,
+                db=db,
+            )
+        except HTTPException as exc:
+            # A valid report can still be generated when the scenario has no route
+            # network. Preserve a visible warning instead of inventing a plan.
+            if exc.status_code != 422:
+                raise
+            generated_plans = []
     if current_selected is None and generated_plans:
         preferred = next((item for item in generated_plans if item.get("plan_key") == "balanced"), generated_plans[0])
         selected_row = db.get(AlternativePlan, preferred["id"])
@@ -2496,7 +2724,7 @@ def stream_report_generation_agent(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    run, project, _ = _generation(db, run_id, user, "editor")
+    run, project, document = _generation(db, run_id, user, "editor")
     if run.status not in {"awaiting_agent", "agent_failed"}:
         raise HTTPException(status_code=409, detail="当前报告生成任务不能启动写作 Agent")
     if run.agent_session_id is None:
@@ -2506,13 +2734,7 @@ def stream_report_generation_agent(
     )
     if conversation.status == "generating":
         raise HTTPException(status_code=409, detail="写作 Agent 正在生成")
-    scenario = _tenant_row(
-        db,
-        ScenarioPackageVersion,
-        project.scenario_package_version_id,
-        user.tenant_id,
-        "场景包版本",
-    )
+    scenario, _, _ = _scenario_runtime_settings(db, project, document)
     reference_characters = (scenario.config or {}).get("reference_final_characters")
     prompt = build_generation_prompt(
         project_name=project.name,
@@ -2547,7 +2769,7 @@ def finalize_report_generation(
     db: Session = Depends(get_db),
 ):
     run, project, document = _generation(db, run_id, user, "editor")
-    scenario, _, _ = _scenario_runtime_settings(db, project)
+    scenario, _, _ = _scenario_runtime_settings(db, project, document)
     if run.status == "completed":
         return _generation_payload(db, run)
     snapshot = run.input_snapshot or {}
@@ -2638,7 +2860,7 @@ def finalize_report_generation(
         input_facts=[serialize_row(f) for f in db.scalars(select(ProjectFact).where(ProjectFact.project_id == project.id, ProjectFact.active.is_(True), _active(ProjectFact)))],
     )
     binding_map = {item["block_id"]: item for item in new_bindings}
-    quality = _strict_report_quality(db, project=project, content=content, bindings=binding_map)
+    quality = _strict_report_quality(db, project=project, document=document, content=content, bindings=binding_map)
     if not quality["ok"]:
         run.status = "quality_failed"
         run.stage = "quality_gate"
@@ -2660,7 +2882,7 @@ def finalize_report_generation(
         )
         fields = {
             **values,
-            "knowledge_product_release_id": project.knowledge_product_release_id,
+            "knowledge_product_release_id": document.knowledge_product_release_id or project.knowledge_product_release_id,
             "metadata_json": metadata,
         }
         if row is None:
@@ -2689,8 +2911,8 @@ def finalize_report_generation(
         version=number,
         content=content,
         content_hash=content_hash(content),
-        scenario_package_version_id=project.scenario_package_version_id,
-        knowledge_product_release_id=project.knowledge_product_release_id,
+        scenario_package_version_id=document.scenario_package_version_id or project.scenario_package_version_id,
+        knowledge_product_release_id=document.knowledge_product_release_id or project.knowledge_product_release_id,
         status="draft",
         change_summary="输入确认、分析计算与知识约束的一键生成",
         created_by=user.id,
@@ -2761,22 +2983,31 @@ def update_project(
     return serialize_row(row)
 
 
-@router.post("/projects/{project_id}/knowledge-release")
-def rebase_project_knowledge_release(
-    project_id: str,
-    payload: WritingProjectReleaseRebase,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Explicitly rebase a non-published writing project onto an immutable knowledge release."""
-    row = _project(db, project_id, user, "owner")
+def _rebase_project_to_release(
+    db: Session,
+    *,
+    row: WritingProject,
+    release: KnowledgeProductRelease,
+    user: User,
+    reason: str,
+) -> dict[str, Any]:
     if row.status == "published":
         raise HTTPException(status_code=409, detail="已发布方案任务不能变更知识基线，请创建后续任务版本")
-    release = _release_for_user(db, payload.knowledge_product_release_id, user)
     old_release_id = row.knowledge_product_release_id
     if old_release_id == release.id:
         return {**serialize_row(row), "unchanged": True}
+    inherited_documents = list(
+        db.scalars(
+            select(WritingDocument).where(
+                WritingDocument.project_id == row.id,
+                WritingDocument.knowledge_product_release_id == old_release_id,
+                _active(WritingDocument),
+            )
+        )
+    )
     row.knowledge_product_release_id = release.id
+    for document in inherited_documents:
+        document.knowledge_product_release_id = release.id
     stale_bindings = list(
         db.scalars(
             select(WritingBlockBinding).where(
@@ -2804,11 +3035,77 @@ def rebase_project_knowledge_release(
             "previous_release_id": old_release_id,
             "knowledge_product_release_id": release.id,
             "stale_bindings": len(stale_bindings),
-            "reason": payload.reason,
+            "inherited_documents": len(inherited_documents),
+            "reason": reason,
         },
     )
     db.commit()
-    return {**serialize_row(row), "unchanged": False, "stale_bindings": len(stale_bindings)}
+    return {
+        **serialize_row(row),
+        "unchanged": False,
+        "stale_bindings": len(stale_bindings),
+        "inherited_documents": len(inherited_documents),
+    }
+
+
+@router.post("/projects/{project_id}/knowledge-release")
+def rebase_project_knowledge_release(
+    project_id: str,
+    payload: WritingProjectReleaseRebase,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Explicitly rebase a non-published writing project onto an immutable knowledge release."""
+    row = _project(db, project_id, user, "owner")
+    release = _release_for_user(db, payload.knowledge_product_release_id, user)
+    return _rebase_project_to_release(db, row=row, release=release, user=user, reason=payload.reason)
+
+
+@router.post("/projects/{project_id}/knowledge-space")
+def attach_project_knowledge_space(
+    project_id: str,
+    payload: WritingProjectSpaceAttach,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Attach a business-facing knowledge space to a blank writing project."""
+    row = _project(db, project_id, user, "owner")
+    release = _release_for_space(db, payload.space_id, user)
+    return _rebase_project_to_release(db, row=row, release=release, user=user, reason=payload.reason)
+
+
+@router.post("/projects/{project_id}/knowledge-release/refresh")
+def refresh_project_knowledge_release(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Pin the newest immutable snapshot after a writer uploads new material.
+
+    This is intentionally explicit and audited: existing citations are marked
+    stale for review instead of silently claiming that old prose used the new
+    source version.
+    """
+    row = _project(db, project_id, user, "owner")
+    if not row.knowledge_product_release_id:
+        raise HTTPException(status_code=409, detail="当前项目尚未选择知识空间")
+    current = _release_for_user(db, row.knowledge_product_release_id, user)
+    item = db.scalar(
+        select(KnowledgeProductReleaseItem).where(
+            KnowledgeProductReleaseItem.product_release_id == current.id,
+            _active(KnowledgeProductReleaseItem),
+        ).order_by(KnowledgeProductReleaseItem.created_at)
+    )
+    if item is None:
+        raise HTTPException(status_code=409, detail="当前知识空间快照不可用")
+    release = _release_for_space(db, item.space_id, user)
+    return _rebase_project_to_release(
+        db,
+        row=row,
+        release=release,
+        user=user,
+        reason="妙笔上传新资料后刷新知识版本",
+    )
 
 
 @router.delete("/projects/{project_id}")
@@ -3334,8 +3631,8 @@ def apply_input_changes(
         version=number,
         content=content,
         content_hash=content_hash(content),
-        scenario_package_version_id=project.scenario_package_version_id,
-        knowledge_product_release_id=project.knowledge_product_release_id,
+        scenario_package_version_id=document.scenario_package_version_id or project.scenario_package_version_id,
+        knowledge_product_release_id=document.knowledge_product_release_id or project.knowledge_product_release_id,
         status="draft",
         change_summary="应用输入变化并局部更新受影响测算",
         created_by=user.id,
@@ -3784,7 +4081,28 @@ def create_document(
     db: Session = Depends(get_db),
 ):
     project = _project(db, payload.project_id, user, "editor")
-    row = WritingDocument(tenant_id=user.tenant_id, project_id=project.id, title=payload.title, document_type=payload.document_type, status="draft", created_by=user.id)
+    scenario_id = payload.scenario_package_version_id or project.scenario_package_version_id
+    release_id = payload.knowledge_product_release_id or project.knowledge_product_release_id
+    if payload.scenario_package_version_id:
+        scenario = _tenant_row(db, ScenarioPackageVersion, payload.scenario_package_version_id, user.tenant_id, "写作模板版本")
+        if scenario.status != "active":
+            raise HTTPException(status_code=409, detail="只能使用已启用的写作模板")
+    if payload.knowledge_product_release_id:
+        _release_for_user(db, payload.knowledge_product_release_id, user)
+    row = WritingDocument(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        title=payload.title,
+        document_type=payload.document_type,
+        purpose=payload.purpose,
+        audience=payload.audience,
+        applicability=payload.applicability,
+        writing_requirements=payload.writing_requirements,
+        scenario_package_version_id=scenario_id,
+        knowledge_product_release_id=release_id,
+        status="draft",
+        created_by=user.id,
+    )
     db.add(row)
     db.flush()
     version = WritingDocumentVersion(
@@ -3793,8 +4111,8 @@ def create_document(
         version=1,
         content=payload.content,
         content_hash=content_hash(payload.content),
-        scenario_package_version_id=project.scenario_package_version_id,
-        knowledge_product_release_id=project.knowledge_product_release_id,
+        scenario_package_version_id=scenario_id,
+        knowledge_product_release_id=release_id,
         status="draft",
         change_summary="创建文稿",
         created_by=user.id,
@@ -4010,7 +4328,11 @@ def update_document(
     row, _ = _document(db, document_id, user, "editor")
     if row.status == "published" and payload.status not in {None, "archived"}:
         raise HTTPException(status_code=409, detail="已发布文稿不可直接恢复为草稿，请创建新版本")
-    apply_patch(row, payload.model_dump(exclude_none=True), {"title", "status"})
+    apply_patch(
+        row,
+        payload.model_dump(exclude_none=True),
+        {"title", "document_type", "purpose", "audience", "applicability", "writing_requirements", "status"},
+    )
     audit(db, user.tenant_id, user.id, "writing.document.update", "writing_document", row.id)
     _commit(db, "同一方案任务中已存在同名文稿")
     return serialize_row(row)
@@ -4091,8 +4413,8 @@ def create_document_version(
     if (
         current
         and current.content_hash == next_hash
-        and current.scenario_package_version_id == project.scenario_package_version_id
-        and current.knowledge_product_release_id == project.knowledge_product_release_id
+        and current.scenario_package_version_id == (document.scenario_package_version_id or project.scenario_package_version_id)
+        and current.knowledge_product_release_id == (document.knowledge_product_release_id or project.knowledge_product_release_id)
         and not payload.publish
     ):
         return {**serialize_row(current), "issues": issues, "unchanged": True}
@@ -4103,8 +4425,8 @@ def create_document_version(
         version=number,
         content=payload.content,
         content_hash=next_hash,
-        scenario_package_version_id=project.scenario_package_version_id,
-        knowledge_product_release_id=project.knowledge_product_release_id,
+        scenario_package_version_id=document.scenario_package_version_id or project.scenario_package_version_id,
+        knowledge_product_release_id=document.knowledge_product_release_id or project.knowledge_product_release_id,
         status="published" if payload.publish else "draft",
         change_summary=payload.change_summary,
         created_by=user.id,
@@ -4133,7 +4455,8 @@ def upsert_binding(
     db: Session = Depends(get_db),
 ):
     document, project = _document(db, document_id, user, "editor")
-    if payload.knowledge_product_release_id and payload.knowledge_product_release_id != project.knowledge_product_release_id:
+    effective_release_id = document.knowledge_product_release_id or project.knowledge_product_release_id
+    if payload.knowledge_product_release_id and payload.knowledge_product_release_id != effective_release_id:
         raise HTTPException(status_code=409, detail="引用必须属于项目选择的知识空间")
     if payload.block_type == "knowledge_citation":
         query_run = _tenant_row(db, QueryRun, str(payload.query_run_id), user.tenant_id, "检索记录")
@@ -4141,7 +4464,7 @@ def upsert_binding(
         if (
             query_run.user_id != user.id
             or query_policy.get("writing_project_id") != project.id
-            or query_policy.get("knowledge_product_release_id") != project.knowledge_product_release_id
+            or query_policy.get("knowledge_product_release_id") != effective_release_id
             or not any(
                 str(item.get("chunk_id") or "") == str(payload.chunk_id)
                 for item in (query_run.results or [])
@@ -4361,9 +4684,7 @@ def create_export(
     db: Session = Depends(get_db),
 ):
     document, project = _document(db, document_id, user, "publisher")
-    scenario = _tenant_row(
-        db, ScenarioPackageVersion, project.scenario_package_version_id, user.tenant_id, "场景包版本"
-    )
+    scenario, _, _ = _scenario_runtime_settings(db, project, document)
     allowed_formats = set(
         (scenario.output_schema or {}).get("allowed_formats")
         or (scenario.config or {}).get("output", {}).get("allowed_formats")
@@ -4407,7 +4728,7 @@ def create_export(
             )
         )
     )
-    if payload.output_format in {"docx", "pdf"} and pending_gates:
+    if strict_quality and payload.output_format in {"docx", "pdf"} and pending_gates:
         raise HTTPException(status_code=409, detail=f"仍有 {len(pending_gates)} 个业务确认节点未完成")
     template_version = None
     if payload.template_version_id:
@@ -4445,11 +4766,16 @@ def create_export(
     )
     computations = [serialize_row(row) for row in computation_rows]
     plans = [serialize_row(row) for row in _current_plan_rows(db, project.id)]
-    release = _tenant_row(db, KnowledgeProductRelease, project.knowledge_product_release_id, user.tenant_id, "知识产品版本")
-    scenario = _tenant_row(db, ScenarioPackageVersion, project.scenario_package_version_id, user.tenant_id, "场景包版本")
+    release_id = document.knowledge_product_release_id or project.knowledge_product_release_id
+    release = (
+        _tenant_row(db, KnowledgeProductRelease, release_id, user.tenant_id, "知识空间版本")
+        if release_id
+        else None
+    )
+    scenario, _, _ = _scenario_runtime_settings(db, project, document)
     selected_plan = next((item["name"] for item in plans if item["status"] == "selected"), None)
     audit_summary = {
-        "knowledge_product_release": release.version,
+        "knowledge_product_release": release.version if release else None,
         "scenario_package_version": scenario.version,
         "verified_fact_count": len(facts),
         "computation_count": len(computations),
