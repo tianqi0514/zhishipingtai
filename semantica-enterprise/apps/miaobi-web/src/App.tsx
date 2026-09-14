@@ -38,7 +38,7 @@ type Tab = 'task' | 'writing' | 'overview' | 'facts' | 'reasoning' | 'plans' | '
 type EditorInsertion = PlateNode | PlateNode[] | MarkdownSuggestionInsertion;
 
 const tabs: Array<{ key: Tab; label: string; icon: typeof LayoutDashboard }> = [
-  { key: 'task', label: '方案任务', icon: LayoutDashboard },
+  { key: 'task', label: '项目', icon: LayoutDashboard },
   { key: 'writing', label: '报告编辑', icon: PenLine },
 ];
 
@@ -177,7 +177,7 @@ export function App() {
     }
     setProject(null); setDocument(null); setSelectedBinding(null); setError('');
     sessionStorage.setItem('miaobi-project', projectId);
-    loadProjectDetails(projectId).catch((reason) => setError(reason instanceof Error ? reason.message : '方案任务加载失败'));
+    loadProjectDetails(projectId).catch((reason) => setError(reason instanceof Error ? reason.message : '项目加载失败'));
     return () => { detailRequest.current += 1; };
   }, [projectId]);
 
@@ -210,8 +210,8 @@ export function App() {
       <header className="topbar">
         <a href="/" className="brand" aria-label="返回传神智库"><span className="brand-mark">妙</span><span><b>妙笔</b><small>知识约束的推演式写作</small></span></a>
         <div className="project-switcher">
-          <span>当前方案任务</span>
-          <select value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="选择方案任务">
+          <span>当前项目</span>
+          <select value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="选择项目">
             {!projects.length && <option value="">尚未创建</option>}
             {projects.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
@@ -221,7 +221,7 @@ export function App() {
       </header>
 
       <aside className="sidebar">
-        <button type="button" className="new-project" onClick={() => setCreateOpen(true)}><Plus size={17} />新建方案任务</button>
+        <button type="button" className="new-project" onClick={() => setCreateOpen(true)}><Plus size={17} />新建项目</button>
         <nav aria-label="妙笔主流程">
           {tabs.map(({ key, label, icon: Icon }) => (
             <button type="button" key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)} disabled={!projectId}>
@@ -241,10 +241,10 @@ export function App() {
               <div className="writing-layout">
                 <section className="outline-pane"><b>文稿目录</b>{document ? <Outline content={document.current_version?.content || []} /> : <p>创建文稿后自动生成目录。</p>}<div className="missing-box"><AlertTriangle size={16} /><span>缺失项会在这里提示，不会由模型静默补齐。</span></div></section>
                 <section className="document-pane">
-                  {document ? <Suspense fallback={<div className="editor-shell editor-loading">正在加载完整文稿编辑器…</div>}><MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} onRequestSource={setAssistantTab} onAgentEdit={(request) => runAgentTextEdit(document.id, request)} onAgentEditDecision={(editId, decision) => api(`/writing/agent-edits/${editId}/decision`, { method: 'POST', body: { decision } })} onAgentActivity={() => setAssistantTab('assistant')} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /></Suspense> : <EmptyAction title="还没有文稿" detail="先在“方案任务”中确认输入并点击“开始生成报告”。" action="前往方案任务" onClick={() => setTab('task')} />}
+                  {document ? <Suspense fallback={<div className="editor-shell editor-loading">正在加载完整文稿编辑器…</div>}><MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} onRequestSource={setAssistantTab} onAgentEdit={(request) => runAgentTextEdit(document.id, request)} onAgentEditDecision={(editId, decision) => api(`/writing/agent-edits/${editId}/decision`, { method: 'POST', body: { decision } })} onAgentActivity={() => setAssistantTab('assistant')} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /></Suspense> : <EmptyAction title="还没有文稿" detail="先在“项目”中确认输入并点击“开始生成报告”。" action="前往项目" onClick={() => setTab('task')} />}
                 </section>
                 <aside className="assistant-pane">
-                  {knowledgeContext && <button type="button" className="writing-knowledge-baseline" onClick={() => setTab('task')} title="查看当前文稿使用的传神智库知识版本"><BookOpenCheck size={16} /><span><small>当前知识基线</small><b>{knowledgeContext.product.name} · V{knowledgeContext.release.version}</b></span><em>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份任务材料` : `${knowledgeContext.document_count} 项知识资产`}</em><ChevronRight size={15} /></button>}
+                  {knowledgeContext && <button type="button" className="writing-knowledge-baseline" onClick={() => setTab('task')} title="查看当前文稿使用的知识空间"><BookOpenCheck size={16} /><span><small>当前知识空间</small><b>{knowledgeContext.spaces.map((space) => space.name).join('、')}</b></span><em>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份项目材料` : `${knowledgeContext.document_count} 项知识资产`}</em><ChevronRight size={15} /></button>}
                   <div className="assistant-tabs">
                     {([['assistant','妙笔助手'],['evidence','来源与计算'],['review','审校发布']] as const).map(([key,label]) => <button type="button" key={key} className={assistantTab === key ? 'active' : ''} onClick={() => setAssistantTab(key)}>{label}</button>)}
                   </div>
@@ -263,7 +263,7 @@ export function App() {
 }
 
 function Welcome({ onCreate }: { onCreate: () => void }) {
-  return <div className="welcome"><div className="welcome-icon"><Sparkles /></div><h1>把依据、计算和推演写进一份可信方案</h1><p>妙笔会锁定知识版本，每个事实、数值和结论都能回到原始依据。</p><button type="button" className="primary" onClick={onCreate}><Plus size={17} />创建第一个方案任务</button></div>;
+  return <div className="welcome"><div className="welcome-icon"><Sparkles /></div><h1>把依据、计算和推演写进一份可信方案</h1><p>先选择知识空间，再创建写作项目；每个事实、数值和结论都能回到原始依据。</p><button type="button" className="primary" onClick={onCreate}><Plus size={17} />创建第一个项目</button></div>;
 }
 
 function PageHeader({ project, tab }: { project: Project; tab: Tab }) {
@@ -314,7 +314,7 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
     </section>
     {stage === 'inputs' && <>
       <section className="task-intro-card"><div><span className="eyebrow">第一步</span><h2>准备材料并确认报告输入</h2><p>先明确这份报告使用哪些业务材料，再核对从材料中提取的关键输入。</p></div><div className="task-intro-actions"><button type="button" className="primary" disabled={!ready} onClick={() => setStage('toolbox')}>{nextLabel}<ChevronRight size={16} /></button></div></section>
-      {knowledgeContext && <section className="compact-knowledge-baseline"><BookOpenCheck size={18} /><div><b>{knowledgeContext.product.name} · V{knowledgeContext.release.version}</b><small>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份已选业务材料` : '尚未选择任务材料'} · {knowledgeContext.chunk_count} 个已发布知识片段</small></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前版本' : '有新版本'}</span></section>}
+      {knowledgeContext && <section className="compact-knowledge-baseline"><BookOpenCheck size={18} /><div><b>{knowledgeContext.spaces.map((space) => space.name).join('、')}</b><small>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份已选业务材料` : '尚未选择项目材料'} · {knowledgeContext.chunk_count} 个已发布知识片段</small></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前版本' : '有新版本'}</span></section>}
       <MaterialsPanel project={project} materials={materials} knowledgeContext={knowledgeContext} onChanged={onChanged} onError={onError} />
       <Facts project={project} facts={facts} requiredKeys={requiredKeys} document={document} onChanged={onChanged} onError={onError} />
     </>}
@@ -821,7 +821,7 @@ function CalculationPanel({ facts, plans, computations, selectedBinding }: { fac
   });
   const selected = plans.find((item) => item.status === 'selected');
   const inferences = facts.filter((item) => item.fact_type === 'semantica_inference' && item.verification_status === 'verified' && item.freshness_status === 'current');
-  return <div className="assistant-content"><h3>计算与推演</h3>{selectedBinding && String(selectedBinding.type) !== 'knowledge_citation' && <BindingInspector binding={selectedBinding} />}<p>这些结果由系统在生成报告时自动写入正确章节，无需手工插入。</p>{inferences.length > 0 && <div className="calculation-list inference-list">{inferences.map((fact) => <article key={fact.id}><div><b>{fact.label}</b><strong>{formatValue(fact.value)}</strong></div><small>规则推演 · 已核验 · 点击正文标记可查看完整前提</small></article>)}</div>}<div className="calculation-list">{Array.from(latest.values()).map((run) => <article key={run.id}><div><b>{run.result.output_fact?.label || run.result.operation}</b><strong>{run.result.value} {run.result.output_fact?.unit || ''}</strong></div><small>{Object.values(run.result.dependencies || {}).map((key) => factLabels.get(String(key)) || '已核验输入').join('、')} · 自动计算</small></article>)}</div>{selected && <div className="selected-plan-mini"><span className="eyebrow">报告采用方案</span><b>{selected.name}</b><p>{selected.result.route?.path?.join(' → ')}</p></div>}{!inferences.length && !latest.size && <div className="empty-mini">返回“方案任务”，点击“开始生成报告”后自动形成推演和计算结果。</div>}</div>;
+  return <div className="assistant-content"><h3>计算与推演</h3>{selectedBinding && String(selectedBinding.type) !== 'knowledge_citation' && <BindingInspector binding={selectedBinding} />}<p>这些结果由系统在生成报告时自动写入正确章节，无需手工插入。</p>{inferences.length > 0 && <div className="calculation-list inference-list">{inferences.map((fact) => <article key={fact.id}><div><b>{fact.label}</b><strong>{formatValue(fact.value)}</strong></div><small>规则推演 · 已核验 · 点击正文标记可查看完整前提</small></article>)}</div>}<div className="calculation-list">{Array.from(latest.values()).map((run) => <article key={run.id}><div><b>{run.result.output_fact?.label || run.result.operation}</b><strong>{run.result.value} {run.result.output_fact?.unit || ''}</strong></div><small>{Object.values(run.result.dependencies || {}).map((key) => factLabels.get(String(key)) || '已核验输入').join('、')} · 自动计算</small></article>)}</div>{selected && <div className="selected-plan-mini"><span className="eyebrow">报告采用方案</span><b>{selected.name}</b><p>{selected.result.route?.path?.join(' → ')}</p></div>}{!inferences.length && !latest.size && <div className="empty-mini">返回“项目”，点击“开始生成报告”后自动形成推演和计算结果。</div>}</div>;
 }
 
 function WritingAssistant({ project, document, onInsert, onError }: { project: Project; document: WritingDocument | null; onInsert: (node: EditorInsertion) => void; onError: (message: string) => void }) {
@@ -1165,7 +1165,7 @@ function CreateProjectDialog({ onClose, onCreated, onError }: { onClose: () => v
       const project = await api<Project>('/writing/projects', { method: 'POST', body: { code: form.code, name: form.name, application_id: applicationId || undefined, scenario_package_version_id: form.scenario_version_id, space_id: form.space_id } });
       onCreated(project);
     } catch (reason) {
-      onError(reason instanceof ApiError ? reason.message : '创建方案任务失败');
+      onError(reason instanceof ApiError ? reason.message : '创建项目失败');
     } finally { setSubmitting(false); }
   };
 
