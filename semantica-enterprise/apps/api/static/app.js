@@ -1309,7 +1309,7 @@ const APP_SCOPE_LABELS={"knowledge.search":'知识检索',"knowledge.chat":'知�
 const APP_ENV_LABELS={development:'开发',testing:'测试',production:'生产'};
 const APP_TYPE_LABELS={web:'Web 应用',backend:'后端服务',agent:'智能体',integration:'系统集成'};
 function selectedChecks(name,rows,selected=[]){return `<div class="choice-grid">${rows.map(([value,label])=>`<label class="check"><input type="checkbox" name="${name}" value="${esc(value)}" ${selected.includes(value)?'checked':''}>${esc(label)}</label>`).join('')}</div>`}
-function applicationForm(x={}){return `<div class="field-row">${field('code','应用编码',x.code||'','text',x.id?'disabled':'required pattern="[a-z][a-z0-9_-]{1,99}"')}${field('name','应用名称',x.name||'','text','required')}</div>`+area('description','用途',x.description||'')+`<div class="field-row">${selectField('app_type','应用类型',Object.entries(APP_TYPE_LABELS),x.app_type||'agent')}${selectField('environment','运行环境',Object.entries(APP_ENV_LABELS),x.environment||'development')}</div><div class="field-row">${selectField('owner_id','负责人',opt(state.users),x.owner_id||state.user.id,'required')}${selectField('org_unit_id','所属组织',opt(state.orgs,'不限定'),x.org_unit_id||'')}</div><div class="field-row">${selectField('status','状态',[['draft','草稿'],['active','启用'],['suspended','暂停'],['retired','退役']],x.status||'draft')}${check('enabled','允许使用',x.enabled??true)}</div>`}
+function applicationForm(x={}){return `<div class="field-row">${field('code','应用编码',x.code||'','text',x.id?'disabled':'required pattern="[a-z][a-z0-9_-]{1,99}"')}${field('name','写作应用名称',x.name||'','text','required')}</div>`+area('description','写作场景',x.description||'')+`<div class="field-row">${selectField('owner_id','负责人',opt(state.users),x.owner_id||state.user.id,'required')}${selectField('org_unit_id','所属组织',opt(state.orgs,'不限定'),x.org_unit_id||'')}</div><input type="hidden" name="app_type" value="web"><input type="hidden" name="environment" value="development"><input type="hidden" name="status" value="active"><input type="hidden" name="enabled" value="true">`}
 async function editApplication(x){await refreshLookups();const ok=await modal(x?'编辑应用':'新增应用',applicationForm(x),async d=>{if(x)delete d.code;await api(x?`/applications/${x.id}`:'/applications',{method:x?'PUT':'POST',body:d})});if(ok){toast('应用已保存');renderApplications()}}
 async function showCredentialSecret(result){$('#modal-cancel').classList.add('hidden');try{await modal('凭据创建成功',`<div class="credential-secret"><span>${esc(result.secret_notice)}</span><label>Client ID<code>${esc(result.client_id)}</code></label><label>Client Secret<code>${esc(result.client_secret)}</code></label><button id="credential-copy" type="button" class="secondary">复制凭据</button></div>`,async()=>{},'我已安全保存',form=>{form.querySelector('#credential-copy').onclick=async()=>{await navigator.clipboard.writeText(`CLIENT_ID=${result.client_id}\nCLIENT_SECRET=${result.client_secret}`);toast('凭据已复制')}})}finally{$('#modal-cancel').classList.remove('hidden')}}
 async function issueApplicationCredential(application,old=null){let result=null;const defaults=old?.scopes||['scenario.invoke'];const body=field('name','凭据名称',old?`${old.name}（轮换）`:'服务凭据','text','required')+`<label class="field"><span>最小权限</span>${selectedChecks('credential_scope',Object.entries(APP_SCOPE_LABELS),defaults)}</label>`+field('expires_at','过期时间（可选）','','datetime-local');const ok=await modal(old?'轮换凭据':'创建凭据',body,async(d,form)=>{const scopes=[...form.querySelectorAll('[name=credential_scope]:checked')].map(x=>x.value);if(!scopes.length)throw new Error('至少选择一个权限');result=await api(old?`/applications/${application.id}/credentials/${old.id}/rotate`:`/applications/${application.id}/credentials`,{method:'POST',body:{name:d.name,scopes,expires_at:d.expires_at?new Date(d.expires_at).toISOString():null}})},old?'确认轮换':'创建');if(ok){await showCredentialSecret(result);renderApplications()}}
@@ -1342,7 +1342,7 @@ async function renderApplicationFeedback(){actions('<button id="feedback-refresh
 /* Application builder UX: business journey over the immutable A0 foundation. */
 const APP_SCENARIO_LABELS={search:'知识检索',chat:'智能问答',analysis:'知识分析',structured:'结构化输出'};
 const APPLICATION_GUIDES={
-  applications:{title:'应用工作台',purpose:'从一个业务应用出发，查看知识、能力、测试和接入是否准备完成。',action:'创建应用后，按照页面上的步骤逐项完成；“继续配置”会自动带你去当前缺失的环节。',output:'一个具备明确知识范围、能力场景、测试结果和接入权限的可上线应用。',next:'先选择知识供给，再配置能力场景。'},
+  applications:{title:'写作应用',purpose:'为一类材料写作选择知识范围，然后进入妙笔完成写作。',action:'创建写作应用并选择知识空间；创建成功后直接打开妙笔。',output:'一个可以检索组织知识、生成正文并核验引用的写作入口。',next:'选择知识空间后开始写作。'},
   products:{title:'知识供给',purpose:'把一个或多个知识空间组合成应用可以稳定使用的知识版本。',action:'选择知识空间并创建版本；验证完成后把正式供给指向准备上线的版本。',output:'可追溯、可切换且不会随空间变化而意外漂移的知识供给。',next:'完成正式供给后，到能力场景定义应用如何使用这些知识。'},
   appscenarios:{title:'能力场景',purpose:'定义应用要提供的具体能力，例如知识检索、智能问答或知识分析。',action:'选择知识供给、检索通道和模型，并发布一个不可变场景版本。',output:'应用可以稳定调用的能力编码和执行配置。',next:'发布场景版本后，使用上线测试验证真实效果。'},
   evaluations:{title:'上线测试',purpose:'使用标准业务问题验证检索结果是否命中正确依据。',action:'维护测试问题和标准依据，选择场景版本运行真实检索测试。',output:'Recall、MRR、NDCG 和明确的通过/未通过结论。',next:'测试通过后，到接入发布生成凭据并开放调用范围。'},
@@ -1400,31 +1400,27 @@ function journeyCard(number,title,description,done,detail,action){
 }
 
 function applicationKnowledgeChoice(products,spaceReadiness){
-  const supplies=products.map(item=>[item.id,`${item.name} · ${item.space_ids?.length||0} 个空间${item.aliases?.production?' · 已有正式版本':' · 尚未设置正式版本'}`]);
-  const spaces=state.spaces.map(space=>{const ready=spaceReadiness[space.id];return `<label class="check application-space-choice ${ready?'':'unavailable'}"><input type="checkbox" name="application_space" value="${esc(space.id)}" ${ready?'':'disabled'}><span><b>${esc(space.name)}</b><small>${ready?'已有可固定的知识版本':'尚无已发布知识版本，请先完成知识加工'}</small></span></label>`}).join('');
-  return `<section class="application-knowledge-choice"><div class="panel-heading"><div><b>这个应用使用哪些知识？</b><small>可以直接选择空间，系统会自动固定版本；以后空间更新不会静默改变应用。</small></div></div><div class="application-knowledge-modes"><label class="check"><input type="radio" name="knowledge_mode" value="spaces" checked>直接选择知识空间</label><label class="check"><input type="radio" name="knowledge_mode" value="existing">使用已有知识供给</label><label class="check"><input type="radio" name="knowledge_mode" value="later">稍后配置</label></div><div data-knowledge-mode="spaces"><div class="choice-grid application-space-grid">${spaces||'<span>暂无可访问的知识空间</span>'}</div><small>列表展示当前账号有读取权限的全部空间；未发布知识版本的空间会明确标记且暂不可选择。</small></div><div data-knowledge-mode="existing" class="hidden">${selectField('knowledge_product_id','已有知识供给',supplies,'',supplies.length?'':'disabled')}<small>${supplies.length?'选择后会立即关联到新应用。':'当前没有可用知识供给，可改为直接选择空间。'}</small></div><div data-knowledge-mode="later" class="hidden"><div class="inline-info">只创建应用基本信息，稍后仍可在上线流程中配置知识供给。</div></div></section>`;
+  const spaces=state.spaces.map(space=>{const ready=spaceReadiness[space.id];return `<label class="check application-space-choice ${ready?'':'unavailable'}"><input type="checkbox" name="application_space" value="${esc(space.id)}" ${ready?'':'disabled'}><span><b>${esc(space.name)}</b><small>${ready?'可以用于写作检索':'尚无已发布知识，请先完成文档加工'}</small></span></label>`}).join('');
+  return `<section class="application-knowledge-choice"><div class="panel-heading"><div><b>写作时使用哪些知识？</b><small>妙笔会从所选空间检索原文，并在正文右侧展示引用依据。</small></div></div><input type="hidden" name="knowledge_mode" value="spaces"><div class="choice-grid application-space-grid">${spaces||'<span>暂无可访问的知识空间</span>'}</div></section>`;
 }
 
 async function editBusinessApplication(x){
   await refreshLookups({force:true});
-  const products=x?[]:await api('/knowledge-products');
+  const products=[];
   const readiness={};
   if(!x)await Promise.all(state.spaces.map(async space=>{try{const releases=await api(`/knowledge/releases?space_id=${encodeURIComponent(space.id)}`);readiness[space.id]=(releases.knowledge||[]).some(item=>item.status==='published')}catch{readiness[space.id]=false}}));
   const body=applicationForm(x)+(x?'':applicationKnowledgeChoice(products,readiness));
-  const ok=await modal(x?'编辑应用':'创建业务应用',body,async(d,form)=>{
+  let createdApplicationId=null;
+  const ok=await modal(x?'编辑写作应用':'新建写作应用',body,async(d,form)=>{
     if(x){delete d.code;await api(`/applications/${x.id}`,{method:'PUT',body:d});return}
     d.space_ids=[...form.querySelectorAll('[name=application_space]:checked')].map(el=>el.value);
     delete d.application_space;
-    if(d.knowledge_mode==='spaces'&&!d.space_ids.length)throw new Error('请至少选择一个已有知识版本的知识空间');
-    if(d.knowledge_mode==='existing'&&!d.knowledge_product_id)throw new Error('请选择已有知识供给');
+    if(!d.space_ids.length)throw new Error('请至少选择一个可以用于写作的知识空间');
     const result=await api('/applications/guided',{method:'POST',body:d});
     state.applicationSelectedId=result.application.id;
-  },x?'保存':'创建应用',form=>{
-    if(x)return;
-    const sync=()=>{const selected=form.querySelector('[name=knowledge_mode]:checked')?.value||'spaces';form.querySelectorAll('[data-knowledge-mode]').forEach(section=>section.classList.toggle('hidden',section.dataset.knowledgeMode!==selected))};
-    form.querySelectorAll('[name=knowledge_mode]').forEach(input=>input.onchange=sync);sync();
-  });
-  if(ok){toast('应用已保存');renderApplicationWorkbench()}
+    createdApplicationId=result.application.id;
+  },x?'保存':'创建并开始写作');
+  if(ok){toast('写作应用已保存');if(createdApplicationId){window.location.href=`/miaobi/?application_id=${encodeURIComponent(createdApplicationId)}`;return}renderApplicationWorkbench()}
 }
 
 async function chooseApplicationResource(application,type,rows,grants){
@@ -1477,6 +1473,45 @@ async function renderApplicationWorkbench(){
     try{
       if(button.dataset.action==='app-edit')editBusinessApplication(selected);
       if(button.dataset.action==='app-delete'&&confirm(`删除应用 ${selected.name}？它的所有接入凭据会立即失效。`)){await api(`/applications/${selected.id}`,{method:'DELETE'});state.applicationSelectedId=null;renderApplicationWorkbench()}
+    }catch(err){toast(err.message,true)}
+  };
+}
+
+// The current product offers one real application type: knowledge-assisted
+// writing.  Keep the underlying application APIs compatible for integrations,
+// but do not expose environment promotion, scenario publishing, credentials or
+// evaluation gates as if a business user had to operate them before writing.
+renderApplicationWorkbench=async function(){
+  actions('<button id="application-guide" class="secondary">功能说明</button><button id="application-add">新建写作应用</button>');
+  const [rows,products]=await Promise.all([api('/applications'),api('/knowledge-products')]);
+  if(!rows.some(x=>x.id===state.applicationSelectedId))state.applicationSelectedId=rows[0]?.id||null;
+  const selected=rows.find(x=>x.id===state.applicationSelectedId);
+  let grants=[];
+  if(selected)grants=await api(`/applications/${selected.id}/grants`);
+  const productIds=allowedApplicationGrants(grants,'knowledge_product','read');
+  const linkedProducts=products.filter(item=>productIds.has(item.id));
+  const spaceIds=[...new Set(linkedProducts.flatMap(item=>item.space_ids||[]))];
+  const spaceNames=spaceIds.map(id=>state.spaces.find(space=>space.id===id)?.name).filter(Boolean);
+  const list=rows.length?rows.map(item=>`<button class="foundation-list-item ${item.id===selected?.id?'active':''}" data-app-select="${item.id}"><span><b>${esc(item.name)}</b>${status(item.enabled?'active':'suspended')}</span><small>知识增强写作</small></button>`).join(''):'<div class="empty-action"><b>还没有写作应用</b></div>';
+  let detail='<div class="empty-action"><b>创建第一个写作应用</b><span>选择知识空间后即可进入妙笔</span><button id="application-empty-add">新建写作应用</button></div>';
+  if(selected){
+    const launchUrl=selected.config?.launch_url||`/miaobi/?application_id=${encodeURIComponent(selected.id)}`;
+    detail=`<div class="application-workbench-head simplified"><div><span class="application-state ready">写作应用</span><h3>${esc(selected.name)}</h3><p>${esc(selected.description||'使用组织知识辅助完成材料写作')}</p></div><div class="application-head-actions"><button data-app-launch="${esc(launchUrl)}">进入妙笔</button>${btn('编辑','app-edit',selected.id)}${btn('删除','app-delete',selected.id,'danger')}</div></div><div class="application-writing-summary"><article><span>写作知识范围</span><b>${spaceNames.length?esc(spaceNames.join('、')):'尚未配置'}</b><small>${spaceNames.length?'生成内容时检索这些空间，并展示真实引用依据':'该历史应用没有知识范围，建议重新创建写作应用'}</small></article><article><span>核心能力</span><b>生成、改写、引用、导出</b><small>正文由 Agent 辅助完成，事实、推演结果和引用来自知识底座</small></article></div><div class="application-start-card"><div><b>开始写作</b><span>创建文稿、选择材料、生成内容，并在正文右侧核对引用。</span></div><button data-app-launch="${esc(launchUrl)}">打开妙笔编辑器</button></div>`;
+  }
+  page('写作应用',`<div class="foundation-layout application-workbench-layout"><aside class="foundation-list">${list}</aside><section class="foundation-detail application-workbench-detail">${detail}</section></div>`,'foundation-view application-builder-view');
+  bindApplicationGuide('applications');
+  $('#application-add')?.addEventListener('click',()=>editBusinessApplication());
+  $('#application-empty-add')?.addEventListener('click',()=>editBusinessApplication());
+  $('#content').onclick=async event=>{
+    const selectId=event.target.closest('[data-app-select]')?.dataset.appSelect;
+    if(selectId){state.applicationSelectedId=selectId;return renderApplicationWorkbench()}
+    const launch=event.target.closest('[data-app-launch]')?.dataset.appLaunch;
+    if(launch){window.location.href=launch;return}
+    const button=event.target.closest('[data-action]');
+    if(!button||!selected)return;
+    try{
+      if(button.dataset.action==='app-edit')return editBusinessApplication(selected);
+      if(button.dataset.action==='app-delete'&&confirm(`删除写作应用 ${selected.name}？`)){await api(`/applications/${selected.id}`,{method:'DELETE'});state.applicationSelectedId=null;return renderApplicationWorkbench()}
     }catch(err){toast(err.message,true)}
   };
 }

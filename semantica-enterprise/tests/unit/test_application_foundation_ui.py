@@ -17,28 +17,23 @@ def test_application_builder_navigation_exposes_one_business_entry() -> None:
         assert f"title:'{label}'" in APP
 
 
-def test_application_workbench_uses_business_journey_and_readiness() -> None:
+def test_application_workbench_is_a_simple_writing_entry() -> None:
     for phrase in (
-        "应用上线流程",
-        "上线准备度",
-        "选择知识供给",
-        "选择能力场景",
-        "完成上线测试",
-        "发布接入",
+        "新建写作应用",
+        "写作知识范围",
+        "进入妙笔",
+        "生成、改写、引用、导出",
+        "打开妙笔编辑器",
     ):
         assert phrase in APP
-    assert "applicationReadiness" in APP
     assert "renderApplicationWorkbench" in APP
-    assert "renderApplicationAccess" in APP
 
 
 def test_application_creation_exposes_all_authorized_spaces_and_supply_modes() -> None:
     for phrase in (
-        "这个应用使用哪些知识？",
-        "直接选择知识空间",
-        "使用已有知识供给",
-        "稍后配置",
-        "尚无已发布知识版本，请先完成知识加工",
+        "写作时使用哪些知识？",
+        "尚无已发布知识，请先完成文档加工",
+        "创建并开始写作",
         "/applications/guided",
     ):
         assert phrase in APP
