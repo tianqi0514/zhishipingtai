@@ -146,15 +146,38 @@ def analyze_profile_with_model(
     taxonomy: list[str] | None = None,
     summary_length: int = 240,
     tag_count: int = 8,
+    max_input_chars: int = 12000,
     timeout: float = 60,
     max_retries: int = 2,
     request_parameters: dict[str, Any] | None = None,
     generator: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # Chinese technical documents can approach one token per character.  Keep a
+    # conservative budget for the system instructions and the model's JSON
+    # response instead of sending the former fixed 30k-character prefix.  For
+    # long documents retain the beginning, middle and end so conclusions and
+    # appendices are not silently excluded from governance.
+    max_input_chars = max(2000, min(int(max_input_chars), 24000))
+    if len(text) <= max_input_chars:
+        profile_text = text
+    else:
+        separator = "\n\n[中间内容已按上下文预算抽样]\n\n"
+        available = max_input_chars - len(separator)
+        head_size = available // 2
+        middle_size = available // 4
+        tail_size = available - head_size - middle_size
+        middle_start = max(head_size, (len(text) - middle_size) // 2)
+        profile_text = (
+            text[:head_size]
+            + separator
+            + text[middle_start : middle_start + middle_size]
+            + "\n\n[末尾内容]\n\n"
+            + text[-tail_size:]
+        )
     prompt = f"""你是组织级知识治理器。只输出 JSON 对象，不要 Markdown，不得补充原文不存在的事实。
 字段：summary（不超过{summary_length}字）、classification、document_type、tags（不超过{tag_count}个）、keywords（不超过{tag_count}个）、main_objects、time_range（对象，包含 start/end）、quality_issues（数组）。
 分类体系：{json.dumps(taxonomy or ['产品资料','制度规范','项目材料','经营分析','会议材料','技术资料','合同法务','其他'], ensure_ascii=False)}
-正文：\n{text[:30000]}"""
+正文：\n{profile_text}"""
     if generator is None:
         from semantica.semantic_extract.providers import OpenAIProvider
 

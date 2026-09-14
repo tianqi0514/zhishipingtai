@@ -2030,6 +2030,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                             taxonomy=profile_config.get("taxonomy") or profile_config.get("classification_taxonomy"),
                             summary_length=int(profile_config.get("summary_length", 240)),
                             tag_count=int(profile_config.get("tag_count", 8)),
+                            max_input_chars=int(profile_config.get("profile_max_input_chars", 12000)),
                             timeout=float((profile_model.config or {}).get("timeout", 60)),
                             max_retries=int(
                                 (profile_model.config or {}).get(

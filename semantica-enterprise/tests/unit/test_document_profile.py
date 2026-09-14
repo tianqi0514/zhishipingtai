@@ -60,7 +60,28 @@ class DocumentProfileTest(unittest.TestCase):
         self.assertEqual(result["tags"], ["知识库", "AI"])
         self.assertEqual(result["main_objects"], ["NexusOne"])
 
+    def test_long_profile_input_stays_within_context_budget_and_samples_document(self) -> None:
+        captured = {}
+        text = "甲" * 10000 + "中部事实" + "乙" * 10000 + "末尾结论"
+
+        def generate(prompt: str):
+            captured["prompt"] = prompt
+            return {"summary": "摘要"}
+
+        analyze_profile_with_model(
+            text,
+            model="contract-model",
+            api_key="not-used",
+            base_url=None,
+            max_input_chars=12000,
+            generator=generate,
+        )
+
+        prompt = captured["prompt"]
+        self.assertLess(len(prompt), 13000)
+        self.assertIn("中间内容已按上下文预算抽样", prompt)
+        self.assertIn("末尾结论", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
-
