@@ -1,0 +1,109 @@
+{
+  "inputs": [
+    {
+      "key": "rescue_required",
+      "label": "搜救人员需求",
+      "data_type": "number",
+      "unit": "人",
+      "required": true,
+      "confirmation_required": true,
+      "minimum": 0,
+      "source_guidance": "本模板是管理员预置的演练应用配置，不属于上传材料，不作为灾情或调度依据。核对04号县域搜救清单的任务单需求人数，不根据云桥体育馆或城北中学的安置人数推算。"
+    },
+    {
+      "key": "rescue_available",
+      "label": "可用搜救人员",
+      "data_type": "number",
+      "unit": "人",
+      "required": true,
+      "confirmation_required": true,
+      "minimum": 0,
+      "source_guidance": "核对同一时点已到位且可参与县域搜救专项任务的人数。09:00未到场的后备人员不得计入；11:00更新应以05号到位记录另行核验，并填写变更理由。"
+    }
+  ],
+  "sections": [
+    {
+      "key": "situation",
+      "title": "一、现状与依据",
+      "purpose": "写给需要快速掌握情况的业务负责人。根据本任务选定的青岚县演练台账、柳溪供水站巡查简报与生活保障职责材料，说明记录时点、已核实设施状态和信息边界。用自然连贯的正式报告段落，不写生成步骤或平台介绍。仅采用材料明确支持的事实，区分云桥体育馆安置点与城北中学安置点，不把缺少依赖记录写成没有风险。注明这是虚构演练，不代表真实灾情、不构成调度命令。本章约250至350字，引用紧跟事实句，不凑空话。",
+      "generation_mode": "agent",
+      "required_inputs": [],
+      "toolbox_outputs": [],
+      "citation_required": true,
+      "knowledge": {}
+    },
+    {
+      "key": "shelter",
+      "title": "二、安置点饮水保障",
+      "purpose": "结合已确认的章节关系与规则证据，解释云桥体育馆安置点、其依赖的柳溪供水站、已确认设施状态及县生活保障组的责任，清楚区分原始记录与规则判断。依据职责指引组织可执行的建议，交代责任主体、动作和待核验条件。不虚构车辆数量、送达时间、库存、水质或修复时限，不把城北中学安置点列为同样受影响，也不把其备用水井来源解释为已经排除风险。本章约350至450字，避免重复第一章，事实与规则结论均保留来源，语气为待业务确认的建议。",
+      "generation_mode": "agent",
+      "required_inputs": [],
+      "toolbox_outputs": [],
+      "citation_required": true,
+      "knowledge": {
+        "ontology_version_id": "__RUNNER_PUBLISHED_ONTOLOGY_VERSION_ID__",
+        "entity_types": [
+          "安置点"
+        ],
+        "predicates": [
+          "依赖",
+          "发生",
+          "负责"
+        ],
+        "rule_version_ids": [
+          "__RUNNER_EFFECTIVE_RULE_VERSION_ID__"
+        ]
+      }
+    },
+    {
+      "key": "resources",
+      "title": "三、人员保障与待核事项",
+      "purpose": "使用当前已确认的县域搜救专项人员输入及服务端最新计算结果，说明需求、可用力量、缺口与统计时点；不重新心算或改写权威测算值。若输入经过人工修正，要区分原清单时点与最新人工核验记录，不把新值说成原清单内容。列出仍需核实的库存、运输、到达时间及柳溪供水站恢复情况，明确它们不能由人员数量推出。本章约250至350字，避免重复饮水保障措施，保留人员来源及计算依据，不输出写作要求或工具调用总结。",
+      "generation_mode": "mixed",
+      "required_inputs": [
+        "rescue_required",
+        "rescue_available"
+      ],
+      "toolbox_outputs": [
+        "rescue_gap"
+      ],
+      "citation_required": true,
+      "knowledge": {}
+    }
+  ],
+  "toolbox": {
+    "reasoning_enabled": false,
+    "rule_set_ids": [],
+    "calculation_enabled": true,
+    "formula_ids": [],
+    "target_sections": {
+      "rescue_gap": [
+        "resources"
+      ]
+    }
+  },
+  "writing_policy": {
+    "missing_input_action": "block",
+    "unverified_fact_action": "block",
+    "require_citations": true,
+    "allow_manual_override": true
+  },
+  "output": {
+    "title_pattern": "{project_name}",
+    "allowed_formats": [
+      "docx",
+      "pdf"
+    ]
+  },
+  "decision_gates": [
+    {
+      "key": "publish",
+      "name": "已核对青岚演练材料、人员口径与建议边界",
+      "required": true
+    }
+  ],
+  "comparison_dimensions": [],
+  "minimum_plan_count": 2,
+  "default_plan_count": 3,
+  "activate": true
+}

@@ -1,0 +1,146 @@
+{
+  "fixture_id": "qinglan-live-20260914",
+  "synthetic": true,
+  "warning": "演示材料  所有地名和业务记录均属虚构，不代表真实灾情，不构成调度命令。",
+  "scope": "仅本目录独立演示，不含真实客户资料、真实灾情或真实个人信息",
+  "timezone": "Asia/Shanghai",
+  "initial_upload_dir": "01-上传材料",
+  "change_reference_dir": "02-变更参考",
+  "not_for_upload": [
+    "source_truth.json",
+    "generate_fixture.py",
+    "README.md",
+    "qa"
+  ],
+  "facts": {
+    "facility_0820": {
+      "source": "01-上传材料/01-安置点设施台账.docx",
+      "as_of": "2026-09-14T08:20:00+08:00",
+      "云桥体育馆安置点": {
+        "registered_population": 600,
+        "depends_on": "柳溪供水站",
+        "independent_backup_capacity": "unknown"
+      },
+      "城北中学安置点": {
+        "registered_population": 420,
+        "supplied_by": "城北备用水井",
+        "dependency_on_柳溪供水站": "not_found_in_current_records",
+        "risk_free": "not_established"
+      },
+      "population_is_rescue_demand_basis": false
+    },
+    "water_incident": {
+      "source": "01-上传材料/02-柳溪供水站巡查简报.pdf",
+      "facility": "柳溪供水站",
+      "status": "供水中断",
+      "occurred_at": "2026-09-14T08:40:00+08:00",
+      "confirmed_at": "2026-09-14T09:00:00+08:00",
+      "restoration_time": "unknown",
+      "water_quality": "unknown",
+      "alternate_transport": "unknown",
+      "cause": "unknown",
+      "downstream_shelter_names_in_source": []
+    },
+    "responsibilities": {
+      "source": "01-上传材料/03-生活保障职责与工作指引.docx",
+      "县生活保障组": "云桥体育馆安置点生活保障协调",
+      "供水巡查组": "柳溪供水站运行巡查 状态核实 变化续报",
+      "temporary_supply_prerequisites": [
+        "核实库存",
+        "核实运输",
+        "核实水质"
+      ],
+      "transport_dispatched_or_arrived": "not_recorded"
+    },
+    "rescue_0900": {
+      "source": "01-上传材料/04-搜救力量需求及到位清单.md",
+      "as_of": "2026-09-14T09:00:00+08:00",
+      "unit": "人",
+      "scope": "县域搜救专项",
+      "demand_source": "演练指挥协调组任务单QL-RW-0914-01",
+      "demand_total": 500,
+      "demand_components": {
+        "县救援力量": 240,
+        "专业力量": 160,
+        "机动力量": 100
+      },
+      "available_total": 320,
+      "available_components": {
+        "县救援力量": 160,
+        "专业力量": 100,
+        "机动力量": 60
+      },
+      "not_arrived_reserve": 60,
+      "reserve_included_in_available": false,
+      "gap_precomputed_in_source": false
+    },
+    "rescue_1100": {
+      "source": "02-变更参考/05-人员到位更新.md",
+      "as_of": "2026-09-14T11:00:00+08:00",
+      "new_arrivals": 80,
+      "new_arrival_components": {
+        "原后备到位": 60,
+        "新增增援": 20
+      },
+      "available_total": 400,
+      "demand_total": 500,
+      "original_320_continue_available": true,
+      "updated_category_breakdown": "unknown",
+      "changes_only_rescue_arrival_and_available_count": true
+    }
+  },
+  "expected_inferences_not_in_initial_sources": [
+    {
+      "id": "water_dependency_impact",
+      "required_sources": [
+        1,
+        2
+      ],
+      "expected": "云桥体育馆安置点因依赖柳溪供水站而面临供水保障风险；不能据现有材料断言安置点已经耗尽存水或完全无水"
+    },
+    {
+      "id": "responsibility_routing",
+      "required_sources": [
+        1,
+        2,
+        3
+      ],
+      "expected": "由县生活保障组对云桥体育馆安置点核实保障条件并按指引处置，由供水巡查组核实和续报柳溪供水站状态"
+    },
+    {
+      "id": "negative_scope",
+      "required_sources": [
+        1,
+        2
+      ],
+      "expected": "城北中学由城北备用水井供水，现有材料未发现其依赖柳溪；不得扩大为无风险结论"
+    }
+  ],
+  "expected_calculations_not_for_upload": {
+    "demand_total": "240 + 160 + 100 = 500",
+    "available_0900": "160 + 100 + 60 = 320",
+    "gap_0900": "500 - 320 = 180",
+    "new_1100": "60 + 20 = 80",
+    "available_1100": "320 + 80 = 400",
+    "gap_1100": "500 - 400 = 100",
+    "gap_change": "100 - 180 = -80"
+  },
+  "forbidden_assertions": [
+    "把60名未到场后备计入09:00可用人数",
+    "按安置人数推算搜救需求",
+    "11:00仍使用180人缺口",
+    "自行分配新增80人的力量类别",
+    "城北中学没有供水风险",
+    "水质合格或污染已确认",
+    "供水已恢复",
+    "送水车辆已经出发或到达",
+    "将演示材料描述为真实灾情或调度命令"
+  ],
+  "character_counts_chinese": {
+    "01": 725,
+    "02": 679,
+    "03": 790,
+    "04": 732,
+    "05": 661
+  }
+}
