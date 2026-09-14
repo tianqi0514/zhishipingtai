@@ -25,3 +25,13 @@
 - 完整 Plate 功能带来较大的编辑器异步包，功能可用但仍需继续拆包和首开性能优化。
 - 未建立依赖绑定的普通文字只能提示疑似影响，不能承诺自动联动。
 - 自动审校不等于客户业务批准；定稿仍由业务责任人确认。
+
+## 2026-09-14 测试环境验收
+
+- 分支 `codex/miaobi-writing-workbench` 的 `8b08b3c` 已部署到 `10.5.113.232:9002`，未删除任何 Docker Volume。
+- API、Worker、Scheduler、Agent Runtime、MCP、Plate 协同服务及 PostgreSQL、OpenSearch、Qdrant、FalkorDB、MinIO 等全部通过健康检查。
+- 从本机访问远端 `/health/ready` 返回 `ready`，`/miaobi/` 返回本轮生产构建产物。
+- 真实浏览器创建“妙笔工作台远端验收 0914”空白项目，未选知识空间仍可创建文章并直接进入 Plate 53.3.11。
+- 文章标题与初始正文一致；输入 `/` 真实展示知识依据、标题、列表、表格、目录、日期、公式、脚注和图片指令。
+- “审校发布 → DOCX”生成真实远端下载对象 `远端部署验收工作报告-v3.docx`。
+- 本轮远端操作后浏览器 Console 为 0 error、0 warning；API、Worker 和协同服务近期日志未发现 Traceback、FATAL 或未处理 ERROR。
