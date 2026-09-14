@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from apps.api.deps import get_current_user, require_admin, require_space_permission
 from apps.api.utils import serialize_row
 from packages.platform.audit import audit
+from packages.platform.curation import effective_chunk_text, effective_entities, effective_facts
 from packages.platform.database import get_db
 from packages.platform.models import (
     CanonicalEntity,
@@ -55,26 +56,42 @@ def _source_fingerprint(kind: str, label: str, evidence: list[dict[str, Any]]) -
     canonical = {
         "kind": kind,
         "label": label,
-        "evidence": sorted(str(item.get("source_id") or "") for item in evidence),
+        "evidence": sorted(evidence, key=lambda item: str(item.get("source_id") or "")),
     }
     return hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _evidence_payload(db: Session, chunk_id: str | None, source_id: str, label: str) -> dict[str, Any]:
+def _evidence_payload(
+    db: Session, chunk_id: str | None, source_id: str, label: str,
+    *, tenant_id: str, space_id: str,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"source_id": source_id, "label": label}
     chunk = db.get(Chunk, chunk_id) if chunk_id else None
-    if chunk is None:
+    if (
+        chunk is None or chunk.deleted_at is not None or chunk.status != "published"
+        or chunk.tenant_id != tenant_id or chunk.space_id != space_id
+    ):
         return payload
     document = db.get(Document, chunk.document_id)
+    if (
+        document is None or document.deleted_at is not None
+        or document.tenant_id != tenant_id or document.space_id != space_id
+        or document.current_version_id != chunk.version_id
+    ):
+        return payload
+    try:
+        text, _ = effective_chunk_text(db, chunk)
+    except ValueError:
+        return payload
     payload.update(
         {
             "chunk_id": chunk.id,
             "document_id": chunk.document_id,
             "version_id": chunk.version_id,
-            "document_title": document.title if document else "来源文档",
+            "document_title": document.title,
             "page_number": chunk.page_number,
             "structural_path": chunk.structural_path,
-            "snippet": chunk.text[:240],
+            "snippet": text[:240],
         }
     )
     return payload
@@ -98,7 +115,7 @@ def generate_semantic_model_suggestions(
     admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """Generate deterministic candidates from actual extracted entities and facts."""
+    """Generate deterministic candidates from the current curated knowledge."""
     ontology = _ontology(db, ontology_id, admin, "manage")
     target_space_id = space_id or ontology.space_id
     if not target_space_id:
@@ -114,33 +131,63 @@ def generate_semantic_model_suggestions(
         )
     }
     candidates: list[dict[str, Any]] = []
-    entity_counts = db.execute(
-        select(CanonicalEntity.entity_type, func.count(CanonicalEntity.id)).where(
+    entity_rows = list(db.scalars(
+        select(CanonicalEntity).where(
             CanonicalEntity.tenant_id == admin.tenant_id,
             CanonicalEntity.space_id == target_space_id,
-            CanonicalEntity.status == "published",
             _active(CanonicalEntity),
-        ).group_by(CanonicalEntity.entity_type).order_by(func.count(CanonicalEntity.id).desc())
-    ).all()
-    for label, count in entity_counts:
-        normalized = str(label or "").strip()
+        )
+    ))
+    entity_values = {
+        entity_id: value for entity_id, value in effective_entities(db, entity_rows).items()
+        if value.get("status") in {"published", "active"}
+    }
+    entities_by_type: dict[str, list[CanonicalEntity]] = {}
+    for row in entity_rows:
+        if row.id in entity_values:
+            label = str(entity_values[row.id].get("entity_type") or "").strip()
+            entities_by_type.setdefault(label, []).append(row)
+    # Mentions retain their automatic identity after canonical overlays change.
+    # Match that identity, not the old/new type alone, to avoid unrelated evidence.
+    original_identities: dict[tuple[str, str], set[str]] = {}
+    for row in entity_rows:
+        for name in [row.normalized_name, row.canonical_name, *(row.aliases or [])]:
+            key = (str(name).strip().casefold(), row.entity_type)
+            original_identities.setdefault(key, set()).add(row.id)
+    mentions_by_entity: dict[str, EntityMention] = {}
+    for mention in db.scalars(
+        select(EntityMention).where(
+            EntityMention.tenant_id == admin.tenant_id,
+            EntityMention.space_id == target_space_id,
+            EntityMention.status == "published",
+            _active(EntityMention),
+        ).order_by(EntityMention.confidence.desc(), EntityMention.id)
+    ):
+        matching_ids = set().union(*(
+            original_identities.get((str(name).strip().casefold(), mention.entity_type), set())
+            for name in (mention.normalized_name, mention.text)
+        ))
+        if len(matching_ids) == 1:
+            mentions_by_entity.setdefault(next(iter(matching_ids)), mention)
+    for normalized, entities in sorted(entities_by_type.items(), key=lambda item: (-len(item[1]), item[0])):
+        count = len(entities)
         if not normalized or ("class", normalized.casefold()) in existing_terms:
             continue
-        mentions = list(
-            db.scalars(
-                select(EntityMention).where(
-                    EntityMention.tenant_id == admin.tenant_id,
-                    EntityMention.space_id == target_space_id,
-                    EntityMention.entity_type == normalized,
-                    EntityMention.status == "published",
-                    _active(EntityMention),
-                ).order_by(EntityMention.confidence.desc()).limit(3)
-            )
-        )
-        evidence = [
-            _evidence_payload(db, item.chunk_id, item.id, item.text)
-            for item in mentions
-        ]
+        evidence = []
+        for item in sorted(entities, key=lambda row: (-float(entity_values[row.id].get("confidence") or 0), row.id))[:3]:
+            value = entity_values[item.id]
+            mention = mentions_by_entity.get(item.id)
+            evidence.append({
+                **_evidence_payload(
+                    db, mention.chunk_id if mention else None, item.id,
+                    str(value.get("canonical_name") or ""),
+                    tenant_id=admin.tenant_id, space_id=target_space_id,
+                ),
+                "entity_id": item.id,
+                "entity_type": normalized,
+                "mention_id": mention.id if mention else None,
+                "field_origins": value["field_origins"],
+            })
         candidates.append(
             {
                 "suggestion_kind": "class",
@@ -153,32 +200,41 @@ def generate_semantic_model_suggestions(
                 "evidence": evidence,
             }
         )
-    predicate_counts = db.execute(
-        select(Fact.predicate, func.count(Fact.id)).where(
+    fact_rows = list(db.scalars(
+        select(Fact).where(
             Fact.tenant_id == admin.tenant_id,
             Fact.space_id == target_space_id,
-            Fact.status == "published",
             _active(Fact),
-        ).group_by(Fact.predicate).order_by(func.count(Fact.id).desc())
-    ).all()
-    for label, count in predicate_counts:
-        normalized = str(label or "").strip()
+        )
+    ))
+    facts_by_predicate: dict[str, list[tuple[Fact, dict[str, Any]]]] = {}
+    # Raw endpoints can refer to a merged loser while curated endpoints already
+    # refer to its winner; validate only after resolving the overlays.
+    fact_values = effective_facts(db, fact_rows)
+    for row in fact_rows:
+        value = fact_values[row.id]
+        if value.get("status") != "published" or value.get("subject_entity_id") not in entity_values:
+            continue
+        if value.get("object_entity_id") and value["object_entity_id"] not in entity_values:
+            continue
+        normalized = str(value.get("predicate") or "").strip()
+        facts_by_predicate.setdefault(normalized, []).append((row, value))
+    for normalized, facts in sorted(facts_by_predicate.items(), key=lambda item: (-len(item[1]), item[0])):
+        count = len(facts)
         if not normalized or ("relation", normalized.casefold()) in existing_terms:
             continue
-        facts = list(
-            db.scalars(
-                select(Fact).where(
-                    Fact.tenant_id == admin.tenant_id,
-                    Fact.space_id == target_space_id,
-                    Fact.predicate == normalized,
-                    Fact.status == "published",
-                    _active(Fact),
-                ).order_by(Fact.confidence.desc()).limit(3)
-            )
-        )
         evidence = [
-            _evidence_payload(db, item.source_chunk_id, item.id, normalized)
-            for item in facts
+            {
+                **_evidence_payload(
+                    db, value.get("source_chunk_id"), item.id, normalized,
+                    tenant_id=admin.tenant_id, space_id=target_space_id,
+                ),
+                "subject_entity_id": value["subject_entity_id"],
+                "object_entity_id": value.get("object_entity_id"),
+                "object_value": value.get("object_value"),
+                "field_origins": value["field_origins"],
+            }
+            for item, value in sorted(facts, key=lambda pair: (-float(pair[1].get("confidence") or 0), pair[0].id))[:3]
         ]
         candidates.append(
             {
@@ -195,15 +251,31 @@ def generate_semantic_model_suggestions(
 
     created = 0
     refreshed = 0
+    candidate_keys = {(item["suggestion_kind"], item["code"]) for item in candidates}
+    # Only withdraw unreviewed candidates from this generation scope. Human
+    # decisions and published ontology versions remain intact.
+    for row in db.scalars(select(OntologySuggestion).where(
+        OntologySuggestion.tenant_id == admin.tenant_id,
+        OntologySuggestion.ontology_id == ontology.id,
+        OntologySuggestion.space_id == target_space_id,
+        OntologySuggestion.status == "pending",
+        _active(OntologySuggestion),
+    )):
+        if (
+            (row.payload or {}).get("source") in {"published_entities", "published_facts"}
+            and (row.suggestion_kind, row.code) not in candidate_keys
+        ):
+            row.deleted_at = datetime.now(timezone.utc)
     for candidate in candidates:
         fingerprint = _source_fingerprint(candidate["suggestion_kind"], candidate["label"], candidate["evidence"])
         row = db.scalar(
             select(OntologySuggestion).where(
                 OntologySuggestion.ontology_id == ontology.id,
+                OntologySuggestion.tenant_id == admin.tenant_id,
+                OntologySuggestion.space_id == target_space_id,
                 OntologySuggestion.suggestion_kind == candidate["suggestion_kind"],
                 OntologySuggestion.code == candidate["code"],
-                _active(OntologySuggestion),
-            ).order_by(OntologySuggestion.created_at.desc())
+            ).order_by(OntologySuggestion.deleted_at.is_not(None), OntologySuggestion.created_at.desc())
         )
         if row is None:
             row = OntologySuggestion(
@@ -217,6 +289,9 @@ def generate_semantic_model_suggestions(
             db.add(row)
             created += 1
         elif row.status == "pending":
+            # Revive a withdrawn row after a governance rollback rather than
+            # colliding with its retained unique source fingerprint.
+            row.deleted_at = None
             row.source_fingerprint = fingerprint
             row.definition = candidate["definition"]
             row.payload = candidate["payload"]

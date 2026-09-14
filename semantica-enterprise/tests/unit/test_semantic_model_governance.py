@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -9,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from apps.api.semantic_models import router
+from packages.platform.curation import create_decision, rollback_decision
 from packages.platform.database import Base, get_db
 from packages.platform.models import (
     CanonicalEntity,
@@ -23,6 +26,7 @@ from packages.platform.models import (
     KnowledgeSpace,
     ModelConfig,
     Ontology,
+    OntologySuggestion,
     OntologyTerm,
     OntologyVersion,
     Tenant,
@@ -216,3 +220,212 @@ def test_document_derived_candidates_require_decision_before_version_publish() -
         regenerated = client.post(f"/api/v1/ontologies/{ontology.id}/suggestions/generate")
         assert regenerated.status_code == 200
         assert regenerated.json()["candidate_count"] == 0
+
+
+def _govern(db, ontology, target_type, target_id, field_path, value, operation="override"):
+    admin = db.query(User).filter_by(tenant_id=ontology.tenant_id).one()
+    decision, _, _ = create_decision(
+        db, user=admin, space_id=ontology.space_id, target_type=target_type,
+        target_id=target_id, field_path=field_path, operation=operation,
+        value=value, scope="space", reason_note="单元测试人工核实",
+    )
+    db.flush()
+    return decision
+
+
+def _generate(client, ontology):
+    response = client.post(f"/api/v1/ontologies/{ontology.id}/suggestions/generate")
+    assert response.status_code == 200, response.text
+    rows = client.get(f"/api/v1/ontologies/{ontology.id}/suggestions").json()
+    return {item["label"]: item for item in rows}
+
+
+def test_candidates_follow_curated_types_relations_evidence_and_rollback(monkeypatch) -> None:
+    monkeypatch.setattr("packages.platform.curation.track_curation_decision", lambda *args, **kwargs: None)
+    with semantic_model_client() as (client, db, ontology):
+        original = _generate(client, ontology)
+        subject = db.query(CanonicalEntity).filter_by(entity_type="供应商").one()
+        fact = db.query(Fact).one()
+        mention = db.query(EntityMention).one()
+        chunk = db.query(Chunk).one()
+        document = db.get(Document, chunk.document_id)
+        document.status = "ready"
+        db.get(DocumentVersion, chunk.version_id).status = "ready"
+        replacement = Chunk(
+            tenant_id=ontology.tenant_id, space_id=ontology.space_id,
+            document_id=document.id, version_id=chunk.version_id,
+            chunk_policy_id=chunk.chunk_policy_id, chunk_id="corrected-evidence", ordinal=1,
+            text="核实后的原始证据。", content_hash="c" * 64, structural_path="paragraphs/1",
+            status="published",
+        )
+        db.add(replacement)
+        db.flush()
+        decisions = [
+            _govern(db, ontology, "entity", subject.id, "entity_type", "保障单位"),
+            _govern(db, ontology, "entity", subject.id, "canonical_name", "东方保障中心"),
+            _govern(db, ontology, "fact", fact.id, "predicate", "负责保障"),
+            _govern(db, ontology, "fact", fact.id, "source_chunk_id", replacement.id),
+            _govern(db, ontology, "chunk", replacement.id, "text", "人工核实的保障关系证据。"),
+        ]
+        db.commit()
+
+        curated = _generate(client, ontology)
+        assert set(curated) == {"保障单位", "设备", "负责保障"}
+        evidence = curated["保障单位"]["evidence"][0]
+        assert curated["保障单位"]["evidence_count"] == 1
+        assert evidence["entity_id"] == subject.id
+        assert evidence["mention_id"] == mention.id
+        assert evidence["chunk_id"] == chunk.id
+        assert evidence["label"] == "东方保障中心"
+        assert evidence["entity_type"] == "保障单位"
+        assert evidence["field_origins"]["entity_type"] == "manual"
+        relation_evidence = curated["负责保障"]["evidence"][0]
+        assert relation_evidence["source_id"] == fact.id
+        assert relation_evidence["chunk_id"] == replacement.id
+        assert relation_evidence["snippet"] == "人工核实的保障关系证据。"
+        assert relation_evidence["label"] == "负责保障"
+        assert subject.entity_type == "供应商"
+        assert fact.predicate == "供应"
+        assert fact.source_chunk_id == chunk.id
+
+        admin = db.query(User).filter_by(tenant_id=ontology.tenant_id).one()
+        for decision in reversed(decisions):
+            rollback_decision(db, user=admin, decision=decision)
+        db.commit()
+        restored = _generate(client, ontology)
+        assert set(restored) == set(original)
+        assert restored["供应商"]["id"] == original["供应商"]["id"]
+        assert restored["供应"]["id"] == original["供应"]["id"]
+        assert restored["供应"]["evidence"][0]["chunk_id"] == chunk.id
+        assert restored["供应商"]["evidence"][0]["label"] == "东方智造"
+
+
+def test_candidates_exclude_merged_entities_and_invalid_effective_endpoints(monkeypatch) -> None:
+    monkeypatch.setattr("packages.platform.curation.track_curation_decision", lambda *args, **kwargs: None)
+    with semantic_model_client() as (client, db, ontology):
+        winner = db.query(CanonicalEntity).filter_by(entity_type="供应商").one()
+        product = db.query(CanonicalEntity).filter_by(entity_type="设备").one()
+        chunk = db.query(Chunk).one()
+        loser = CanonicalEntity(
+            tenant_id=ontology.tenant_id, space_id=ontology.space_id,
+            canonical_name="东方公司", normalized_name="东方公司", entity_type="供应商",
+            confidence=0.9, status="published",
+        )
+        deleted = CanonicalEntity(
+            tenant_id=ontology.tenant_id, space_id=ontology.space_id,
+            canonical_name="已删除对象", normalized_name="已删除对象", entity_type="旧类型",
+            status="published", deleted_at=datetime.now(timezone.utc),
+        )
+        db.add_all([loser, deleted])
+        db.flush()
+        redirected = Fact(
+            tenant_id=ontology.tenant_id, space_id=ontology.space_id, subject_entity_id=loser.id,
+            predicate="保障", object_entity_id=product.id, source_chunk_id=chunk.id,
+            confidence=0.9, status="published",
+        )
+        invalid_facts = [
+            Fact(
+                tenant_id=ontology.tenant_id, space_id=ontology.space_id, subject_entity_id=subject_id,
+                predicate=predicate, object_entity_id=object_id, confidence=0.9, status="published",
+            )
+            for subject_id, predicate, object_id in [
+                (loser.id, "失效主体", product.id), (winner.id, "失效客体", loser.id),
+                (winner.id, "已删除客体", deleted.id), (winner.id, "缺失客体", "missing"),
+            ]
+        ]
+        db.add_all([redirected, *invalid_facts])
+        db.flush()
+        _govern(db, ontology, "entity", loser.id, "status", "suppressed", "reject")
+        _govern(db, ontology, "fact", redirected.id, "subject_entity_id", winner.id)
+        _govern(db, ontology, "fact", db.query(Fact).filter_by(predicate="供应").one().id,
+                "status", "suppressed", "reject")
+        db.commit()
+
+        rows = _generate(client, ontology)
+        assert set(rows) == {"供应商", "设备", "保障"}
+        assert rows["供应商"]["evidence_count"] == 1
+        assert rows["保障"]["evidence_count"] == 1
+        assert rows["保障"]["evidence"][0]["subject_entity_id"] == winner.id
+
+
+def test_candidate_regeneration_preserves_reviewed_decisions_and_scope(monkeypatch) -> None:
+    monkeypatch.setattr("packages.platform.curation.track_curation_decision", lambda *args, **kwargs: None)
+    with semantic_model_client() as (client, db, ontology):
+        original = _generate(client, ontology)
+        accepted = client.put(
+            f"/api/v1/ontologies/{ontology.id}/suggestions/{original['供应商']['id']}",
+            json={"decision": "accept", "label": "人工确认的单位类型"},
+        )
+        assert accepted.status_code == 200
+        rejected = client.put(
+            f"/api/v1/ontologies/{ontology.id}/suggestions/{original['设备']['id']}",
+            json={"decision": "reject"},
+        )
+        assert rejected.status_code == 200
+        other_space = KnowledgeSpace(
+            tenant_id=ontology.tenant_id, code="other-space", name="其他空间", enabled=True,
+        )
+        db.add(other_space)
+        db.flush()
+        other_pending = OntologySuggestion(
+            tenant_id=ontology.tenant_id, ontology_id=ontology.id, space_id=other_space.id,
+            suggestion_kind="class", code="other_pending", label="其他空间候选",
+            source_fingerprint="d" * 64, payload={"source": "published_entities"}, status="pending",
+        )
+        db.add(other_pending)
+        for row in db.query(CanonicalEntity).filter_by(space_id=ontology.space_id):
+            _govern(db, ontology, "entity", row.id, "status", "suppressed", "reject")
+        db.commit()
+
+        rows = _generate(client, ontology)
+        assert rows["人工确认的单位类型"]["status"] == "accepted"
+        assert rows["设备"]["status"] == "rejected"
+        assert "供应" not in rows
+        assert rows["其他空间候选"]["status"] == "pending"
+        assert other_pending.deleted_at is None
+
+
+@pytest.mark.parametrize("endpoint", ["subject_entity_id", "object_entity_id"])
+def test_candidates_reject_cross_space_curated_endpoints(monkeypatch, endpoint) -> None:
+    monkeypatch.setattr("packages.platform.curation.track_curation_decision", lambda *args, **kwargs: None)
+    with semantic_model_client() as (client, db, ontology):
+        other_space = KnowledgeSpace(
+            tenant_id=ontology.tenant_id, code="external", name="其他空间", enabled=True,
+        )
+        db.add(other_space)
+        db.flush()
+        other_entity = CanonicalEntity(
+            tenant_id=ontology.tenant_id, space_id=other_space.id, canonical_name="范围外",
+            normalized_name="范围外", entity_type="范围外类型", status="published",
+        )
+        db.add(other_entity)
+        db.flush()
+        _govern(db, ontology, "fact", db.query(Fact).one().id, endpoint, other_entity.id)
+        db.commit()
+        assert set(_generate(client, ontology)) == {"供应商", "设备"}
+
+
+def test_candidate_generation_keeps_admin_and_tenant_boundaries() -> None:
+    with semantic_model_client() as (client, db, ontology):
+        reader = User(
+            tenant_id=ontology.tenant_id, username="reader", password_hash="unused",
+            display_name="非管理员", is_admin=False, enabled=True,
+        )
+        tenant = Tenant(code="other-tenant", name="其他租户")
+        db.add_all([reader, tenant])
+        db.flush()
+        other_admin = User(
+            tenant_id=tenant.id, username="other-admin", password_hash="unused",
+            display_name="其他管理员", is_admin=True, enabled=True,
+        )
+        other_space = KnowledgeSpace(tenant_id=tenant.id, code="private", name="其他租户空间")
+        db.add_all([other_admin, other_space])
+        db.commit()
+        path = f"/api/v1/ontologies/{ontology.id}/suggestions/generate"
+        assert client.post(path, headers={
+            "Authorization": f"Bearer {create_access_token(reader.id, reader.tenant_id, False)}",
+        }).status_code == 403
+        assert client.post(path, headers={
+            "Authorization": f"Bearer {create_access_token(other_admin.id, tenant.id, True)}",
+        }).status_code == 404
+        assert client.post(path, params={"space_id": other_space.id}).status_code == 404
