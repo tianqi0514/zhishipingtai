@@ -44,6 +44,7 @@ def test_application_creation_exposes_all_authorized_spaces_and_supply_modes() -
         assert phrase in APP
     assert "state.spaces.map" in APP
     assert "/knowledge/releases?space_id=" in APP
+    assert "v=20260914-application-space-picker" in INDEX
 
 
 def test_application_builder_keeps_technical_details_on_demand() -> None:
