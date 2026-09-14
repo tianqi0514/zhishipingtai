@@ -22,7 +22,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import { api, ApiError } from './api';
+import { api, ApiError, apiErrorMessage } from './api';
 import { cleanEvidenceText } from './evidence';
 import { sha256 } from './hash';
 import { createClientId } from './ids';
@@ -394,7 +394,7 @@ function MaterialsPanel({ project, materials, knowledgeContext, onChanged, onErr
   </>;
 }
 
-function ReportGenerationPanel({ project, facts, computations, plans, document, ready, onChanged, onOpenEditor, onBack, onError }: {
+export function ReportGenerationPanel({ project, facts, computations, plans, document, ready, onChanged, onOpenEditor, onBack, onError }: {
   project: Project;
   facts: Fact[];
   computations: ComputationRun[];
@@ -427,11 +427,14 @@ function ReportGenerationPanel({ project, facts, computations, plans, document, 
   const start = async () => {
     if (!ready || running) return;
     setRunning(true);
+    onError('');
     setStageLabel('正在核验输入并运行推演工具箱');
+    let activeRunId: string | undefined;
     try {
       const created = await api<WritingGenerationRun>(`/writing/projects/${project.id}/generate-report`, {
         method: 'POST', body: { document_id: document?.id || null },
       });
+      activeRunId = created.id;
       setRun(created);
       setStageLabel('正在依据知识生成报告正文');
       const controller = new AbortController();
@@ -441,7 +444,7 @@ function ReportGenerationPanel({ project, facts, computations, plans, document, 
       });
       if (!response.ok || !response.body) {
         const detail = await response.json().catch(() => ({}));
-        throw new Error(String(detail?.detail || '报告生成 Agent 启动失败'));
+        throw new Error(apiErrorMessage(detail?.detail, '报告生成 Agent 启动失败'));
       }
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -471,7 +474,20 @@ function ReportGenerationPanel({ project, facts, computations, plans, document, 
       setStageLabel('报告已生成');
       onOpenEditor();
     } catch (reason) {
-      if (!(reason instanceof DOMException && reason.name === 'AbortError')) onError(reason instanceof Error ? reason.message : '报告生成失败');
+      const cancelled = reason instanceof DOMException && reason.name === 'AbortError';
+      const interruptedLabel = cancelled ? '本次生成已停止，可重新开始' : '本次生成未完成，可重新生成';
+      setStageLabel(interruptedLabel);
+      if (!cancelled) onError(reason instanceof Error ? reason.message : '报告生成失败');
+      if (activeRunId) {
+        // Finalize can persist a terminal failure before returning an HTTP error.
+        // Reload that exact run instead of leaving the last streamed stage visible.
+        const latest = await api<WritingGenerationRun>(`/writing/generation-runs/${activeRunId}`).catch(() => null);
+        if (latest) {
+          setRun(latest);
+          setStageLabel(['completed', 'quality_failed', 'agent_failed', 'cancelled'].includes(latest.status)
+            ? generationStageLabel(latest, Boolean(document)) : interruptedLabel);
+        }
+      }
     } finally {
       abortRef.current = null;
       setRunning(false);
@@ -484,7 +500,7 @@ function ReportGenerationPanel({ project, facts, computations, plans, document, 
     setRunning(false);
     setStageLabel('本次生成已停止，可重新开始');
   };
-  const progress = run?.progress || (document?.current_version?.change_summary !== '创建报告草稿' && document ? 100 : 0);
+  const progress = run?.progress ?? (document?.current_version?.change_summary !== '创建报告草稿' && document ? 100 : 0);
   const latest = new Map<string, ComputationRun>();
   computations.forEach((item) => {
     const key = item.result.output_fact?.fact_key;

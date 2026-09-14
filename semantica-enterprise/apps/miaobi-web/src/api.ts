@@ -1,11 +1,22 @@
 const API_ROOT = '/api/v1';
 
+export function apiErrorMessage(detail: unknown, fallback = '请求处理失败'): string {
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object' && 'issues' in detail && Array.isArray(detail.issues)) {
+    // Only display the user-facing message, never serialize diagnostic payloads.
+    const issue = detail.issues.find((item: unknown) => item && typeof item === 'object'
+      && 'message' in item && typeof item.message === 'string' && item.message.trim());
+    if (issue) return issue.message.trim();
+  }
+  return fallback;
+}
+
 export class ApiError extends Error {
   status: number;
   detail: unknown;
 
   constructor(status: number, detail: unknown) {
-    super(typeof detail === 'string' ? detail : '请求处理失败');
+    super(apiErrorMessage(detail));
     this.status = status;
     this.detail = detail;
   }

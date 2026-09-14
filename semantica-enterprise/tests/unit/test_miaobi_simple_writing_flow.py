@@ -97,6 +97,85 @@ def test_agent_report_protocol_rejects_work_notes_and_duplicate_sections() -> No
         validate_and_parse_agent_report(json.dumps(unsafe, ensure_ascii=False), SECTIONS)
 
 
+def test_qinglan_live_report_accepts_preface_and_unique_final_json_fence() -> None:
+    # Regression for live run 880a95c4: a completed three-section report was
+    # wrapped in a final json fence after a visible execution summary. Use a
+    # neutral preface here; the actual public answer is not a test dependency.
+    plan = [
+        {"key": "situation", "title": "一、现状与依据"},
+        {"key": "shelter", "title": "二、安置点饮水保障"},
+        {"key": "resources", "title": "三、人员保障与待核事项"},
+    ]
+    payload = {"sections": [
+        {"section_key": item["key"], "title": item["title"],
+         "content_nodes": [{"type": "p", "text": "青岚县演练材料应按记录时点核对。[1]"}],
+         "citation_refs": [1], "metric_refs": [], "inference_refs": [], "warnings": []}
+        for item in plan
+    ], "warnings": []}
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    parsed = validate_and_parse_agent_report("Execution summary omitted.\n\n```json\n" + body + "\n```", plan)
+    assert parsed == validate_and_parse_agent_report(body, plan)
+    assert [item["section_key"] for item in parsed] == ["situation", "shelter", "resources"]
+    assert "Execution summary" not in json.dumps(parsed)
+
+
+@pytest.mark.parametrize("opening,closing", [
+    ("```json\n", "\n```"), ("```JSON\r\n", "\r\n```\r\n  "),
+    ("```\n", "\n```"), ("```json ", " ```"),
+])
+def test_agent_report_json_envelopes_preserve_literal_braces_and_backticks(opening, closing) -> None:
+    payload = json.loads(_agent_payload())
+    payload["sections"][0]["content_nodes"][0]["text"] = "记录中的字符 {x} 与 ``` 应保留。[1]"
+    body = json.dumps(payload, ensure_ascii=False)
+    expected = validate_and_parse_agent_report(body, SECTIONS)
+    assert validate_and_parse_agent_report(opening + body + closing, SECTIONS) == expected
+    assert validate_and_parse_agent_report("Completed.\n" + opening + body + closing, SECTIONS) == expected
+
+
+@pytest.mark.parametrize("envelope", [
+    "{body}\ntrailing text",
+    "```json\n{body}\n```\ntrailing text",
+    "{body}\n{body}",
+    "```json\n{body}\n```\n```json\n{body}\n```",
+    "{body}\n```json\n{body}\n```",
+    "```json\n{body}\n```\n{body}",
+    '{{"other": 1}}\n{body}',
+    '{{"draft": {body}',
+    '{{"draft": ```json\n{body}\n```',
+    '[\n{body}',
+    "```json\n{body}",
+    "```python\n{body}\n```",
+    "```json\n{body}\n````",
+    "````json\n{body}\n```",
+    "```json\n{body}\n```\n```",
+])
+def test_agent_report_rejects_ambiguous_incomplete_or_trailing_envelopes(envelope) -> None:
+    with pytest.raises(ValueError, match="唯一且完整"):
+        validate_and_parse_agent_report("Completed.\n" + envelope.format(body=_agent_payload()), SECTIONS)
+
+
+def test_agent_report_final_fence_does_not_repair_truncated_json() -> None:
+    with pytest.raises(ValueError, match="唯一且完整"):
+        validate_and_parse_agent_report("Completed.\n```json\n" + _agent_payload()[:-1] + "\n```", SECTIONS)
+
+
+@pytest.mark.parametrize("violation", ["unknown_field", "missing_section", "duplicate_section", "work_note"])
+def test_prefaced_json_fence_still_enforces_report_schema_and_prose(violation) -> None:
+    payload = json.loads(_agent_payload())
+    if violation == "unknown_field":
+        payload["undeclared"] = True
+    elif violation == "missing_section":
+        payload["sections"].pop()
+    elif violation == "duplicate_section":
+        payload["sections"].append(payload["sections"][0])
+    else:
+        payload["sections"][0]["content_nodes"][0]["text"] = "Let me inspect the search results."
+    with pytest.raises(ValueError):
+        validate_and_parse_agent_report(
+            "Completed.\n```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```", SECTIONS,
+        )
+
+
 def test_assembly_injects_authoritative_results_into_configured_sections() -> None:
     sections = validate_and_parse_agent_report(_agent_payload(), SECTIONS)
     content, bindings = assemble_report_content(

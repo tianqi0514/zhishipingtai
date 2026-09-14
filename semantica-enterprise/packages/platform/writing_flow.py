@@ -61,34 +61,30 @@ def _node_text(node: dict[str, Any]) -> str:
 
 def _extract_json_object(value: str) -> dict[str, Any]:
     text = value.strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", text, re.IGNORECASE)
-    if fenced:
-        text = fenced.group(1)
     parsed: Any = None
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as direct_error:
-        # Some OpenAI-compatible models emit a visible work preface before the
-        # requested structured payload.  Keep that raw text in the append-only
-        # Agent session for audit, but never put it in the report.  We only
-        # accept one final JSON object that reaches the end of the response;
-        # arbitrary trailing prose and partial objects remain fail-closed.
-        decoder = json.JSONDecoder()
-        candidates: list[dict[str, Any]] = []
-        for match in re.finditer(r"\{", text):
-            try:
-                candidate, end = decoder.raw_decode(text, match.start())
-            except json.JSONDecodeError:
-                continue
-            if text[end:].strip() or not isinstance(candidate, dict):
-                continue
-            if isinstance(candidate.get("sections"), list):
-                candidates.append(candidate)
-        if len(candidates) != 1:
+        # A visible preface may precede bare JSON or a final json/plain fence.
+        # Decode exactly once from the first object start: searching later
+        # starts could silently discard another result or a truncated wrapper.
+        # The preface remains in the Agent audit log, never in formal content.
+        try:
+            start = text.index("{")
+            prefix = text[:start].rstrip()
+            opening = re.search(r"(?<!`)```(?:json)?\s*$", prefix, re.IGNORECASE)
+            expected_suffix = "```" if opening else ""
+            if opening:
+                prefix = prefix[:opening.start()]
+            if "```" in prefix or any(token in prefix for token in "{}[]"):
+                raise ValueError("存在额外 JSON 或不完整封装")
+            parsed, end = json.JSONDecoder().raw_decode(text, start)
+            if text[end:].strip() != expected_suffix or not isinstance(parsed, dict):
+                raise ValueError("JSON 后有额外内容或封装不完整")
+        except ValueError:
             raise ValueError(
                 f"Agent 未返回唯一且完整的分章节 JSON（原始输出第 {direct_error.lineno} 行无法直接解析），已阻止写入正文"
             ) from direct_error
-        parsed = candidates[0]
     if not isinstance(parsed, dict):
         raise ValueError("Agent 分章节结果必须是对象")
     return parsed
