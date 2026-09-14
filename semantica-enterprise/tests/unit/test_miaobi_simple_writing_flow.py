@@ -119,6 +119,56 @@ def test_qinglan_live_report_accepts_preface_and_unique_final_json_fence() -> No
     assert "Execution summary" not in json.dumps(parsed)
 
 
+@pytest.mark.parametrize("prefix", [
+    "Reviewed the source records [1], the patrol note [4] and responsibilities [7].\n",
+    "已核对材料[1][4]，其余条件见记录[6]。\n",
+    "关系依据已核对[K0123456789ab]，原文见[1]。\n",
+])
+@pytest.mark.parametrize("fenced", [False, True])
+def test_live_report_preface_may_contain_inline_source_markers(prefix, fenced) -> None:
+    # Regression for 7b81d081: citations occurred in human-readable preface
+    # prose, not in an array wrapping the final report. They stay out of output.
+    body = _agent_payload()
+    wrapped = "```json\n" + body + "\n```" if fenced else body
+    assert validate_and_parse_agent_report(prefix + wrapped, SECTIONS) == validate_and_parse_agent_report(body, SECTIONS)
+
+
+@pytest.mark.parametrize("prefix", [
+    "[1] Text follows.\n", "Reviewed.\r\n[1]\r\n", "说明[[1]2]\n",
+    "null [1]\n", '"draft" [1]\n', "true [4]\n",
+    "[1]\n", "Completed.\n[1]\n", "Reviewed [1, 4]\n", "Reviewed [1\n",
+    "Reviewed [[1]]\n", "Reviewed [1], [\n", "Reviewed [1], [[\n",
+    "Reviewed [1]\n[\n", "Reviewed [1]\n[4]\n", "Reviewed [1]\n[]\n",
+    "Reviewed [1]\n{\"draft\": ", "Reviewed [1]\n{\"sections\": []}\n",
+])
+def test_preface_citation_support_does_not_accept_arrays_or_partial_results(prefix) -> None:
+    with pytest.raises(ValueError, match="唯一且完整"):
+        validate_and_parse_agent_report(prefix + _agent_payload(), SECTIONS)
+
+
+def test_preface_source_markers_do_not_satisfy_missing_chapter_citations() -> None:
+    payload = json.loads(_agent_payload())
+    payload["sections"][2]["content_nodes"][0]["text"] = "相关人员到位情况仍须核对。"
+    payload["sections"][2]["citation_refs"] = []
+    plan = [{**item, "citation_required": True} for item in SECTIONS]
+    parsed = validate_and_parse_agent_report(
+        "Reviewed records [1] and [4].\n" + json.dumps(payload, ensure_ascii=False), plan,
+    )
+    content, bindings = assemble_report_content(
+        run_id="preface-citations", title="演练报告", section_plan=plan,
+        agent_sections=parsed,
+        citations=[{"citation_number": 1, "chunk_id": "source-chunk", "snapshot": {"title": "演练清单"}}],
+        computations=[], inference_facts=[], selected_plan=None,
+    )
+    review = report_quality_review(
+        content, section_plan=plan, bindings={item["block_id"]: item for item in bindings},
+    )
+    missing = [item for item in review["issues"] if item["code"] == "missing_section_citation"]
+    assert review["ok"] is False
+    assert len(missing) == 1
+    assert SECTIONS[2]["title"] in missing[0]["message"]
+
+
 @pytest.mark.parametrize("opening,closing", [
     ("```json\n", "\n```"), ("```JSON\r\n", "\r\n```\r\n  "),
     ("```\n", "\n```"), ("```json ", " ```"),

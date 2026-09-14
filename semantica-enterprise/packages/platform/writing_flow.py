@@ -76,6 +76,20 @@ def _extract_json_object(value: str) -> dict[str, Any]:
             expected_suffix = "```" if opening else ""
             if opening:
                 prefix = prefix[:opening.start()]
+            # Inline source markers in ordinary prose are not JSON arrays.
+            # Keep standalone arrays and every unmatched bracket fail-closed.
+            def remove_prose_citation(match: re.Match[str]) -> str:
+                line_start = prefix.rfind("\n", 0, match.start()) + 1
+                prose = prefix[line_start:match.start()]
+                if not re.search(r"[^\W\d_]", prose):
+                    return match.group()
+                try:
+                    json.loads(prose.strip())
+                except json.JSONDecodeError:
+                    return ""
+                return match.group()  # A preceding JSON scalar is not prose.
+
+            prefix = re.sub(r"\[(?:[1-9][0-9]*|K[0-9a-fA-F]{12})\]", remove_prose_citation, prefix)
             if "```" in prefix or any(token in prefix for token in "{}[]"):
                 raise ValueError("存在额外 JSON 或不完整封装")
             parsed, end = json.JSONDecoder().raw_decode(text, start)
@@ -191,6 +205,9 @@ def build_generation_prompt(
             "section_key": str(item["key"]),
             "title": str(item["title"]),
             "instruction": str(item.get("instruction") or "根据已核验资料撰写正式业务内容。"),
+            "citation_required": item.get("citation_required") is True,
+            "required_inputs": list(item.get("required_inputs") or []),
+            "toolbox_outputs": list(item.get("toolbox_outputs") or []),
         }
         for item in section_plan
         if str(item.get("generation_mode") or "agent") in {"agent", "mixed"}
@@ -201,7 +218,7 @@ def build_generation_prompt(
             {
                 "section_key": sections[0]["section_key"],
                 "title": sections[0]["title"],
-                "content_nodes": [{"type": "p", "text": "正式正文，只写可交付内容，并使用[1]引用真实来源。"}],
+                "content_nodes": [{"type": "p", "text": "正式正文，只写可交付内容，并使用[1]引用真实来源。", "input_refs": [], "metric_refs": []}],
                 "citation_refs": [1],
                 "metric_refs": [],
                 "inference_refs": [],
@@ -222,6 +239,9 @@ def build_generation_prompt(
         "[妙笔正式报告生成]\n"
         "先调用 writing_get_project_context 取得已核验事实、确定性计算、规则推演和采用方案，"
         "再按需调用 knowledge_search 查找当前知识产品版本中的真实来源。"
+        "每章契约的 citation_required 为 true 时，必须检索本章的原始依据，并在 content_nodes.text 的事实句后写真实[数字]引用，不能只填 citation_refs 数组。"
+        "计算结果不能替代人员输入等原始资料的引用；缺少原始资料时明确报告缺项，不编造引用。"
+        "原文记载的输入与计算得到的结果要区别表述，不把差值、比例或规则结论说成原文件直接记载。"
         "context 中 chapter_evidence 是已确认的按章节关系和规则依据；"
         "对应章节必须使用这些依据补全责任、依赖和影响，不能把缺失关系说成不存在风险。"
         "对应章节有关系依据时至少引用一条；使用其中的结论时在句末标注其精确引用编号，例如[K0123456789ab]；不要自行创造编号。"
