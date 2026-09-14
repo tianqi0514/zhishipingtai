@@ -60,6 +60,23 @@ class ApplicationUpdate(BaseModel):
     _normalize_optional_ids = field_validator("owner_id", "org_unit_id", mode="before")(_empty_to_none)
 
 
+class GuidedApplicationCreate(ApplicationCreate):
+    knowledge_mode: Literal["later", "existing", "spaces"] = "later"
+    knowledge_product_id: str | None = None
+    space_ids: list[str] = Field(default_factory=list)
+
+    _normalize_product = field_validator("knowledge_product_id", mode="before")(_empty_to_none)
+
+    @model_validator(mode="after")
+    def validate_knowledge_choice(self):
+        self.space_ids = list(dict.fromkeys(self.space_ids))
+        if self.knowledge_mode == "existing" and not self.knowledge_product_id:
+            raise ValueError("请选择已有知识供给")
+        if self.knowledge_mode == "spaces" and not self.space_ids:
+            raise ValueError("请至少选择一个知识空间")
+        return self
+
+
 class CredentialCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     scopes: list[str] = Field(default_factory=lambda: ["scenario.invoke"])

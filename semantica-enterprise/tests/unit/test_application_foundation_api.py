@@ -16,6 +16,9 @@ from packages.platform.models import (
     GraphRelease,
     IndexRelease,
     KnowledgeRelease,
+    KnowledgeProduct,
+    KnowledgeProductAlias,
+    KnowledgeProductRelease,
     KnowledgeSpace,
     QueryRun,
     Role,
@@ -256,6 +259,47 @@ def test_application_mutation_without_platform_permission_is_rejected() -> None:
         )
         assert denied.status_code == 403
         assert denied.json()["detail"] == "缺少平台权限：application.manage"
+
+
+def test_guided_application_can_bind_all_ready_spaces_atomically() -> None:
+    with application_client() as (client, db):
+        admin = db.query(User).filter(User.username == "app-admin").one()
+        ready = KnowledgeSpace(tenant_id=admin.tenant_id, code="ready-space", name="可用空间", owner_id=admin.id, enabled=True)
+        empty = KnowledgeSpace(tenant_id=admin.tenant_id, code="empty-space", name="未加工空间", owner_id=admin.id, enabled=True)
+        db.add_all([ready, empty]); db.flush()
+        graph = GraphRelease(tenant_id=admin.tenant_id, space_id=ready.id, release_number=1, graph_name="guided-graph", status="published")
+        db.add(graph); db.flush()
+        index = IndexRelease(tenant_id=admin.tenant_id, space_id=ready.id, release_number=1, opensearch_index="guided-index", qdrant_collection="guided-vectors", graph_release_id=graph.id, model_config_id="test-model", embedding_dimension=3, status="published")
+        db.add(index); db.flush()
+        db.add(KnowledgeRelease(tenant_id=admin.tenant_id, space_id=ready.id, release_number=1, graph_release_id=graph.id, index_release_id=index.id, checksum="c" * 64, status="published")); db.commit()
+
+        blocked = client.post("/api/v1/applications/guided", json={"code": "blocked-app", "name": "不能创建半成品", "knowledge_mode": "spaces", "space_ids": [ready.id, empty.id]})
+        assert blocked.status_code == 409
+        assert "未加工空间" in blocked.json()["detail"]
+        assert db.query(KnowledgeProduct).count() == 0
+
+        created = client.post("/api/v1/applications/guided", json={"code": "guided-app", "name": "空间直连应用", "knowledge_mode": "spaces", "space_ids": [ready.id]})
+        assert created.status_code == 200, created.text
+        body = created.json()
+        assert body["knowledge_product"]["space_ids"] == [ready.id]
+        assert body["knowledge_product_release"]["version"] == 1
+        product_id = body["knowledge_product"]["id"]
+        assert db.query(KnowledgeProductAlias).filter_by(product_id=product_id, alias="production").one().product_release_id == body["knowledge_product_release"]["id"]
+        grant = db.query(ApplicationGrant).filter_by(application_id=body["application"]["id"]).one()
+        assert (grant.resource_type, grant.resource_id, grant.permission, grant.effect) == ("knowledge_product", product_id, "read", "allow")
+
+
+def test_guided_application_can_use_existing_supply_or_defer_it() -> None:
+    with application_client() as (client, db):
+        product = client.post("/api/v1/knowledge-products", json={"code": "existing-supply", "name": "已有供给"}).json()
+        existing = client.post("/api/v1/applications/guided", json={"code": "existing-app", "name": "使用已有供给", "knowledge_mode": "existing", "knowledge_product_id": product["id"]})
+        assert existing.status_code == 200, existing.text
+        assert existing.json()["knowledge_product"]["id"] == product["id"]
+        assert db.query(ApplicationGrant).filter_by(application_id=existing.json()["application"]["id"], resource_id=product["id"]).count() == 1
+        later = client.post("/api/v1/applications/guided", json={"code": "later-app", "name": "稍后配置", "knowledge_mode": "later"})
+        assert later.status_code == 200, later.text
+        assert later.json()["knowledge_product"] is None
+        assert db.query(ApplicationGrant).filter_by(application_id=later.json()["application"]["id"]).count() == 0
 
 
 def test_product_release_scenario_version_and_application_runtime_are_linked() -> None:

@@ -1399,9 +1399,31 @@ function journeyCard(number,title,description,done,detail,action){
   return `<article class="application-journey-card ${done?'done':'pending'}"><i>${done?'✓':number}</i><div><span>${done?'已完成':'待完成'}</span><h4>${title}</h4><p>${description}</p><small>${esc(detail)}</small></div>${action||''}</article>`;
 }
 
+function applicationKnowledgeChoice(products,spaceReadiness){
+  const supplies=products.map(item=>[item.id,`${item.name} · ${item.space_ids?.length||0} 个空间${item.aliases?.production?' · 已有正式版本':' · 尚未设置正式版本'}`]);
+  const spaces=state.spaces.map(space=>{const ready=spaceReadiness[space.id];return `<label class="check application-space-choice ${ready?'':'unavailable'}"><input type="checkbox" name="application_space" value="${esc(space.id)}" ${ready?'':'disabled'}><span><b>${esc(space.name)}</b><small>${ready?'已有可固定的知识版本':'尚无已发布知识版本，请先完成知识加工'}</small></span></label>`}).join('');
+  return `<section class="application-knowledge-choice"><div class="panel-heading"><div><b>这个应用使用哪些知识？</b><small>可以直接选择空间，系统会自动固定版本；以后空间更新不会静默改变应用。</small></div></div><div class="application-knowledge-modes"><label class="check"><input type="radio" name="knowledge_mode" value="spaces" checked>直接选择知识空间</label><label class="check"><input type="radio" name="knowledge_mode" value="existing">使用已有知识供给</label><label class="check"><input type="radio" name="knowledge_mode" value="later">稍后配置</label></div><div data-knowledge-mode="spaces"><div class="choice-grid application-space-grid">${spaces||'<span>暂无可访问的知识空间</span>'}</div><small>列表展示当前账号有读取权限的全部空间；未发布知识版本的空间会明确标记且暂不可选择。</small></div><div data-knowledge-mode="existing" class="hidden">${selectField('knowledge_product_id','已有知识供给',supplies,'',supplies.length?'':'disabled')}<small>${supplies.length?'选择后会立即关联到新应用。':'当前没有可用知识供给，可改为直接选择空间。'}</small></div><div data-knowledge-mode="later" class="hidden"><div class="inline-info">只创建应用基本信息，稍后仍可在上线流程中配置知识供给。</div></div></section>`;
+}
+
 async function editBusinessApplication(x){
-  await refreshLookups();
-  const ok=await modal(x?'编辑应用':'创建业务应用',applicationForm(x),async d=>{if(x)delete d.code;const saved=await api(x?`/applications/${x.id}`:'/applications',{method:x?'PUT':'POST',body:d});if(!x)state.applicationSelectedId=saved.id},x?'保存':'创建应用');
+  await refreshLookups({force:true});
+  const products=x?[]:await api('/knowledge-products');
+  const readiness={};
+  if(!x)await Promise.all(state.spaces.map(async space=>{try{const releases=await api(`/knowledge/releases?space_id=${encodeURIComponent(space.id)}`);readiness[space.id]=(releases.knowledge||[]).some(item=>item.status==='published')}catch{readiness[space.id]=false}}));
+  const body=applicationForm(x)+(x?'':applicationKnowledgeChoice(products,readiness));
+  const ok=await modal(x?'编辑应用':'创建业务应用',body,async(d,form)=>{
+    if(x){delete d.code;await api(`/applications/${x.id}`,{method:'PUT',body:d});return}
+    d.space_ids=[...form.querySelectorAll('[name=application_space]:checked')].map(el=>el.value);
+    delete d.application_space;
+    if(d.knowledge_mode==='spaces'&&!d.space_ids.length)throw new Error('请至少选择一个已有知识版本的知识空间');
+    if(d.knowledge_mode==='existing'&&!d.knowledge_product_id)throw new Error('请选择已有知识供给');
+    const result=await api('/applications/guided',{method:'POST',body:d});
+    state.applicationSelectedId=result.application.id;
+  },x?'保存':'创建应用',form=>{
+    if(x)return;
+    const sync=()=>{const selected=form.querySelector('[name=knowledge_mode]:checked')?.value||'spaces';form.querySelectorAll('[data-knowledge-mode]').forEach(section=>section.classList.toggle('hidden',section.dataset.knowledgeMode!==selected))};
+    form.querySelectorAll('[name=knowledge_mode]').forEach(input=>input.onchange=sync);sync();
+  });
   if(ok){toast('应用已保存');renderApplicationWorkbench()}
 }
 

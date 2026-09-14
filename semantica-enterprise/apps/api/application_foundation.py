@@ -19,6 +19,7 @@ from apps.api.application_schemas import (
     CredentialCreate,
     CredentialTokenRequest,
     GrantCreate,
+    GuidedApplicationCreate,
     KnowledgeProductCreate,
     KnowledgeProductUpdate,
     ProductAliasMove,
@@ -226,6 +227,99 @@ def create_application(
     _commit(db, "应用编码已存在")
     db.refresh(row)
     return serialize_row(row)
+
+
+@router.post("/applications/guided")
+def create_application_guided(
+    payload: GuidedApplicationCreate,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Create an application and its first knowledge boundary in one transaction."""
+    owner_id = payload.owner_id or admin.id
+    if not admin.is_admin and owner_id != admin.id:
+        raise HTTPException(status_code=403, detail="只能将应用负责人设置为当前用户")
+    _validate_owner(db, admin.tenant_id, owner_id)
+    _validate_org(db, admin.tenant_id, payload.org_unit_id)
+    if db.scalar(select(Application.id).where(Application.tenant_id == admin.tenant_id, Application.code == payload.code)):
+        raise HTTPException(status_code=409, detail="应用编码已存在")
+
+    product = None
+    release = None
+    if payload.knowledge_mode == "existing":
+        product = _must_owned(db, KnowledgeProduct, payload.knowledge_product_id, admin, "知识供给")
+        if not product.enabled or product.status == "retired":
+            raise HTTPException(status_code=409, detail="所选知识供给当前不可使用")
+    elif payload.knowledge_mode == "spaces":
+        knowledge_releases: list[KnowledgeRelease] = []
+        unavailable: list[str] = []
+        for space_id in payload.space_ids:
+            space = _must_tenant(db, KnowledgeSpace, space_id, admin.tenant_id, "知识空间")
+            if not has_space_permission(db, admin, space_id, "read"):
+                raise HTTPException(status_code=403, detail="包含无权读取的知识空间")
+            current = db.scalar(select(KnowledgeRelease).where(
+                KnowledgeRelease.tenant_id == admin.tenant_id,
+                KnowledgeRelease.space_id == space_id,
+                KnowledgeRelease.status == "published",
+                _active(KnowledgeRelease),
+            ).order_by(KnowledgeRelease.release_number.desc()))
+            if current is None:
+                unavailable.append(space.name)
+            else:
+                knowledge_releases.append(current)
+        if unavailable:
+            raise HTTPException(status_code=409, detail=f"以下知识空间尚无已发布知识版本：{'、'.join(unavailable)}")
+        product_code = f"{payload.code[:88]}-supply"
+        if db.scalar(select(KnowledgeProduct.id).where(KnowledgeProduct.tenant_id == admin.tenant_id, KnowledgeProduct.code == product_code)):
+            raise HTTPException(status_code=409, detail="自动生成的知识供给编码已存在，请改用已有知识供给或更换应用编码")
+        product = KnowledgeProduct(
+            tenant_id=admin.tenant_id, owner_id=owner_id, code=product_code,
+            name=f"{payload.name}·知识供给", description=f"由应用“{payload.name}”创建并固定的知识范围",
+            status="active", enabled=True, config={"created_from": "application_guided"},
+        )
+        db.add(product)
+        db.flush()
+        for ordinal, item in enumerate(knowledge_releases):
+            db.add(KnowledgeProductSpace(product_id=product.id, tenant_id=admin.tenant_id, space_id=item.space_id, sort_order=ordinal))
+        manifest = {
+            "product_code": product.code, "version": 1, "note": "创建应用时固定的首个知识版本",
+            "knowledge_releases": [{"space_id": item.space_id, "knowledge_release_id": item.id, "checksum": item.checksum} for item in knowledge_releases],
+        }
+        release = KnowledgeProductRelease(
+            product_id=product.id, tenant_id=admin.tenant_id, version=1, manifest=manifest,
+            checksum=_canonical_checksum(manifest), status="published", created_by=admin.id,
+            published_at=datetime.now(timezone.utc),
+        )
+        db.add(release)
+        db.flush()
+        for item in knowledge_releases:
+            db.add(KnowledgeProductReleaseItem(
+                product_release_id=release.id, tenant_id=admin.tenant_id, space_id=item.space_id,
+                knowledge_release_id=item.id, checksum=item.checksum,
+            ))
+        db.add(KnowledgeProductAlias(
+            product_id=product.id, tenant_id=admin.tenant_id, alias="production",
+            product_release_id=release.id, moved_by=admin.id,
+        ))
+        audit(db, admin.tenant_id, admin.id, "knowledge_product.create_from_application", "knowledge_product", product.id, {"space_count": len(knowledge_releases)})
+
+    app_values = payload.model_dump(exclude={"owner_id", "knowledge_mode", "knowledge_product_id", "space_ids"})
+    row = Application(tenant_id=admin.tenant_id, owner_id=owner_id, **app_values)
+    db.add(row)
+    db.flush()
+    if product is not None:
+        db.add(ApplicationGrant(
+            application_id=row.id, tenant_id=admin.tenant_id, resource_type="knowledge_product",
+            resource_id=product.id, permission="read", effect="allow",
+        ))
+    audit(db, admin.tenant_id, admin.id, "application.create_guided", "application", row.id, {"knowledge_mode": payload.knowledge_mode, "knowledge_product_id": product.id if product else None})
+    _commit(db, "应用或知识供给编码已存在")
+    db.refresh(row)
+    return {
+        "application": serialize_row(row),
+        "knowledge_product": _product_view(db, product) if product else None,
+        "knowledge_product_release": serialize_row(release) if release else None,
+    }
 
 
 @router.get("/applications/{row_id}")

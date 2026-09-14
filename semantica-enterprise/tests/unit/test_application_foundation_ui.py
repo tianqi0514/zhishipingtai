@@ -32,6 +32,20 @@ def test_application_workbench_uses_business_journey_and_readiness() -> None:
     assert "renderApplicationAccess" in APP
 
 
+def test_application_creation_exposes_all_authorized_spaces_and_supply_modes() -> None:
+    for phrase in (
+        "这个应用使用哪些知识？",
+        "直接选择知识空间",
+        "使用已有知识供给",
+        "稍后配置",
+        "尚无已发布知识版本，请先完成知识加工",
+        "/applications/guided",
+    ):
+        assert phrase in APP
+    assert "state.spaces.map" in APP
+    assert "/knowledge/releases?space_id=" in APP
+
+
 def test_application_builder_keeps_technical_details_on_demand() -> None:
     assert "功能说明" in APP
     assert "技术选项" in APP
