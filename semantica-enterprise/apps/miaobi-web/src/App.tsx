@@ -32,8 +32,7 @@ import type { MarkdownSuggestionInsertion } from './editor/MiaobiEditor';
 import { ScenarioConfigDialog } from './components/ScenarioConfigDialog';
 import { ChapterEvidencePanel, ParagraphEvidenceList } from './components/ChapterEvidence';
 
-type Product = { id: string; name: string; code: string };
-type Release = { id: string; version: number; status: string };
+type WritingSpace = { id: string; name: string; code: string; ready: boolean; knowledge_version?: number };
 type User = { id: string; display_name: string; is_admin: boolean };
 type Tab = 'task' | 'writing' | 'overview' | 'facts' | 'reasoning' | 'plans' | 'review';
 type EditorInsertion = PlateNode | PlateNode[] | MarkdownSuggestionInsertion;
@@ -390,7 +389,7 @@ function MaterialsPanel({ project, materials, knowledgeContext, onChanged, onErr
       <div className="card-toolbar"><div><span className="eyebrow">本报告使用的材料</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><a className="secondary" href="/#documents" onClick={prepareZhikuUpload} title={knowledgeContext?.spaces[0] ? `上传到 ${knowledgeContext.spaces[0].name}` : '上传到传神智库'}><Upload size={15} />上传到智库</a><button type="button" className="primary compact" onClick={() => void loadCandidates()}>从智库选择</button></div></div>
       {materials.length ? <div className="material-list">{materials.map((material) => <article key={material.id}><FileText size={20} /><div><b>{material.document.title}</b><small>{material.version.filename} · 固定 V{material.version.version_number}{material.current_document_version ? '' : ' · 历史版本'}</small></div><select aria-label={`设置${material.document.title}的材料角色`} value={material.material_role} onChange={(event) => void updateRole(material, event.target.value as ProjectMaterial['material_role'])}>{Object.entries(MATERIAL_ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><button type="button" className="icon-button danger-icon" title="从任务移除" onClick={() => void remove(material)}><Trash2 size={16} /></button></article>)}</div> : <div className="material-empty"><FileText /><div><b>先选择本次报告真正使用的材料</b><span>资料上传、解析和治理仍在传神智库完成；加入后，妙笔检索会限定在这些固定版本内。</span></div></div>}
     </section>
-    {open && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="从智库选择材料"><div className="dialog-head"><div><span className="eyebrow">固定材料版本</span><h2>从智库选择</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setOpen(false)}>×</button></div><label>材料<select autoFocus value={selectedVersion} onChange={(event) => setSelectedVersion(event.target.value)}><option value="">请选择已完成加工的材料</option>{candidates.map((item) => <option key={item.version_id} value={item.version_id} disabled={item.already_linked || !['processed', 'published', 'ready'].includes(item.processing_status)}>{item.title} · V{item.version_number}{item.already_linked ? '（已加入）' : !['processed', 'published', 'ready'].includes(item.processing_status) ? '（加工中）' : ''}</option>)}</select></label><label>在报告中的用途<select value={role} onChange={(event) => setRole(event.target.value as ProjectMaterial['material_role'])}>{Object.entries(MATERIAL_ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><p className="field-help">选择的是文档固定版本。后续智库出现新版本时，系统不会静默替换本报告依据。</p>{!candidates.length && <p className="field-help warning-text">当前知识产品没有可选择的文档，请先到传神智库上传并发布知识版本。</p>}<div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setOpen(false)}>取消</button><button type="button" className="primary" disabled={submitting || !selectedVersion} onClick={() => void add()}>{submitting ? '加入中…' : '加入当前任务'}</button></div></section></div>}
+    {open && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="从智库选择材料"><div className="dialog-head"><div><span className="eyebrow">固定材料版本</span><h2>从智库选择</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setOpen(false)}>×</button></div><label>材料<select autoFocus value={selectedVersion} onChange={(event) => setSelectedVersion(event.target.value)}><option value="">请选择已完成加工的材料</option>{candidates.map((item) => <option key={item.version_id} value={item.version_id} disabled={item.already_linked || !['processed', 'published', 'ready'].includes(item.processing_status)}>{item.title} · V{item.version_number}{item.already_linked ? '（已加入）' : !['processed', 'published', 'ready'].includes(item.processing_status) ? '（加工中）' : ''}</option>)}</select></label><label>在报告中的用途<select value={role} onChange={(event) => setRole(event.target.value as ProjectMaterial['material_role'])}>{Object.entries(MATERIAL_ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><p className="field-help">选择的是文档固定版本。后续智库出现新版本时，系统不会静默替换本报告依据。</p>{!candidates.length && <p className="field-help warning-text">当前知识空间没有可选择的文档，请先到传神智库上传并完成知识加工。</p>}<div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setOpen(false)}>取消</button><button type="button" className="primary" disabled={submitting || !selectedVersion} onClick={() => void add()}>{submitting ? '加入中…' : '加入当前任务'}</button></div></section></div>}
   </>;
 }
 
@@ -542,7 +541,7 @@ function Overview({ project, facts, plans, documents, knowledgeContext, onChange
     try {
       const releases = await api<Array<{ id: string; version: number; status: string }>>(`/knowledge-products/${knowledgeContext.product.id}/releases`);
       const latest = releases.filter((item) => item.status === 'published').sort((left, right) => right.version - left.version)[0];
-      if (!latest) throw new Error('当前知识产品没有可用的已发布版本');
+      if (!latest) throw new Error('当前知识空间还没有可用的知识版本');
       await api(`/writing/projects/${project.id}/knowledge-release`, { method: 'POST', body: { knowledge_product_release_id: latest.id, reason: '在妙笔任务概览中采用最新知识基线' } });
       await onChanged();
     } finally { setRebasing(false); }
@@ -550,10 +549,10 @@ function Overview({ project, facts, plans, documents, knowledgeContext, onChange
   return <div className="overview-grid">
     <section className="hero-card"><div><span className="eyebrow">当前进度</span><h2>{steps.find((item) => !item.done)?.title || '可以进入审校发布'}</h2><p>系统不会替您跳过缺失事实、口径冲突和人工确认。</p></div><button type="button" className="primary" onClick={() => onContinue(steps.find((item) => !item.done)?.target || 'review')}>继续处理<ChevronRight size={17} /></button></section>
     {knowledgeContext && <section className="knowledge-context-card" aria-label="传神智库知识基线">
-      <div className="knowledge-context-head"><div><span className="eyebrow">来自传神智库</span><h2>{knowledgeContext.product.name} · Release V{knowledgeContext.release.version}</h2><p>妙笔检索、推演和正文依据固定使用这一版知识，生成过程不会被后台新数据静默改变。</p></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前最新版' : '有新版本'}</span></div>
+      <div className="knowledge-context-head"><div><span className="eyebrow">当前知识空间</span><h2>{knowledgeContext.spaces.map((space) => space.name).join('、')}</h2><p>妙笔使用项目创建时的知识版本，保证正文引用可以持续核验。</p></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前最新版' : '有新版本'}</span></div>
       <div className="knowledge-context-metrics"><Metric label="来源文档" value={String(knowledgeContext.document_count)} /><Metric label="知识片段" value={String(knowledgeContext.chunk_count)} /><Metric label="图谱对象" value={String(knowledgeContext.entity_count)} /><Metric label="知识关系" value={String(knowledgeContext.fact_count)} /></div>
       <div className="knowledge-space-list">{knowledgeContext.spaces.map((space) => <article key={space.id}><div><b>{space.name}</b><small>知识版本 V{space.knowledge_release_number} · {space.document_count} 份文档 · {space.chunk_count} 个片段</small></div><div className="knowledge-channel-tags"><span className={space.vector_available ? 'ready' : 'missing'}>全文/向量{space.vector_available ? '可用' : '未发布'}</span><span className={space.graph_available ? 'ready' : 'missing'}>图谱{space.graph_available ? '可用' : '未发布'}</span></div><div className="knowledge-context-actions"><button type="button" onClick={() => openSpace(space.id, '#documents')}>查看材料</button><button type="button" onClick={() => openSpace(space.id, '#graph')}>查看图谱</button></div></article>)}</div>
-      <div className="knowledge-context-foot"><span>材料接入与治理在传神智库完成；妙笔消费已发布的知识版本，并把引用、测算和推演结果写入正文。</span><div><a className="secondary" href="/#knowledge-products">管理知识产品</a>{!knowledgeContext.release.is_latest && <button type="button" className="primary compact" disabled={rebasing} onClick={() => void rebase()}>{rebasing ? '切换中…' : '采用最新知识'}</button>}</div></div>
+      <div className="knowledge-context-foot"><span>材料接入、解析和治理仍在传神智库完成；妙笔直接使用所选知识空间。</span><div><a className="secondary" href="/#spaces">查看知识空间</a>{!knowledgeContext.release.is_latest && <button type="button" className="primary compact" disabled={rebasing} onClick={() => void rebase()}>{rebasing ? '切换中…' : '采用最新知识'}</button>}</div></div>
     </section>}
     <section className="step-list">{steps.map((step, index) => <button type="button" key={step.title} onClick={() => onContinue(step.target)}><span className={step.done ? 'step done' : 'step'}>{step.done ? <CheckCircle2 size={18} /> : index + 1}</span><span><b>{step.title}</b><small>{step.detail}</small></span><ChevronRight size={17} /></button>)}</section>
     <section className="metrics"><Metric label="已核验事实" value={`${verified}/${facts.length}`} /><Metric label="备选方案" value={String(plans.length)} /><Metric label="文稿版本" value={String(documents.length)} /><Metric label="待确认" value={String(project.pending_gates || 0)} /></section>
@@ -1116,7 +1115,7 @@ function EvidencePanel({ project, document, selectedBinding, onInsert, onError }
     finally { setInserting(''); }
   };
 
-  return <div className="assistant-content"><h3>引用依据</h3>{document && <ParagraphEvidenceList documentId={document.id} versionId={document.current_version_id || undefined} projectId={project.id} />}{selectedBinding && <BindingInspector binding={selectedBinding} detail={fragment} />}<p>检索范围固定为当前方案任务锁定的知识产品版本。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{cleanEvidenceText(item.snippet || item.text || '无摘要')}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前锁定版本中没有检索到依据。</div>}</div></div>;
+  return <div className="assistant-content"><h3>引用依据</h3>{document && <ParagraphEvidenceList documentId={document.id} versionId={document.current_version_id || undefined} projectId={project.id} />}{selectedBinding && <BindingInspector binding={selectedBinding} detail={fragment} />}<p>检索范围固定为新建项目时选择的知识空间，保证报告前后依据一致。</p><div className="evidence-search"><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="检索本章所需依据" /><button type="button" disabled={!query.trim() || searching} onClick={() => void search()}>{searching ? '检索中…' : '检索'}</button></div>{result?.warnings?.map((warning) => <div className="warning-mini" key={warning}>{warning}</div>)}<div className="evidence-list">{result?.items.map((item) => <article key={item.chunk_id}><div><span className="rank">{item.rank}</span><b>{item.title}</b></div><p>{cleanEvidenceText(item.snippet || item.text || '无摘要')}</p><small>{item.page_number ? `第 ${item.page_number} 页 · ` : ''}{item.channels.join(' / ')} · 融合分 {Number(item.fused_score || 0).toFixed(4)}</small><button type="button" disabled={!document || !!inserting} onClick={() => void insert(item)}>{!document ? '请先创建文稿' : inserting === item.chunk_id ? '插入中…' : '插入正文'}</button></article>)}{result && !result.items.length && <div className="empty-mini">当前知识空间中没有检索到依据。</div>}</div></div>;
 }
 
 function BindingInspector({ binding, detail }: { binding: Record<string, unknown>; detail?: Record<string, unknown> | null }) {
@@ -1140,43 +1139,37 @@ function EmptyAction({ title, detail, action, onClick }: { title: string; detail
 
 function CreateProjectDialog({ onClose, onCreated, onError }: { onClose: () => void; onCreated: (project: Project) => void; onError: (message: string) => void }) {
   const [packages, setPackages] = useState<ScenarioPackage[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [releases, setReleases] = useState<Release[]>([]);
-  const [form, setForm] = useState({ name: '', code: '', scenario_version_id: '', product_id: '', release_id: '' });
+  const [spaces, setSpaces] = useState<WritingSpace[]>([]);
+  const [form, setForm] = useState({ name: '', code: '', scenario_version_id: '', space_id: '' });
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    Promise.all([api<ScenarioPackage[]>('/writing/scenario-packages'), api<Product[]>('/knowledge-products')])
-      .then(async ([scenarioRows, productRows]) => {
+    Promise.all([api<ScenarioPackage[]>('/writing/scenario-packages'), api<WritingSpace[]>('/writing/spaces')])
+      .then(async ([scenarioRows, spaceRows]) => {
         const detailed = await Promise.all(scenarioRows.map((item) => api<ScenarioPackage>(`/writing/scenario-packages/${item.id}`)));
         setPackages(detailed);
-        setProducts(productRows);
+        setSpaces(spaceRows);
         const firstVersion = detailed.find((item) => item.current_version_id)?.current_version_id || '';
-        const firstProduct = productRows[0]?.id || '';
-        setForm((current) => ({ ...current, scenario_version_id: firstVersion, product_id: firstProduct }));
-        if (firstProduct) setReleases(await api<Release[]>(`/knowledge-products/${firstProduct}/releases`));
+        const firstSpace = spaceRows.find((item) => item.ready)?.id || '';
+        setForm((current) => ({ ...current, scenario_version_id: firstVersion, space_id: firstSpace }));
       }).catch((reason) => onError(reason instanceof Error ? reason.message : '创建表单加载失败'));
   }, []);
 
   const selectedScenario = useMemo(() => packages.find((item) => item.current_version_id === form.scenario_version_id), [packages, form.scenario_version_id]);
 
-  const selectProduct = async (id: string) => {
-    setForm((current) => ({ ...current, product_id: id, release_id: '' }));
-    setReleases(await api<Release[]>(`/knowledge-products/${id}/releases`));
-  };
-
   const submit = async () => {
-    if (!form.name.trim() || !form.code.trim() || !form.scenario_version_id || !form.release_id) return onError('请完整填写任务名称、编码、场景和知识产品版本');
+    if (!form.name.trim() || !form.code.trim() || !form.scenario_version_id || !form.space_id) return onError('请填写项目名称、编码并选择知识空间');
     setSubmitting(true);
     try {
-      const project = await api<Project>('/writing/projects', { method: 'POST', body: { code: form.code, name: form.name, scenario_package_version_id: form.scenario_version_id, knowledge_product_release_id: form.release_id } });
+      const applicationId = new URLSearchParams(window.location.search).get('application_id');
+      const project = await api<Project>('/writing/projects', { method: 'POST', body: { code: form.code, name: form.name, application_id: applicationId || undefined, scenario_package_version_id: form.scenario_version_id, space_id: form.space_id } });
       onCreated(project);
     } catch (reason) {
       onError(reason instanceof ApiError ? reason.message : '创建方案任务失败');
     } finally { setSubmitting(false); }
   };
 
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="create-title"><div className="dialog-head"><div><span className="eyebrow">第一步</span><h2 id="create-title">创建方案任务</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><label>任务名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：积石山县地震应急处置方案" autoFocus /></label><label>任务编码<input value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-') })} placeholder="jishishan-earthquake" /></label><label>业务场景<select value={form.scenario_version_id} onChange={(event) => setForm({ ...form, scenario_version_id: event.target.value })}>{packages.filter((item) => item.current_version_id).map((item) => <option key={item.id} value={item.current_version_id}>{item.name}{item.code !== 'earthquake-response-plan' ? '（模板待业务确认）' : ''}</option>)}</select></label>{selectedScenario && <p className="field-help">{selectedScenario.description || '场景包锁定输入、规则、公式、工具和输出结构。'}</p>}<label>知识产品<select value={form.product_id} onChange={(event) => void selectProduct(event.target.value)}>{products.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>知识产品版本<select value={form.release_id} onChange={(event) => setForm({ ...form, release_id: event.target.value })}><option value="">请选择已发布版本</option>{releases.filter((item) => item.status === 'published').map((item) => <option key={item.id} value={item.id}>Release {item.version}</option>)}</select></label><div className="dialog-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button type="button" className="primary" disabled={submitting} onClick={() => void submit()}>{submitting ? '创建中…' : '创建并进入任务'}</button></div></section></div>;
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="dialog" role="dialog" aria-modal="true" aria-labelledby="create-title"><div className="dialog-head"><div><span className="eyebrow">选择空间 → 新建项目</span><h2 id="create-title">新建写作项目</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><label>知识空间<select value={form.space_id} onChange={(event) => setForm({ ...form, space_id: event.target.value })}><option value="">请选择已完成知识加工的空间</option>{spaces.map((item) => <option key={item.id} value={item.id} disabled={!item.ready}>{item.name}{item.ready ? ` · 知识版本 V${item.knowledge_version}` : '（尚未完成加工）'}</option>)}</select></label><label>项目名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：积石山县地震应急处置方案" autoFocus /></label><label>项目编码<input value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, '-') })} placeholder="jishishan-earthquake" /></label><label>写作模板<select value={form.scenario_version_id} onChange={(event) => setForm({ ...form, scenario_version_id: event.target.value })}>{packages.filter((item) => item.current_version_id).map((item) => <option key={item.id} value={item.current_version_id}>{item.name}{item.code !== 'earthquake-response-plan' ? '（模板待业务确认）' : ''}</option>)}</select></label>{selectedScenario && <p className="field-help">{selectedScenario.description || '模板定义报告结构、需要确认的输入和可用推演工具。'}</p>}<div className="dialog-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button type="button" className="primary" disabled={submitting} onClick={() => void submit()}>{submitting ? '创建中…' : '新建项目'}</button></div></section></div>;
 }
 
 function statusLabel(value: string) { return ({ draft: '准备中', preparing: '数据准备', ready: '任务已创建', reasoning: '推演中', writing: '撰写中', reviewing: '审校中', published: '已发布' } as Record<string,string>)[value] || value; }

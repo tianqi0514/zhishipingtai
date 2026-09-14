@@ -74,8 +74,10 @@ from packages.platform.models import (
     GraphRelease,
     IndexRelease,
     KnowledgeProduct,
+    KnowledgeProductAlias,
     KnowledgeProductRelease,
     KnowledgeProductReleaseItem,
+    KnowledgeProductSpace,
     KnowledgeRelease,
     KnowledgeSpace,
     Document,
@@ -220,9 +222,9 @@ def _writing_session(
 
 
 def _release_for_user(db: Session, release_id: str, user: User) -> KnowledgeProductRelease:
-    release = _tenant_row(db, KnowledgeProductRelease, release_id, user.tenant_id, "知识产品版本")
+    release = _tenant_row(db, KnowledgeProductRelease, release_id, user.tenant_id, "知识空间版本")
     if release.status != "published":
-        raise HTTPException(status_code=409, detail="方案任务只能绑定已发布的知识产品版本")
+        raise HTTPException(status_code=409, detail="项目只能使用已完成加工的知识空间")
     items = list(
         db.scalars(
             select(KnowledgeProductReleaseItem).where(
@@ -232,9 +234,9 @@ def _release_for_user(db: Session, release_id: str, user: User) -> KnowledgeProd
         )
     )
     if not items:
-        raise HTTPException(status_code=409, detail="知识产品版本没有可用知识空间")
+        raise HTTPException(status_code=409, detail="知识空间没有可用的知识版本")
     if any(not has_space_permission(db, user, item.space_id, "read") for item in items):
-        raise HTTPException(status_code=403, detail="无权读取知识产品版本包含的全部知识空间")
+        raise HTTPException(status_code=403, detail="无权读取项目使用的知识空间")
     return release
 
 
@@ -255,6 +257,111 @@ def _release_scope(
     return [item.space_id for item in items], {
         item.space_id: item.knowledge_release_id for item in items
     }
+
+
+def _release_for_space(db: Session, space_id: str, user: User) -> KnowledgeProductRelease:
+    """Resolve a space to an immutable internal snapshot for writing.
+
+    Users work with knowledge spaces; the existing product-release tables stay
+    behind the API to preserve citation reproducibility for historical reports.
+    """
+    space = _tenant_row(db, KnowledgeSpace, space_id, user.tenant_id, "知识空间")
+    if not has_space_permission(db, user, space.id, "read"):
+        raise HTTPException(status_code=403, detail="无权读取该知识空间")
+    knowledge_release = db.scalar(
+        select(KnowledgeRelease).where(
+            KnowledgeRelease.tenant_id == user.tenant_id,
+            KnowledgeRelease.space_id == space.id,
+            KnowledgeRelease.status == "published",
+            _active(KnowledgeRelease),
+        ).order_by(KnowledgeRelease.release_number.desc())
+    )
+    if knowledge_release is None:
+        raise HTTPException(status_code=409, detail="该知识空间尚未完成知识加工")
+
+    code = f"writing-{space.id.replace('-', '')[:24]}"
+    product = db.scalar(select(KnowledgeProduct).where(
+        KnowledgeProduct.tenant_id == user.tenant_id,
+        KnowledgeProduct.code == code,
+        _active(KnowledgeProduct),
+    ))
+    if product is None:
+        product = KnowledgeProduct(
+            tenant_id=user.tenant_id,
+            code=code,
+            name=f"{space.name}·写作快照",
+            description="妙笔内部知识版本，不在业务页面展示",
+            owner_id=user.id,
+            status="active",
+            enabled=True,
+            config={"internal": True, "space_id": space.id, "purpose": "writing"},
+        )
+        db.add(product)
+        db.flush()
+        db.add(KnowledgeProductSpace(
+            product_id=product.id, tenant_id=user.tenant_id, space_id=space.id, sort_order=0
+        ))
+
+    current = db.scalar(
+        select(KnowledgeProductRelease)
+        .join(KnowledgeProductReleaseItem, KnowledgeProductReleaseItem.product_release_id == KnowledgeProductRelease.id)
+        .where(
+            KnowledgeProductRelease.product_id == product.id,
+            KnowledgeProductRelease.status == "published",
+            KnowledgeProductReleaseItem.knowledge_release_id == knowledge_release.id,
+            _active(KnowledgeProductRelease),
+            _active(KnowledgeProductReleaseItem),
+        )
+        .order_by(KnowledgeProductRelease.version.desc())
+    )
+    if current is not None:
+        return current
+
+    version = int(db.scalar(select(func.max(KnowledgeProductRelease.version)).where(
+        KnowledgeProductRelease.product_id == product.id
+    )) or 0) + 1
+    manifest = {
+        "internal": True,
+        "space_id": space.id,
+        "knowledge_release_id": knowledge_release.id,
+        "knowledge_release_checksum": knowledge_release.checksum,
+    }
+    current = KnowledgeProductRelease(
+        product_id=product.id,
+        tenant_id=user.tenant_id,
+        version=version,
+        manifest=manifest,
+        checksum=content_hash(manifest),
+        status="published",
+        created_by=user.id,
+        published_at=datetime.now(timezone.utc),
+    )
+    db.add(current)
+    db.flush()
+    db.add(KnowledgeProductReleaseItem(
+        product_release_id=current.id,
+        tenant_id=user.tenant_id,
+        space_id=space.id,
+        knowledge_release_id=knowledge_release.id,
+        checksum=knowledge_release.checksum,
+    ))
+    alias = db.scalar(select(KnowledgeProductAlias).where(
+        KnowledgeProductAlias.product_id == product.id,
+        KnowledgeProductAlias.alias == "production",
+        _active(KnowledgeProductAlias),
+    ))
+    if alias is None:
+        db.add(KnowledgeProductAlias(
+            product_id=product.id,
+            tenant_id=user.tenant_id,
+            alias="production",
+            product_release_id=current.id,
+            moved_by=user.id,
+        ))
+    else:
+        alias.product_release_id = current.id
+        alias.moved_by = user.id
+    return current
 
 
 def _scenario_contract(version: ScenarioPackageVersion) -> dict[str, Any]:
@@ -1083,6 +1190,33 @@ def save_scenario_business_config(
 # Projects, facts, gates and deterministic plans.
 
 
+@router.get("/spaces")
+def list_writing_spaces(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = list(db.scalars(select(KnowledgeSpace).where(
+        KnowledgeSpace.tenant_id == user.tenant_id,
+        KnowledgeSpace.enabled.is_(True),
+        _active(KnowledgeSpace),
+    ).order_by(KnowledgeSpace.name)))
+    result = []
+    for space in rows:
+        if not has_space_permission(db, user, space.id, "read"):
+            continue
+        release = db.scalar(select(KnowledgeRelease).where(
+            KnowledgeRelease.tenant_id == user.tenant_id,
+            KnowledgeRelease.space_id == space.id,
+            KnowledgeRelease.status == "published",
+            _active(KnowledgeRelease),
+        ).order_by(KnowledgeRelease.release_number.desc()))
+        result.append({
+            "id": space.id,
+            "name": space.name,
+            "code": space.code,
+            "ready": release is not None,
+            "knowledge_version": release.release_number if release else None,
+        })
+    return result
+
+
 @router.get("/projects")
 def list_projects(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = select(WritingProject).where(WritingProject.tenant_id == user.tenant_id, _active(WritingProject))
@@ -1106,12 +1240,18 @@ def create_project(
     )
     if version.status != "active":
         raise HTTPException(status_code=409, detail="方案任务只能使用已激活的场景包版本")
-    _release_for_user(db, payload.knowledge_product_release_id, user)
+    release = (
+        _release_for_space(db, payload.space_id, user)
+        if payload.space_id
+        else _release_for_user(db, str(payload.knowledge_product_release_id), user)
+    )
     if payload.application_id:
         application = _tenant_row(db, Application, payload.application_id, user.tenant_id, "应用")
         if not user.is_admin and application.owner_id != user.id:
             raise HTTPException(status_code=403, detail="无权将任务绑定到该应用")
-    row = WritingProject(tenant_id=user.tenant_id, owner_id=user.id, status="draft", **payload.model_dump())
+    values = payload.model_dump(exclude={"space_id"})
+    values["knowledge_product_release_id"] = release.id
+    row = WritingProject(tenant_id=user.tenant_id, owner_id=user.id, status="draft", **values)
     db.add(row)
     db.flush()
     db.add(
@@ -1261,7 +1401,7 @@ def add_project_material(
         raise HTTPException(status_code=403, detail="无权使用该材料")
     allowed_spaces, _ = _release_scope(db, project, user)
     if document.space_id not in allowed_spaces:
-        raise HTTPException(status_code=409, detail="材料不属于当前任务绑定的知识产品，请先更新知识产品范围")
+        raise HTTPException(status_code=409, detail="材料不属于当前项目选择的知识空间")
     version_id = payload.version_id or document.current_version_id
     if not version_id:
         raise HTTPException(status_code=409, detail="材料尚无可用版本")
@@ -1530,7 +1670,7 @@ def get_project_fragment(
     chunk = _tenant_row(db, Chunk, chunk_id, user.tenant_id, "知识片段")
     space_ids, _ = _release_scope(db, project, user)
     if chunk.space_id not in space_ids:
-        raise HTTPException(status_code=403, detail="知识片段超出项目知识产品范围")
+        raise HTTPException(status_code=403, detail="知识片段超出项目知识空间范围")
     document = db.get(Document, chunk.document_id)
     version = db.get(DocumentVersion, chunk.version_id)
     if document is None or version is None or document.tenant_id != user.tenant_id:
@@ -3994,7 +4134,7 @@ def upsert_binding(
 ):
     document, project = _document(db, document_id, user, "editor")
     if payload.knowledge_product_release_id and payload.knowledge_product_release_id != project.knowledge_product_release_id:
-        raise HTTPException(status_code=409, detail="引用必须属于方案任务锁定的知识产品版本")
+        raise HTTPException(status_code=409, detail="引用必须属于项目选择的知识空间")
     if payload.block_type == "knowledge_citation":
         query_run = _tenant_row(db, QueryRun, str(payload.query_run_id), user.tenant_id, "检索记录")
         query_policy = dict(query_run.retrieval_policy or {})
