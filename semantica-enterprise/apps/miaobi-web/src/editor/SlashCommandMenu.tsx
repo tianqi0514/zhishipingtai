@@ -86,7 +86,7 @@ const GROUPS: SlashGroup[] = [
     label: '妙笔与知识',
     items: [
       { value: 'assistant', label: '妙笔助手', description: '用当前知识版本生成或修订内容', keywords: ['ai', '写作', '生成'], icon: <Sparkles />, run: (editor) => runCommand(editor, 'assistant') },
-      { value: 'evidence', label: '插入知识依据', description: '从当前知识产品版本检索并绑定来源', keywords: ['引用', '知识', 'citation'], icon: <BookOpenCheck />, run: (editor) => runCommand(editor, 'evidence') },
+      { value: 'evidence', label: '插入知识依据', description: '从当前知识空间检索并绑定来源', keywords: ['引用', '知识', 'citation'], icon: <BookOpenCheck />, run: (editor) => runCommand(editor, 'evidence') },
     ],
   },
   {

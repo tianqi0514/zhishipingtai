@@ -264,6 +264,38 @@ def test_project_knowledge_context_exposes_locked_zhiku_release() -> None:
         assert context["spaces"][0]["vector_available"] is True
 
 
+def test_writing_project_is_created_from_a_knowledge_space() -> None:
+    with writing_client() as (client, db, release):
+        seeded = _create_project(client, release.id)
+        spaces = client.get("/api/v1/writing/spaces")
+        assert spaces.status_code == 200, spaces.text
+        space_id = db.query(KnowledgeProductReleaseItem).filter_by(product_release_id=release.id).one().space_id
+        assert spaces.json() == [
+            {
+                "id": space_id,
+                "name": "应急知识空间",
+                "code": "emergency",
+                "ready": True,
+                "knowledge_version": 1,
+            }
+        ]
+        created = client.post(
+            "/api/v1/writing/projects",
+            json={
+                "code": "space-first-writing-project",
+                "name": "从知识空间创建的写作项目",
+                "scenario_package_version_id": seeded["scenario_package_version_id"],
+                "space_id": spaces.json()[0]["id"],
+            },
+        )
+        assert created.status_code == 200, created.text
+        context = client.get(
+            f"/api/v1/writing/projects/{created.json()['id']}/knowledge-context"
+        )
+        assert context.status_code == 200, context.text
+        assert [item["id"] for item in context.json()["spaces"]] == [spaces.json()[0]["id"]]
+
+
 def test_project_materials_pin_versions_and_removal_preserves_zhiku_document() -> None:
     with writing_client() as (client, db, release):
         project = _create_project(client, release.id)

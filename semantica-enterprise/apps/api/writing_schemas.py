@@ -59,10 +59,19 @@ class WritingProjectCreate(StrictModel):
     name: str = Field(min_length=1, max_length=300)
     application_id: str | None = None
     scenario_package_version_id: str
-    knowledge_product_release_id: str
+    # The business UI selects a knowledge space.  The release id remains an
+    # internal/backward-compatible option for existing API clients.
+    space_id: str | None = None
+    knowledge_product_release_id: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
 
     _normalize_code = field_validator("code")(_code)
+
+    @model_validator(mode="after")
+    def validate_knowledge_scope(self):
+        if not self.space_id and not self.knowledge_product_release_id:
+            raise ValueError("请选择知识空间")
+        return self
 
 
 class WritingProjectUpdate(StrictModel):
