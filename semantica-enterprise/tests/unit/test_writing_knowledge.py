@@ -215,6 +215,25 @@ def test_formal_export_does_not_invent_subtitle_or_platform_opening(tmp_path):
     assert [p.text for p in Document(target).paragraphs if p.text] == ["供水保障报告", "先核实库存。"]
 
 
+def test_confirmed_multilevel_sample_numbers_real_docx_headings_without_duplicate_header(tmp_path):
+    from docx import Document
+    from packages.platform.writing_export import build_docx
+    target = tmp_path / "numbered.docx"
+    build_docx(target, title="地震应急预案（项目讨论稿）", content=[
+        {"type": "h1", "children": [{"text": "地震应急预案（项目讨论稿）"}]},
+        {"type": "h2", "children": [{"text": "总则"}]},
+        {"type": "h3", "children": [{"text": "指导思想"}]},
+        {"type": "p", "children": [{"text": "以正式印发文件为准。"}]},
+        {"type": "h2", "children": [{"text": "组织体系"}]},
+    ], audit_summary={}, sample_profile={"style": {"heading_numbering": "multilevel"}})
+    exported = Document(target)
+    assert [p.text for p in exported.paragraphs if p.text] == [
+        "地震应急预案（项目讨论稿）", "一、总则", "（一）指导思想", "以正式印发文件为准。", "二、组织体系",
+    ]
+    assert not any(paragraph.text for paragraph in exported.sections[0].header.paragraphs)
+    assert exported.paragraphs[1].runs[-1].font.size.pt == 14
+
+
 def test_export_uses_current_block_identity_not_reused_historical_citation_number(tmp_path):
     from docx import Document
     from packages.platform.writing_export import bindings_for_content, build_evidence_docx

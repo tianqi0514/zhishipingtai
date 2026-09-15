@@ -133,7 +133,7 @@ export type WritingDocument = {
   document_type?: string;
   purpose?: string;
   audience?: string;
-  applicability?: { region?: string; organization?: string; subject?: string; time_range?: string };
+  applicability?: { region?: string; organization?: string; subject?: string; time_range?: string; sample_profile?: WritingSampleProfile };
   writing_requirements?: string;
   adopted_material_ids?: string[] | null;
   scenario_package_version_id?: string;
@@ -148,6 +148,15 @@ export type WritingDocument = {
   };
 };
 
+export type WritingSampleProfile = {
+  source_version_id: string; source_sha256: string; material_id?: string;
+  status: 'draft' | 'confirmed'; genre: string; profile_hash?: string;
+  chapters: Array<{ key: string; title: string; instruction: string; subheadings?: string[]; citation_required?: boolean }>;
+  attachments?: Array<{ number: string; title: string }>;
+  style?: { register?: string; heading_numbering?: string; reference_characters?: number; notice_requires_authorized_signoff?: boolean };
+  indicator_candidates?: unknown[]; formula_candidates?: unknown[]; warnings?: string[];
+};
+
 export type WritingGenerationRun = {
   id: string;
   project_id: string;
@@ -155,12 +164,15 @@ export type WritingGenerationRun = {
   status: 'queued' | 'running' | 'awaiting_agent' | 'agent_running' | 'completed' | 'agent_failed' | 'quality_failed' | 'cancelled';
   stage: string;
   progress: number;
+  section_plan?: Array<{ key: string; title: string; subheadings?: string[] }>;
   toolbox_result?: {
     criteria?: { items?: Fact[] };
     reasoning?: { conclusions?: Fact[]; requires_human_confirmation?: boolean };
     computations?: Array<ComputationRun & { generated_fact?: Fact }>;
     plans?: AlternativePlan[];
     selected_plan_id?: string;
+    agent_section_parts?: Record<string, { section: { title: string; content_nodes: Array<{ type: string; text?: string }> }; assistant_message_id: string }>;
+    section_revision_history?: Array<{ section_key: string; previous_characters: number; target_characters: number; attempt: number }>;
   };
   quality_report?: {
     ok?: boolean;
@@ -181,6 +193,12 @@ export type WritingInputChange = {
   impact: {
     calculations?: Array<{ result_key: string; label: string; old_value: number; new_value: number; unit?: string }>;
     report_blocks?: Array<{ block_id: string; section: string }>;
+    content_proposals?: Array<{
+      block_id: string; section: string; kind?: string; selectable: boolean;
+      old_text?: string; new_text?: string; reason?: string;
+    }>;
+    accepted_block_ids?: string[];
+    pending_review_block_ids?: string[];
     unaffected_results?: Array<{ result_key: string; label: string; value: number; unit?: string }>;
     automatic_overwrite?: boolean;
   };

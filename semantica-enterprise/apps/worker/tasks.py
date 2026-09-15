@@ -2629,7 +2629,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     graph_release=graph_release,
                     index_release=release,
                 )
-                if graph_release and release
+                if release
                 else None
             )
             for row in chunks:

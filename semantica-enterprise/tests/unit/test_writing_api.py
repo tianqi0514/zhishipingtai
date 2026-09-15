@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -244,6 +245,36 @@ def _create_project(client: TestClient, release_id: str) -> dict:
     )
     assert project.status_code == 200, project.text
     return project.json()
+
+
+def test_vector_only_space_can_start_writing_from_real_index_snapshot() -> None:
+    with writing_client() as (client, db, _):
+        space = db.scalar(select(KnowledgeSpace))
+        first = db.scalar(select(IndexRelease).where(IndexRelease.space_id == space.id))
+        db.add(IndexRelease(
+            tenant_id=space.tenant_id, space_id=space.id, release_number=2,
+            opensearch_index="miaobi_vector_only_index_2",
+            qdrant_collection="miaobi_vector_only_vectors_2",
+            graph_release_id=None, model_config_id=first.model_config_id,
+            embedding_dimension=first.embedding_dimension, document_count=4,
+            chunk_count=20, status="published", published_at=datetime.now(timezone.utc),
+        ))
+        db.commit()
+        response = client.post("/api/v1/writing/projects", json={
+            "code": "vector-only-writing", "name": "仅全文向量写作测试",
+            "space_id": space.id,
+        })
+        assert response.status_code == 200, response.text
+        release = db.scalar(select(KnowledgeRelease).where(
+            KnowledgeRelease.space_id == space.id,
+            KnowledgeRelease.status == "published",
+        ))
+        assert release is not None and release.graph_release_id is None
+        assert db.get(IndexRelease, release.index_release_id).release_number == 2
+        context = client.get(f"/api/v1/writing/projects/{response.json()['id']}/knowledge-context")
+        assert context.status_code == 200, context.text
+        assert context.json()["spaces"][0]["graph_available"] is False
+        assert context.json()["spaces"][0]["vector_available"] is True
 
 
 def test_project_knowledge_context_exposes_locked_zhiku_release() -> None:
@@ -965,6 +996,136 @@ def test_input_change_preview_is_non_mutating_and_apply_updates_only_dependent_r
         assert next(item for item in second_current["content"] if item["id"] == metric["id"])["value"] == 100
         second_facts = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
         assert next(item for item in second_facts if item["fact_key"] == "rescue_gap")["value"]["number"] == 100
+
+
+def test_input_change_accepts_bound_paragraphs_individually_without_overwriting_others() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        values = {
+            "rescue_required": (500, "搜救人员需求"), "rescue_available": (320, "可用搜救人员"),
+            "trauma_beds_required": (330, "创伤床位需求"), "county_trauma_beds": (110, "县域床位"),
+            "callable_trauma_beds": (250, "全域床位"), "tents_required": (7000, "帐篷需求"),
+            "tents_available": (5200, "可用帐篷"),
+        }
+        fact_ids = {}
+        for key, (number, label) in values.items():
+            response = client.post(f"/api/v1/writing/projects/{project['id']}/facts", json={
+                "fact_key": key, "label": label, "fact_type": "official_brief", "value": {"number": number},
+                "unit": "人" if key.startswith("rescue") else None, "source_type": "official_brief",
+                "source_id": "test-source", "verification_status": "verified",
+            })
+            assert response.status_code == 200, response.text
+            fact_ids[key] = response.json()["id"]
+        baseline = client.post(f"/api/v1/writing/projects/{project['id']}/computations/run-baseline")
+        assert baseline.status_code == 200, baseline.text
+        run = next(item["run"] for item in baseline.json()["items"] if item["fact"]["fact_key"] == "rescue_gap")
+        metric = {"id": "metric-gap", "type": "computed_metric", "label": "搜救人员缺口", "value": 180,
+                  "unit": "人", "computation_run_id": run["id"],
+                  "children": [{"text": "经核验与测算，搜救人员缺口为180人。"}]}
+        paragraph = {"id": "paragraph-resource", "type": "p", "children": [{"text": "可用搜救人员320人，缺口180人。"}]}
+        summary = {"id": "paragraph-summary", "type": "p", "children": [{"text": "当前缺口180人，需进一步协调。"}]}
+        unbound = {"id": "paragraph-unbound", "type": "p", "children": [{"text": "其他工作保持不变。"}]}
+        document_response = client.post("/api/v1/writing/documents", json={
+            "project_id": project["id"], "title": "逐项接受测试", "content": [metric, paragraph, summary, unbound],
+        })
+        assert document_response.status_code == 200, document_response.text
+        document = document_response.json()
+        for node, metadata, run_id, fact_id in (
+            (metric, {}, run["id"], None),
+            (paragraph, {"input_keys": ["rescue_available"], "metric_keys": ["rescue_gap"],
+                         "input_fact_ids": [fact_ids["rescue_available"]], "computation_run_ids": [run["id"]]}, run["id"], fact_ids["rescue_available"]),
+            (summary, {"metric_keys": ["rescue_gap"], "computation_run_ids": [run["id"]]}, run["id"], None),
+        ):
+            bound = client.post(f"/api/v1/writing/documents/{document['id']}/bindings", json={
+                "block_id": node["id"], "block_type": node["type"],
+                "source_type": "computation" if run_id else "model_extraction",
+                "computation_run_id": run_id, "fact_id": fact_id,
+                "content_hash": content_hash(node), "block_content": node,
+                "verification_status": "verified", "metadata": metadata,
+            })
+            assert bound.status_code == 200, bound.text
+        preview_response = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/preview", json={
+            "document_id": document["id"],
+            "changes": [{"fact_key": "rescue_available", "new_value": {"number": 400}, "reason": "资源清点更新"}],
+        })
+        assert preview_response.status_code == 200, preview_response.text
+        preview = preview_response.json()
+        proposals = {item["block_id"]: item for item in preview["impact"]["content_proposals"]}
+        assert proposals["metric-gap"]["new_text"].endswith("100人。")
+        assert proposals["paragraph-resource"]["new_text"] == "可用搜救人员400人，缺口100人。"
+        assert proposals["paragraph-summary"]["new_text"] == "当前缺口100人，需进一步协调。"
+        assert "paragraph-unbound" not in proposals
+        invalid = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/apply", json={
+            "preview_id": preview["id"], "accepted_block_ids": ["paragraph-unbound"],
+        })
+        assert invalid.status_code == 422
+        applied = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/apply", json={
+            "preview_id": preview["id"], "accepted_block_ids": ["metric-gap", "paragraph-resource"],
+        })
+        assert applied.status_code == 200, applied.text
+        current = client.get(f"/api/v1/writing/documents/{document['id']}").json()["current_version"]
+        by_id = {node["id"]: node for node in current["content"]}
+        assert by_id["metric-gap"]["value"] == 100
+        assert by_id["paragraph-resource"]["children"][0]["text"] == "可用搜救人员400人，缺口100人。"
+        assert by_id["paragraph-summary"]["children"][0]["text"] == summary["children"][0]["text"]
+        assert by_id["paragraph-summary"]["freshness_status"] == "stale"
+        assert by_id["paragraph-unbound"] == unbound
+        assert applied.json()["impact"]["pending_review_block_ids"] == ["paragraph-summary"]
+        old = db.get(WritingDocumentVersion, document["current_version"]["id"])
+        assert next(node for node in old.content if node["id"] == "paragraph-resource") == paragraph
+
+
+def test_real_customer_sample_profile_is_article_scoped_and_never_factual_evidence(monkeypatch) -> None:
+    sample_path = Path("/Users/tianqi/Desktop/积石山县6.2级地震_本体驱动应急智能推演系统_完整升级版/样稿.pdf")
+    if not sample_path.exists():
+        pytest.skip("真实客户样稿未挂载")
+    sample_bytes = sample_path.read_bytes()
+    monkeypatch.setattr("apps.api.writing.object_storage.get_bytes", lambda key: sample_bytes)
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        document_response = client.post("/api/v1/writing/documents", json={
+            "project_id": project["id"], "title": "新地区地震应急预案（讨论稿）", "document_type": "emergency_plan",
+            "audience": "项目组业务审阅", "purpose": "依据新地区已确认资料形成讨论稿", "content": [],
+        })
+        assert document_response.status_code == 200, document_response.text
+        article = document_response.json()
+        space_id = db.scalar(select(KnowledgeProductReleaseItem.space_id).where(KnowledgeProductReleaseItem.product_release_id == release.id))
+        user = db.scalar(select(User).where(User.tenant_id == project["tenant_id"]))
+        sample_source = Document(tenant_id=project["tenant_id"], space_id=space_id,
+                                 title="客户样稿", owner_id=user.id, status="ready")
+        db.add(sample_source); db.flush()
+        sample_version = DocumentVersion(
+            tenant_id=project["tenant_id"], document_id=sample_source.id, version_number=1,
+            filename="样稿.pdf", content_type="application/pdf", size=len(sample_bytes),
+            sha256=hashlib.sha256(sample_bytes).hexdigest(), object_key="test/sample.pdf", status="processed",
+        )
+        db.add(sample_version); db.flush()
+        sample_source.current_version_id = sample_version.id
+        sample_material = WritingProjectMaterial(
+            tenant_id=project["tenant_id"], project_id=project["id"], document_id=sample_source.id,
+            version_id=sample_version.id, material_role="sample_style", status="active", added_by=user.id,
+        )
+        db.add(sample_material); db.commit()
+        preview = client.post(f"/api/v1/writing/documents/{article['id']}/sample-profile/preview", json={
+            "material_id": sample_material.id,
+        })
+        assert preview.status_code == 200, preview.text
+        profile = preview.json()["profile"]
+        assert [item["title"] for item in profile["chapters"]] == [
+            "总则", "组织体系", "运行机制", "应急保障", "其他地震事件应急", "监督管理", "附则",
+        ]
+        assert profile["style"]["sample_is_not_factual_evidence"] is True
+        assert profile["formula_candidates"] == []
+        assert client.get(f"/api/v1/writing/documents/{article['id']}").json()["applicability"].get("sample_profile") is None
+        applied = client.put(f"/api/v1/writing/documents/{article['id']}/sample-profile", json={
+            "material_id": sample_material.id, "profile": profile,
+        })
+        assert applied.status_code == 200, applied.text
+        assert applied.json()["profile"]["status"] == "confirmed"
+        assert client.get(f"/api/v1/writing/documents/{article['id']}").json()["applicability"]["sample_profile"]["profile_hash"]
+        sample_only = client.post(f"/api/v1/writing/projects/{project['id']}/generate-report", json={"document_id": article["id"]})
+        assert sample_only.status_code == 409, sample_only.text
+        assert "样稿只提供结构和文风" in sample_only.text
 
 
 def test_project_knowledge_search_is_locked_to_product_release(monkeypatch) -> None:

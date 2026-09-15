@@ -43,6 +43,22 @@ afterEach(() => {
 });
 
 describe('报告生成失败恢复', () => {
+  it('长样稿按章节连续执行真实 SSE，并在全部章节检查完成后打开 Plate', async () => {
+    request.mockResolvedValueOnce(json([]))
+      .mockResolvedValueOnce(json(created))
+      .mockResolvedValueOnce(stream())
+      .mockResolvedValueOnce(json({ ...created, status: 'awaiting_agent', progress: 70 }))
+      .mockResolvedValueOnce(stream())
+      .mockResolvedValueOnce(json({ ...created, status: 'completed', progress: 100 }));
+    const { onOpenEditor, onChanged } = renderPanel();
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: '创建并生成初稿' }));
+    await waitFor(() => expect(onOpenEditor).toHaveBeenCalledOnce());
+    expect(onChanged).toHaveBeenCalledOnce();
+    expect(request.mock.calls.filter(([url]) => String(url).endsWith('/agent'))).toHaveLength(2);
+    expect(request.mock.calls.filter(([url]) => String(url).endsWith('/finalize'))).toHaveLength(2);
+  });
+
   it('422 后读取当前任务真实终态与 100% 进度，保留问题并允许成功重试', async () => {
     request.mockResolvedValueOnce(json([]))
       .mockResolvedValueOnce(json(created))

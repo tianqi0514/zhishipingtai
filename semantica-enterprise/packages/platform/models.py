@@ -1128,7 +1128,9 @@ class KnowledgeRelease(Base, TimestampMixin):
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
     space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
     release_number: Mapped[int] = mapped_column(Integer)
-    graph_release_id: Mapped[str] = mapped_column(ForeignKey("graph_releases.id"), index=True)
+    # Text/vector-only knowledge spaces still require an immutable release.
+    # A graph is optional until the user explicitly enables graph processing.
+    graph_release_id: Mapped[str | None] = mapped_column(ForeignKey("graph_releases.id"), nullable=True, index=True)
     index_release_id: Mapped[str] = mapped_column(ForeignKey("index_releases.id"), index=True)
     curation_batch_id: Mapped[str | None] = mapped_column(ForeignKey("curation_batches.id"), nullable=True)
     checksum: Mapped[str] = mapped_column(String(64), index=True)

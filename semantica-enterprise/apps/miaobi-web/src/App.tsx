@@ -29,6 +29,9 @@ import { createFrameDeltaBuffer } from './streaming';
 import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeContext, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ProjectMaterial, ProjectMaterialCandidate, ScenarioPackage, WritingAgentSession, WritingDocument, WritingGenerationRun, WritingInputChange } from './types/domain';
 import type { MarkdownSuggestionInsertion } from './editor/MiaobiEditor';
 import { ChapterEvidencePanel, ParagraphEvidenceList } from './components/ChapterEvidence';
+import { ImpactPreviewDialog } from './components/ImpactPreviewDialog';
+import { EditorMetricChange } from './components/EditorMetricChange';
+import { SampleProfilePanel } from './components/SampleProfilePanel';
 
 type WritingSpace = { id: string; name: string; code: string; ready: boolean; knowledge_version?: number };
 type User = { id: string; display_name: string; is_admin: boolean };
@@ -251,6 +254,7 @@ export function App() {
                   <Suspense fallback={<div className="editor-shell editor-loading">正在加载完整文稿编辑器…</div>}><MiaobiEditor key={document.id} document={document} onDirtyChange={setDirty} onSaved={(saved) => setDocument(saved)} onRequestSource={setAssistantTab} onAgentEdit={(request) => runAgentTextEdit(document.id, request)} onAgentEditDecision={(editId, decision) => api(`/writing/agent-edits/${editId}/decision`, { method: 'POST', body: { decision } })} onAgentActivity={() => setAssistantTab('assistant')} insertionRequest={insertionRequest} onInserted={() => setInsertionRequest(null)} /></Suspense>
                 </section>
                 <aside className="assistant-pane">
+                  <EditorMetricChange projectId={selected.id} document={document} facts={facts} dirty={dirty} onChanged={() => loadProjectDetails(selected.id)} onError={setError} />
                   {knowledgeContext && <button type="button" className="writing-knowledge-baseline" onClick={() => setTab('task')} title="查看当前文稿使用的知识空间"><BookOpenCheck size={16} /><span><small>当前知识空间</small><b>{knowledgeContext.spaces.map((space) => space.name).join('、')}</b></span><em>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份项目材料` : `${knowledgeContext.document_count} 项知识资产`}</em><ChevronRight size={15} /></button>}
                   <div className="assistant-tabs">
                     {([['assistant','妙笔助手'],['evidence','来源与计算'],['review','审校发布']] as const).map(([key,label]) => <button type="button" key={key} className={assistantTab === key ? 'active' : ''} onClick={() => setAssistantTab(key)}>{label}</button>)}
@@ -382,6 +386,7 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
       <section className="task-intro-card"><div><span className="eyebrow">准备资料</span><h2>选择依据，确认影响结论的关键信息</h2><p>可以先写已有依据的章节；缺失信息只影响相关内容，不妨碍打开空白文稿。</p></div><div className="task-intro-actions">{document && <button type="button" className="secondary" onClick={onOpenEditor}>打开空白文稿</button>}<button type="button" className="primary" onClick={() => setStage('toolbox')}>{nextLabel}<ChevronRight size={16} /></button></div></section>
       {knowledgeContext && <section className="compact-knowledge-baseline"><BookOpenCheck size={18} /><div><b>{knowledgeContext.spaces.map((space) => space.name).join('、')}</b><small>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份已选业务材料` : '尚未选择项目材料'} · {knowledgeContext.chunk_count} 个已发布知识片段</small></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前版本' : '有新版本'}</span></section>}
       <MaterialsPanel project={project} document={document} materials={materials} knowledgeContext={knowledgeContext} onChanged={onChanged} onError={onError} />
+      <SampleProfilePanel document={document} materials={materials} onChanged={onChanged} onError={onError} />
       <Facts project={project} facts={facts} requiredKeys={requiredKeys} document={document} onChanged={onChanged} onError={onError} />
     </>}
     {stage === 'toolbox' && <ChapterEvidencePanel projectId={project.id} onChanged={onChanged} />}
@@ -543,6 +548,8 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
 }) {
   const [run, setRun] = useState<WritingGenerationRun | null>(null);
   const [running, setRunning] = useState(false);
+  const [revising, setRevising] = useState(false);
+  const [revisionKey, setRevisionKey] = useState('');
   const [stageLabel, setStageLabel] = useState('等待开始');
   const abortRef = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -559,14 +566,14 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
     return () => abortRef.current?.abort();
   }, [document?.id, project.id]);
 
-  const start = async () => {
+  const start = async (resumeRun?: WritingGenerationRun) => {
     if (running) return;
     setRunning(true);
     onError('');
     setStageLabel('正在核验输入并运行推演工具箱');
     let activeRunId: string | undefined;
     try {
-      const created = await api<WritingGenerationRun>(`/writing/projects/${project.id}/generate-report`, {
+      const created = resumeRun || await api<WritingGenerationRun>(`/writing/projects/${project.id}/generate-report`, {
         method: 'POST', body: { document_id: document?.id || null, allow_partial: true },
       });
       activeRunId = created.id;
@@ -574,36 +581,42 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
       setStageLabel('正在依据知识生成报告正文');
       const controller = new AbortController();
       abortRef.current = controller;
-      const response = await fetch(`/api/v1/writing/generation-runs/${created.id}/agent`, {
-        method: 'POST', credentials: 'same-origin', signal: controller.signal,
-      });
-      if (!response.ok || !response.body) {
-        const detail = await response.json().catch(() => ({}));
-        throw new Error(apiErrorMessage(detail?.detail, '报告生成 Agent 启动失败'));
-      }
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let finished = false;
-      while (!finished) {
-        const chunk = await reader.read();
-        finished = chunk.done;
-        buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !finished });
-        const frames = buffer.split('\n\n');
-        buffer = frames.pop() || '';
-        for (const frame of frames) {
-          const event = frame.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim() || '';
-          const raw = frame.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n');
-          const data = JSON.parse(raw || '{}') as Record<string, unknown>;
-          if (event === 'tool_started') setStageLabel(writingStage(String(data.name || data.tool || '')));
-          if (event === 'retrieval_started') setStageLabel('正在查找报告依据');
-          if (event === 'answer_delta') setStageLabel('正在组织正式报告正文');
-          if (event === 'turn_failed') throw new Error(String(data.message || data.reason || '报告正文生成失败'));
-          if (event === 'turn_cancelled') throw new Error('报告生成已停止');
+      let completed: WritingGenerationRun;
+      do {
+        const response = await fetch(`/api/v1/writing/generation-runs/${created.id}/agent`, {
+          method: 'POST', credentials: 'same-origin', signal: controller.signal,
+        });
+        if (!response.ok || !response.body) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(apiErrorMessage(detail?.detail, '报告生成 Agent 启动失败'));
         }
-      }
-      setStageLabel('正在执行报告质量检查');
-      const completed = await api<WritingGenerationRun>(`/writing/generation-runs/${created.id}/finalize`, { method: 'POST' });
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finished = false;
+        while (!finished) {
+          const chunk = await reader.read();
+          finished = chunk.done;
+          buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !finished });
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() || '';
+          for (const frame of frames) {
+            const event = frame.split('\n').find((line) => line.startsWith('event:'))?.slice(6).trim() || '';
+            const raw = frame.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n');
+            const data = JSON.parse(raw || '{}') as Record<string, unknown>;
+            if (event === 'tool_started') setStageLabel(writingStage(String(data.name || data.tool || '')));
+            if (event === 'retrieval_started') setStageLabel('正在查找报告依据');
+            if (event === 'answer_delta') setStageLabel('正在组织正式报告正文');
+            if (event === 'turn_failed') throw new Error(String(data.message || data.reason || '报告正文生成失败'));
+            if (event === 'turn_cancelled') throw new Error('报告生成已停止');
+          }
+        }
+        setStageLabel('正在检查已完成章节');
+        completed = await api<WritingGenerationRun>(`/writing/generation-runs/${created.id}/finalize`, { method: 'POST' });
+        setRun(completed);
+        if (completed.status === 'awaiting_agent') setStageLabel('正在生成下一章节');
+      } while (completed.status === 'awaiting_agent' && !controller.signal.aborted);
+      if (controller.signal.aborted) throw new DOMException('已停止', 'AbortError');
       setRun(completed);
       await onChanged();
       setStageLabel('报告已生成');
@@ -628,6 +641,22 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
       setRunning(false);
     }
   };
+  const reviseChapter = async () => {
+    if (!run || !revisionKey || running || revising) return;
+    setRevising(true);
+    onError('');
+    try {
+      const revised = await api<WritingGenerationRun>(`/writing/generation-runs/${run.id}/revise-section`, {
+        method: 'POST', body: { section_key: revisionKey },
+      });
+      setRun(revised);
+      await start(revised);
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : '章节修订未能启动');
+    } finally {
+      setRevising(false);
+    }
+  };
   const stop = async () => {
     if (!run || !running) return;
     await api(`/writing/generation-runs/${run.id}/cancel`, { method: 'POST' }).catch(() => undefined);
@@ -643,6 +672,7 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
   });
   const selectedPlan = plans.find((item) => item.status === 'selected');
   const conclusion = facts.find((item) => item.fact_type === 'semantica_inference' && item.freshness_status === 'current');
+  const revisableChapters = (run?.section_plan || []).filter((item) => run?.toolbox_result?.agent_section_parts?.[item.key]);
   return <div className="toolbox-page">
     <section className="task-intro-card"><div><span className="eyebrow">起草编辑</span><h2>根据当前文章需要生成初稿</h2><p>系统只生成已具备资料和已确认信息的章节；缺少信息的章节会明确保留为待补充，不会阻止整篇起草。</p></div><div className="task-intro-actions"><button type="button" className="secondary" disabled={running} onClick={onBack}>返回准备资料</button>{document && <button type="button" className="secondary" disabled={running} onClick={onOpenEditor}>直接编辑</button>}<button type="button" className="primary generation-button" disabled={running} onClick={() => void start()}><Sparkles size={17} />{running ? stageLabel : document ? '生成可写章节' : '创建并生成初稿'}</button>{running && <button type="button" className="danger-soft" onClick={() => void stop()}><Square size={15} />停止</button>}</div></section>
     {(running || run) && <section className="generation-progress"><div><b>{stageLabel}</b><span>{progress}%</span></div><progress max="100" value={progress} /><small>进度来自真实后端任务与 Agent 事件，不使用固定动画伪造阶段。</small></section>}
@@ -653,7 +683,7 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
       <article><span>采用方案</span><b>{selectedPlan?.name || '待求解'}</b><small>基于真实约束和优化目标</small></article>
     </section>
     {latest.size > 0 && <section className="content-card"><div className="card-toolbar"><div><span className="eyebrow">推演工具箱结果</span><h2>自动进入报告的权威内容</h2></div><span className="status verified">已完成</span></div><div className="calculation-grid">{Array.from(latest.values()).map((item) => <article key={item.id}><small>{item.result.output_fact?.label || item.result.operation}</small><b>{item.result.value} {item.result.output_fact?.unit || ''}</b><span>由已确认输入自动计算</span></article>)}</div>{selectedPlan && <div className="selected-plan-summary"><b>{selectedPlan.name}</b><span>{selectedPlan.result.route?.path?.join(' → ') || '方案约束已计算'}</span></div>}</section>}
-    {run?.status === 'quality_failed' && <section className="quality-failed"><AlertTriangle /><div><b>报告没有通过质量门，未覆盖当前正文</b><p>{run.error_message || '请查看章节、引用或篇幅问题后重试。'}</p><ul>{run.quality_report?.issues?.map((item) => <li key={item.code}>{item.message}</li>)}</ul></div></section>}
+    {run?.status === 'quality_failed' && <section className="quality-failed"><AlertTriangle /><div><b>报告没有通过质量门，未覆盖当前正文</b><p>{run.error_message || '请查看章节、引用或篇幅问题后重试。'}</p><ul>{run.quality_report?.issues?.map((item) => <li key={item.code}>{item.message}</li>)}</ul>{revisableChapters.length > 0 && <div className="quality-revision"><label htmlFor="quality-revision-chapter">需要补写的章节</label><select id="quality-revision-chapter" value={revisionKey} onChange={(event) => setRevisionKey(event.target.value)}><option value="">请选择章节</option>{revisableChapters.map((item) => <option key={item.key} value={item.key}>{item.title}</option>)}</select><button type="button" className="secondary" disabled={!revisionKey || running || revising} onClick={() => void reviseChapter()}>{revising ? '正在准备修订…' : '按当前资料补写本章'}</button></div>}</div></section>}
   </div>;
 }
 
@@ -745,11 +775,11 @@ function Facts({ project, facts, requiredKeys = [], document, onChanged, onError
     } catch (failure) { onError(failure instanceof Error ? failure.message : '事实处理失败'); }
     finally { setSubmitting(false); }
   };
-  const applyImpact = async () => {
+  const applyImpact = async (acceptedBlockIds: string[]) => {
     if (!impactPreview || submitting) return;
     setSubmitting(true);
     try {
-      await api(`/writing/projects/${project.id}/input-changes/apply`, { method: 'POST', body: { preview_id: impactPreview.id } });
+      await api(`/writing/projects/${project.id}/input-changes/apply`, { method: 'POST', body: { preview_id: impactPreview.id, accepted_block_ids: acceptedBlockIds } });
       setImpactPreview(null);
       await onChanged();
     } catch (failure) { onError(failure instanceof Error ? failure.message : '应用输入变化失败'); }
@@ -778,7 +808,7 @@ function Facts({ project, facts, requiredKeys = [], document, onChanged, onError
     } catch (failure) { onError(failure instanceof Error ? failure.message : '补充输入失败'); }
     finally { setSubmitting(false); }
   };
-  return <><div className="content-card"><div className="card-toolbar"><div className="search"><Search size={16} /><input placeholder="搜索输入项" value={query} onChange={(event) => setQuery(event.target.value)} /></div><div className="task-intro-actions"><a className="secondary" href="/#assets">从材料提取</a><button type="button" className={pendingOnly ? 'primary compact' : 'secondary'} onClick={() => setPendingOnly((value) => !value)}>{pendingOnly ? '显示全部输入' : '只看待确认'}</button></div></div><div className="table-scroll"><table><thead><tr><th>输入项</th><th>当前值</th><th>来源</th><th>版本</th><th>状态</th><th>操作</th></tr></thead><tbody>{visible.map((fact) => <tr key={fact.id}><td><b>{fact.label}</b></td><td>{formatValue(fact.value)} {fact.unit || ''}</td><td>{sourceLabel(fact.source_type)}</td><td>v{fact.version}</td><td><span className={`status ${fact.verification_status}`}>{!requiresConfirmation(fact) ? '无需确认' : fact.verification_status === 'verified' ? '已确认' : fact.verification_status === 'rejected' ? '已驳回' : '待确认'}</span></td><td><div className="row-actions">{requiresConfirmation(fact) && fact.verification_status !== 'verified' && <><button type="button" onClick={() => openDecision(fact, 'confirm')}>确认</button><button type="button" onClick={() => openDecision(fact, 'reject')}>驳回</button></>}{allowManualOverride && <button type="button" onClick={() => openDecision(fact, 'override')}>修正</button>}</div></td></tr>)}{!pendingOnly && missingKeys.map((key) => { const field = project.input_contract?.properties?.[key] || {}; return <tr className="missing-input-row" key={key}><td><b>{field.title || key}</b></td><td>—</td><td>尚未提供</td><td>—</td><td><span className="status missing">缺少</span></td><td><button type="button" onClick={() => setMissingInput({ key, label: field.title || key, type: field.type || 'string', unit: field.unit, value: '' })}>填写</button></td></tr>; })}</tbody></table></div>{!visible.length && !missingKeys.length && <div className="empty-table">没有符合当前条件的输入</div>}</div>{missingInput && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setMissingInput(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="补充缺失输入"><div className="dialog-head"><div><span className="eyebrow">缺失输入</span><h2>{missingInput.label}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setMissingInput(null)}>×</button></div><label>当前值<input autoFocus type={['number', 'integer'].includes(missingInput.type) ? 'number' : 'text'} value={missingInput.value} onChange={(event) => setMissingInput({ ...missingInput, value: event.target.value })} /></label><p className="field-help">手工补充后状态为“待确认”，需再次核对后才会参与报告生成。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setMissingInput(null)}>取消</button><button type="button" className="primary" disabled={submitting || !missingInput.value.trim()} onClick={() => void createMissing()}>{submitting ? '保存中…' : '保存待确认'}</button></div></section></div>}{decision && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setDecision(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true"><div className="dialog-head"><div><span className="eyebrow">输入确认</span><h2>{decision.mode === 'confirm' ? '确认输入' : decision.mode === 'reject' ? '暂不采用' : '修正输入'}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setDecision(null)}>×</button></div><div className="fact-preview"><b>{decision.fact.label}</b><span>{formatValue(decision.fact.value)} {decision.fact.unit || ''}</span></div>{decision.mode === 'override' && <label>修正后的值<input value={overrideValue} onChange={(event) => setOverrideValue(event.target.value)} autoFocus /></label>}<label>处理理由<textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={3} /></label><p className="field-help">{document && decision.mode === 'override' ? '系统会先计算这项变化影响哪些结果和报告章节，确认“应用”后才生效。' : '系统保留原值和操作记录，已确认输入才会参与报告生成。'}</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setDecision(null)}>取消</button><button type="button" className="primary" disabled={submitting || reason.trim().length < 2 || (decision.mode === 'override' && !overrideValue.trim())} onClick={() => void submit()}>{submitting ? '处理中…' : document && decision.mode === 'override' ? '查看影响' : '确认处理'}</button></div></section></div>}{impactPreview && <div className="dialog-backdrop" role="presentation"><section className="dialog impact-dialog" role="dialog" aria-modal="true"><div className="dialog-head"><div><span className="eyebrow">变更预览</span><h2>确认后才会更新报告</h2></div></div><div className="impact-changes">{impactPreview.changes.map((item) => <div key={item.fact_key}><b>{item.label}</b><span>{formatValue(item.old_value)} → {formatValue(item.new_value)} {item.unit || ''}</span></div>)}</div><h3>受影响的计算</h3>{impactPreview.impact.calculations?.length ? <div className="impact-calculations">{impactPreview.impact.calculations.map((item) => <div key={item.result_key}><b>{item.label}</b><span>{item.old_value} → <strong>{item.new_value}</strong> {item.unit || ''}</span></div>)}</div> : <p className="field-help">没有受影响的确定性计算。</p>}<p className="field-help">影响 {impactPreview.impact.report_blocks?.length || 0} 个段落或测算项：测算值更新，相关正文标记为待核对，不自动改写。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => void cancelImpact()}>取消</button><button type="button" className="primary" disabled={submitting} onClick={() => void applyImpact()}>{submitting ? '应用中…' : '应用本次变化'}</button></div></section></div>}</>;
+  return <><div className="content-card"><div className="card-toolbar"><div className="search"><Search size={16} /><input placeholder="搜索输入项" value={query} onChange={(event) => setQuery(event.target.value)} /></div><div className="task-intro-actions"><a className="secondary" href="/#assets">从材料提取</a><button type="button" className={pendingOnly ? 'primary compact' : 'secondary'} onClick={() => setPendingOnly((value) => !value)}>{pendingOnly ? '显示全部输入' : '只看待确认'}</button></div></div><div className="table-scroll"><table><thead><tr><th>输入项</th><th>当前值</th><th>来源</th><th>版本</th><th>状态</th><th>操作</th></tr></thead><tbody>{visible.map((fact) => <tr key={fact.id}><td><b>{fact.label}</b></td><td>{formatValue(fact.value)} {fact.unit || ''}</td><td>{sourceLabel(fact.source_type)}</td><td>v{fact.version}</td><td><span className={`status ${fact.verification_status}`}>{!requiresConfirmation(fact) ? '无需确认' : fact.verification_status === 'verified' ? '已确认' : fact.verification_status === 'rejected' ? '已驳回' : '待确认'}</span></td><td><div className="row-actions">{requiresConfirmation(fact) && fact.verification_status !== 'verified' && <><button type="button" onClick={() => openDecision(fact, 'confirm')}>确认</button><button type="button" onClick={() => openDecision(fact, 'reject')}>驳回</button></>}{allowManualOverride && <button type="button" onClick={() => openDecision(fact, 'override')}>修正</button>}</div></td></tr>)}{!pendingOnly && missingKeys.map((key) => { const field = project.input_contract?.properties?.[key] || {}; return <tr className="missing-input-row" key={key}><td><b>{field.title || key}</b></td><td>—</td><td>尚未提供</td><td>—</td><td><span className="status missing">缺少</span></td><td><button type="button" onClick={() => setMissingInput({ key, label: field.title || key, type: field.type || 'string', unit: field.unit, value: '' })}>填写</button></td></tr>; })}</tbody></table></div>{!visible.length && !missingKeys.length && <div className="empty-table">没有符合当前条件的输入</div>}</div>{missingInput && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setMissingInput(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="补充缺失输入"><div className="dialog-head"><div><span className="eyebrow">缺失输入</span><h2>{missingInput.label}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setMissingInput(null)}>×</button></div><label>当前值<input autoFocus type={['number', 'integer'].includes(missingInput.type) ? 'number' : 'text'} value={missingInput.value} onChange={(event) => setMissingInput({ ...missingInput, value: event.target.value })} /></label><p className="field-help">手工补充后状态为“待确认”，需再次核对后才会参与报告生成。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setMissingInput(null)}>取消</button><button type="button" className="primary" disabled={submitting || !missingInput.value.trim()} onClick={() => void createMissing()}>{submitting ? '保存中…' : '保存待确认'}</button></div></section></div>}{decision && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setDecision(null); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true"><div className="dialog-head"><div><span className="eyebrow">输入确认</span><h2>{decision.mode === 'confirm' ? '确认输入' : decision.mode === 'reject' ? '暂不采用' : '修正输入'}</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setDecision(null)}>×</button></div><div className="fact-preview"><b>{decision.fact.label}</b><span>{formatValue(decision.fact.value)} {decision.fact.unit || ''}</span></div>{decision.mode === 'override' && <label>修正后的值<input value={overrideValue} onChange={(event) => setOverrideValue(event.target.value)} autoFocus /></label>}<label>处理理由<textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={3} /></label><p className="field-help">{document && decision.mode === 'override' ? '系统会先计算这项变化影响哪些结果和报告章节，确认“应用”后才生效。' : '系统保留原值和操作记录，已确认输入才会参与报告生成。'}</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setDecision(null)}>取消</button><button type="button" className="primary" disabled={submitting || reason.trim().length < 2 || (decision.mode === 'override' && !overrideValue.trim())} onClick={() => void submit()}>{submitting ? '处理中…' : document && decision.mode === 'override' ? '查看影响' : '确认处理'}</button></div></section></div>}{impactPreview && <ImpactPreviewDialog key={impactPreview.id} preview={impactPreview} submitting={submitting} onCancel={() => void cancelImpact()} onApply={(ids) => void applyImpact(ids)} />}</>;
 }
 
 function Reasoning({ project, facts, computations, gates, onChanged, onError }: { project: Project; facts: Fact[]; computations: ComputationRun[]; gates: DecisionGate[]; onChanged: () => Promise<void>; onError: (message: string) => void }) {

@@ -322,6 +322,15 @@ class WritingDocumentUpdate(StrictModel):
     status: Literal["draft", "reviewing", "ready", "published", "archived"] | None = None
 
 
+class WritingSampleProfileRequest(StrictModel):
+    material_id: str
+
+
+class WritingSampleProfileApply(StrictModel):
+    material_id: str
+    profile: dict[str, Any]
+
+
 class WritingDocumentMaterialsUpdate(StrictModel):
     material_ids: list[str] = Field(default_factory=list, max_length=500)
 
@@ -363,7 +372,7 @@ class WritingBlockBindingUpsert(StrictModel):
     @field_validator("block_type")
     @classmethod
     def validate_block_type(cls, value: str) -> str:
-        if value not in TRUSTED_BLOCK_TYPES:
+        if value not in TRUSTED_BLOCK_TYPES | {"p", "li", "table"}:
             raise ValueError("不支持的可信业务块类型")
         return value
 
@@ -383,6 +392,9 @@ class WritingBlockBindingUpsert(StrictModel):
 
     @model_validator(mode="after")
     def require_authoritative_reference(self):
+        if self.block_type in {"p", "li", "table"}:
+            if self.block_content is None or not (self.fact_id or self.computation_run_id):
+                raise ValueError("正文依据绑定需要当前正文块和本项目事实或测算来源")
         if self.block_content is not None:
             if str(self.block_content.get("id") or "") != self.block_id:
                 raise ValueError("可信业务块内容与 block_id 不一致")
@@ -462,6 +474,10 @@ class WritingGenerateReportRequest(StrictModel):
     allow_partial: bool = True
 
 
+class WritingSectionRevisionRequest(StrictModel):
+    section_key: str = Field(min_length=1, max_length=160)
+
+
 class WritingInputValueChange(StrictModel):
     fact_key: str = Field(min_length=1, max_length=160)
     new_value: dict[str, Any]
@@ -482,6 +498,15 @@ class WritingInputChangePreview(StrictModel):
 
 class WritingInputChangeApply(StrictModel):
     preview_id: str
+    # None preserves the legacy behaviour: only authoritative metric blocks
+    # are refreshed. An explicit list accepts selected article proposals.
+    accepted_block_ids: list[str] | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def unique_accepted_blocks(self):
+        if self.accepted_block_ids is not None and len(self.accepted_block_ids) != len(set(self.accepted_block_ids)):
+            raise ValueError("不能重复选择同一正文内容")
+        return self
 
 
 class WritingAgentEditCreate(StrictModel):
@@ -509,6 +534,11 @@ class AgentWritingOutlineDraftRequest(AgentWritingRequest):
 class AgentWritingSectionDraftRequest(AgentWritingRequest):
     section_key: str = Field(min_length=1, max_length=100)
     instruction: str = Field(default="", max_length=4000)
+
+
+class AgentWritingChapterSourcePackRequest(AgentWritingRequest):
+    section_key: str = Field(min_length=1, max_length=100)
+    max_characters: int = Field(default=12000, ge=300, le=20000)
 
 
 class AgentWritingBindEvidenceRequest(AgentWritingRequest):

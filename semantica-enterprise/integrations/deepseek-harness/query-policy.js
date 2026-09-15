@@ -131,6 +131,7 @@ export function evidenceRequirements(input, settings = {}) {
       'knowledge_search',
       'writing_create_outline_draft',
       'writing_generate_section_draft',
+      'writing_get_chapter_source_pack',
     ]
   }
   if (WRITING_TASK_PATTERN.test(query)) {

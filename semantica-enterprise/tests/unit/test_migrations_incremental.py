@@ -46,6 +46,7 @@ def test_schema_migrations_are_repeatable_on_fresh_database() -> None:
             "0028_writing_materials_ontology_governance",
             "0029_writing_document_business_scope",
             "0030_writing_optional_knowledge_scope",
+            "0031_index_only_knowledge_release",
         ]
     assert profile_table == "document_profiles"
 

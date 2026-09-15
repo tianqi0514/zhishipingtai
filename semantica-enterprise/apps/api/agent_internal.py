@@ -29,6 +29,7 @@ from apps.api.writing_schemas import (
     AgentWritingRecomputeRequest,
     AgentWritingRequest,
     AgentWritingSectionDraftRequest,
+    AgentWritingChapterSourcePackRequest,
     AgentWritingValidateRequest,
 )
 from apps.api.utils import serialize_row
@@ -73,7 +74,9 @@ from packages.platform.models import (
     WritingDocument,
     WritingDocumentVersion,
     WritingProject,
+    WritingProjectMaterial,
 )
+from packages.platform.writing_source_pack import select_chapter_source_rows
 from packages.platform.structured_data import (
     StructuredDataError,
     current_schema,
@@ -362,6 +365,16 @@ def get_agent_model(
     if not api_key:
         raise HTTPException(409, "智能问答模型未配置可用凭据")
     config = model.config or {}
+    max_tokens = int(config.get("max_tokens", 4096))
+    if (conversation.settings or {}).get("kind") == "writing_generation":
+        article = db.get(WritingDocument, (conversation.settings or {}).get("writing_document_id"))
+        profile = dict((article.applicability or {}).get("sample_profile") or {}) if article else {}
+        if profile.get("status") == "confirmed" and int((profile.get("style") or {}).get("reference_characters") or 0) >= 8000:
+            # Formal sample-shaped reports include tool calls before the final
+            # structured chapter. A short chat cap can finish a Turn without
+            # any article text. The configured model remains authoritative;
+            # this bounded writing budget was verified against its real API.
+            max_tokens = max(max_tokens, min(16384, int(config.get("writing_max_tokens", 16384))))
     return {
         "provider": model.provider,
         "model_name": model.model_name,
@@ -372,7 +385,7 @@ def get_agent_model(
         "temperature": _effective_temperature(
             model.model_name, float(config.get("temperature", 0.2))
         ),
-        "max_tokens": int(config.get("max_tokens", 4096)),
+        "max_tokens": max_tokens,
         "parameters": dict(config.get("parameters") or {}),
     }
 
@@ -964,9 +977,13 @@ def agent_writing_outline_draft(
     claims: dict[str, Any] = Depends(get_agent_claims),
     db: Session = Depends(get_db),
 ):
-    _, project, _ = _writing_tool_context(db, claims, payload.conversation_id)
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id)
     scenario = db.get(ScenarioPackageVersion, project.scenario_package_version_id)
-    chapters = list((scenario.chapter_template or {}).get("chapters") or []) if scenario else []
+    profile = dict((document.applicability or {}).get("sample_profile") or {}) if document else {}
+    chapters = (
+        list(profile.get("chapters") or []) if profile.get("status") == "confirmed"
+        else list((scenario.chapter_template or {}).get("chapters") or []) if scenario else []
+    )
     return {
         "title": payload.title or project.name,
         "nodes": [
@@ -978,7 +995,7 @@ def agent_writing_outline_draft(
             }
             for index, item in enumerate(chapters)
         ],
-        "source": "activated_scenario_package",
+        "source": "confirmed_article_sample_profile" if profile.get("status") == "confirmed" else "activated_scenario_package",
         "requires_user_acceptance": True,
     }
 
@@ -989,15 +1006,20 @@ def agent_writing_section_draft(
     claims: dict[str, Any] = Depends(get_agent_claims),
     db: Session = Depends(get_db),
 ):
-    _, project, _ = _writing_tool_context(db, claims, payload.conversation_id)
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id)
     scenario = db.get(ScenarioPackageVersion, project.scenario_package_version_id)
+    profile = dict((document.applicability or {}).get("sample_profile") or {}) if document else {}
+    chapters = (
+        list(profile.get("chapters") or []) if profile.get("status") == "confirmed"
+        else list((scenario.chapter_template or {}).get("chapters") or []) if scenario else []
+    )
     chapter = next(
         (
-            item for item in ((scenario.chapter_template or {}).get("chapters") or [])
+            item for item in chapters
             if str(item.get("key") or "") == payload.section_key
         ),
         None,
-    ) if scenario else None
+    )
     if chapter is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "当前场景包没有该章节")
     facts = list(
@@ -1023,6 +1045,75 @@ def agent_writing_section_draft(
             "do_not_invent_missing_facts": True,
             "do_not_replace_document": True,
         },
+    }
+
+
+@router.post("/writing/chapter-source-pack")
+def agent_writing_chapter_source_pack(
+    payload: AgentWritingChapterSourcePackRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    """Return relevant, fixed-version knowledge chunks through the Tool API."""
+    session, project, document = _writing_tool_context(
+        db, claims, payload.conversation_id, require_document=True,
+    )
+    profile = dict((document.applicability or {}).get("sample_profile") or {})
+    scenario = db.get(ScenarioPackageVersion, project.scenario_package_version_id)
+    chapters = (list(profile.get("chapters") or []) if profile.get("status") == "confirmed"
+                else list((scenario.chapter_template or {}).get("chapters") or []) if scenario else [])
+    chapter = next((item for item in chapters if str(item.get("key") or "") == payload.section_key), None)
+    if chapter is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "本文没有这个章节")
+    terms = [str(chapter.get("title") or "")] + [str(term) for term in chapter.get("subheadings") or []]
+    adopted = None if document.adopted_material_ids is None else set(document.adopted_material_ids)
+    materials = list(db.scalars(select(WritingProjectMaterial).where(
+        WritingProjectMaterial.project_id == project.id,
+        WritingProjectMaterial.status == "active",
+        _active(WritingProjectMaterial),
+    ).order_by(WritingProjectMaterial.created_at)))
+    items: list[dict[str, Any]] = []
+    remaining = payload.max_characters
+    truncated = False
+    for material in materials:
+        if material.material_role == "sample_style" or (adopted is not None and material.id not in adopted):
+            continue
+        source = db.get(Document, material.document_id)
+        version = db.get(DocumentVersion, material.version_id)
+        if (source is None or version is None or version.document_id != source.id
+                or version.status not in {"processed", "published", "ready"}
+                or source.space_id not in set(claims.get("space_ids") or [])
+                or not has_space_permission(db, db.get(User, claims["sub"]), source.space_id, "read")):
+            continue
+        rows = []
+        for chunk in db.scalars(select(Chunk).where(
+            Chunk.version_id == version.id, Chunk.status == "published", _active(Chunk),
+        ).order_by(Chunk.ordinal).limit(3000)):
+            text, _ = effective_chunk_text(db, chunk, include_superseded=True)
+            rows.append({
+                "ordinal": chunk.ordinal, "chunk_id": chunk.chunk_id,
+                "text": text, "structural_path": chunk.structural_path,
+                "page_number": chunk.page_number, "document_title": source.title,
+                "document_id": source.id, "version_id": version.id,
+                "version_number": version.version_number,
+            })
+        selected, shortened = select_chapter_source_rows(rows, terms, max_characters=remaining)
+        items.extend(selected)
+        remaining -= sum(len(item["text"]) for item in selected)
+        truncated = truncated or shortened
+        if remaining < 300:
+            truncated = True
+            break
+    audit(db, claims["tenant_id"], claims["sub"], "agent.writing.chapter_source_pack",
+          "writing_agent_session", session.id,
+          {"section_key": payload.section_key, "source_count": len(items), "truncated": truncated})
+    db.commit()
+    return {
+        "section_key": payload.section_key, "terms": terms,
+        "items": items, "source_count": len(items),
+        "character_count": payload.max_characters - remaining,
+        "truncated": truncated,
+        "warnings": [] if items else ["本章已固定的业务资料没有匹配片段，请补充资料或调整目录"],
     }
 
 

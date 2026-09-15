@@ -171,7 +171,7 @@ def activate_knowledge_release(
     *,
     tenant_id: str,
     space_id: str,
-    graph_release: GraphRelease,
+    graph_release: GraphRelease | None,
     index_release: IndexRelease,
     curation_batch_id: str | None = None,
 ) -> KnowledgeRelease:
@@ -188,11 +188,11 @@ def activate_knowledge_release(
         db.scalar(select(func.max(KnowledgeRelease.release_number)).where(KnowledgeRelease.space_id == space_id)) or 0
     ) + 1
     report = {
-        "graph_release": graph_release.release_number,
+        "graph_release": graph_release.release_number if graph_release else None,
         "index_release": index_release.release_number,
-        "graph_valid": bool((graph_release.validation_report or {}).get("valid", True)),
-        "graph_entities": graph_release.entity_count,
-        "graph_facts": graph_release.fact_count,
+        "graph_valid": bool((graph_release.validation_report or {}).get("valid", True)) if graph_release else None,
+        "graph_entities": graph_release.entity_count if graph_release else 0,
+        "graph_facts": graph_release.fact_count if graph_release else 0,
         "index_documents": index_release.document_count,
         "index_chunks": index_release.chunk_count,
     }
@@ -207,7 +207,7 @@ def activate_knowledge_release(
         tenant_id=tenant_id,
         space_id=space_id,
         release_number=release_number,
-        graph_release_id=graph_release.id,
+        graph_release_id=graph_release.id if graph_release else None,
         index_release_id=index_release.id,
         curation_batch_id=curation_batch_id,
         checksum=checksum,

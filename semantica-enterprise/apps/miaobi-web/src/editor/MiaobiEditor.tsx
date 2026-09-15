@@ -129,7 +129,8 @@ import { SlashInputElement, requestMiaobiEditorCommand, type MiaobiEditorCommand
 export function serverVersionOwnsCollaborativeState(changeSummary?: string | null): boolean {
   const summary = String(changeSummary || '').trim();
   return summary === '输入确认、分析计算与知识约束的一键生成'
-    || summary === '应用输入变化并局部更新受影响测算';
+    || summary === '应用输入变化并局部更新受影响测算'
+    || summary === '确认输入变化并逐项更新正文';
 }
 
 /**
@@ -442,6 +443,7 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
   const [lastSavedHash, setLastSavedHash] = useState(document.current_version?.content_hash || '');
   const valueRef = useRef<Value>(initial);
   const saveTimer = useRef<number | undefined>(undefined);
+  const synchronizedServerVersion = useRef(document.current_version?.id || '');
 
   const save = async (summary = '自动保存') => {
     if (saving) return;
@@ -562,6 +564,7 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
           // outstanding collaboration override.
           window.setTimeout(() => void save('同步推演更新到协作文稿'), 0);
         }
+        synchronizedServerVersion.current = currentVersion?.id || '';
         setEditorReady(true);
       },
     }).catch((reason: unknown) => {
@@ -572,6 +575,33 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
       editor.getApi(YjsPlugin).yjs.destroy();
     };
   }, [editor, collaboration?.room]);
+
+  useEffect(() => {
+    const version = document.current_version;
+    if (!editorReady || !collaboration || collaboration.read_only || !version?.id
+      || !serverVersionOwnsCollaborativeState(version.change_summary)
+      || synchronizedServerVersion.current === version.id) return;
+    let cancelled = false;
+    void (async () => {
+      const next = normalizeCollaborativeValue((version.content || []) as Value).value;
+      const liveHash = await sha256(editor.children as Value);
+      if (cancelled) return;
+      synchronizedServerVersion.current = version.id;
+      if (liveHash !== version.content_hash) {
+        // The editor stays mounted while the right-hand impact dialog applies
+        // a new immutable server version. Make the update a real Yjs operation
+        // so this tab and other collaborators see the same accepted values.
+        replaceCollaborativeValue(editor, next);
+        valueRef.current = next;
+        window.clearTimeout(saveTimer.current);
+        onDirtyChange(false);
+        setLastSavedHash(version.content_hash);
+      }
+    })().catch((reason: unknown) => {
+      if (!cancelled) setCollaborationError(reason instanceof Error ? reason.message : '正文更新同步失败');
+    });
+    return () => { cancelled = true; };
+  }, [document.current_version?.id, editorReady, collaboration?.room, collaboration?.read_only, editor]);
 
   useEffect(() => () => window.clearTimeout(saveTimer.current), []);
 

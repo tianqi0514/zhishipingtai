@@ -27,6 +27,7 @@ describe('妙笔 Plate 编辑器', () => {
   it('只让正式生成和局部重算版本覆盖旧协同快照', () => {
     expect(serverVersionOwnsCollaborativeState('输入确认、分析计算与知识约束的一键生成')).toBe(true);
     expect(serverVersionOwnsCollaborativeState('应用输入变化并局部更新受影响测算')).toBe(true);
+    expect(serverVersionOwnsCollaborativeState('确认输入变化并逐项更新正文')).toBe(true);
     expect(serverVersionOwnsCollaborativeState('自动保存')).toBe(false);
     expect(serverVersionOwnsCollaborativeState('手工保存')).toBe(false);
   });

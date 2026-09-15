@@ -44,6 +44,7 @@ test('registers typed knowledge tools and turn enforcement', () => {
     'writing_get_document_outline',
     'writing_create_outline_draft',
     'writing_generate_section_draft',
+    'writing_get_chapter_source_pack',
     'writing_bind_evidence',
     'writing_validate_document',
     'writing_get_stale_blocks',
@@ -81,6 +82,7 @@ test('structured execute schema is aligned with the strict platform Plan and IR 
   assert.match(tool.description, /固定筛选同时写入 Plan filters 和 IR where/)
   assert.match(tool.description, /关联 EXISTS/)
   assert.match(sections[1].text, /writing_get_project_context/)
+  assert.match(sections[1].text, /writing_get_chapter_source_pack/)
   assert.match(sections[1].text, /最终回答禁止出现/)
   assert.match(sections[1].text, /Session Event/)
   assert.match(sections[1].text, /修订建议/)
@@ -257,6 +259,8 @@ test('formal writing report enforcement follows writing evidence instead of nume
       { type: 'tool/result', data: { callId: 'outline-8', content: [] } },
       { type: 'tool/call', data: { turn: 8, callId: 'section-8', name: 'writing_generate_section_draft' } },
       { type: 'tool/result', data: { callId: 'section-8', content: [] } },
+      { type: 'tool/call', data: { turn: 8, callId: 'source-pack-8', name: 'writing_get_chapter_source_pack' } },
+      { type: 'tool/result', data: { callId: 'source-pack-8', content: [] } },
     ] },
     steer(message) { steered.push(message) },
   }
@@ -312,7 +316,7 @@ test('does not force retrieval for a direct identity question', () => {
 
 test('unloads every tool, prompt section and event listener', () => {
   const installed = fixture()
-  assert.equal(installed.tools.length, 21)
+  assert.equal(installed.tools.length, 22)
   assert.equal(installed.sections.length, 2)
   assert.equal(installed.listeners.size, 2)
   installed.dispose()

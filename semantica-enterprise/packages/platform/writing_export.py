@@ -187,9 +187,8 @@ def _configure_docx(document: Document, title: str) -> None:
     _remove_paragraph_borders(title_paragraph)
     _set_run_font(title_paragraph.add_run(title), 22, True)
 
-    header = section.header.paragraphs[0]
-    header.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _set_run_font(header.add_run(title), 9, False)
+    # The title already occupies the first paragraph. Repeating it in the
+    # page header made a formal first page look like two competing titles.
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
     run = footer.add_run("第 ")
@@ -223,7 +222,7 @@ def _add_table(document: Document, node: dict[str, Any]) -> None:
                     _set_run_font(run, 10, row_index == 0)
 
 
-def _append_plate_children(paragraph, children: list[dict[str, Any]]) -> None:
+def _append_plate_children(paragraph, children: list[dict[str, Any]], *, font_size: float = 11, heading_bold: bool = False) -> None:
     """Render inline Plate nodes, including visible evidence references."""
     for child in children:
         if not isinstance(child, dict):
@@ -237,17 +236,36 @@ def _append_plate_children(paragraph, children: list[dict[str, Any]]) -> None:
             continue
         if "text" in child:
             run = paragraph.add_run(str(child.get("text") or ""))
-            _set_run_font(run, 11, bool(child.get("bold")))
+            _set_run_font(run, font_size, heading_bold or bool(child.get("bold")))
             run.italic = bool(child.get("italic"))
             run.underline = bool(child.get("underline"))
             continue
-        _append_plate_children(paragraph, [item for item in child.get("children") or [] if isinstance(item, dict)])
+        _append_plate_children(paragraph, [item for item in child.get("children") or [] if isinstance(item, dict)],
+                               font_size=font_size, heading_bold=heading_bold)
 
 
-def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_summary: dict[str, Any]) -> None:
+def _chinese_section_number(value: int) -> str:
+    digits = "一二三四五六七八九"
+    if 1 <= value <= 9:
+        return digits[value - 1]
+    if value == 10:
+        return "十"
+    if 11 <= value <= 19:
+        return "十" + digits[value - 11]
+    if 20 <= value <= 99:
+        tens, ones = divmod(value, 10)
+        return digits[tens - 1] + "十" + (digits[ones - 1] if ones else "")
+    return str(value)
+
+
+def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_summary: dict[str, Any],
+               sample_profile: dict[str, Any] | None = None) -> None:
     document = Document()
     formal_title = _display_title(title)
     _configure_docx(document, formal_title)
+    numbered = str(((sample_profile or {}).get("style") or {}).get("heading_numbering") or "") == "multilevel"
+    chapter_index = 0
+    subsection_index = 0
     for index, node in enumerate(content):
         node_type = str(node.get("type") or "p")
         text = _node_text(node).strip()
@@ -264,8 +282,11 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
             paragraph = document.add_paragraph(style="Heading 1")
         elif node_type in {"h2", "heading2"}:
             paragraph = document.add_paragraph(style="Heading 2")
+            chapter_index += 1
+            subsection_index = 0
         elif node_type in {"h3", "heading3"}:
             paragraph = document.add_paragraph(style="Heading 3")
+            subsection_index += 1
         elif node_type in {"ul", "bulleted-list"}:
             paragraph = document.add_paragraph(style="List Bullet")
         elif node_type in {"ol", "numbered-list"}:
@@ -274,6 +295,16 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
             paragraph = document.add_paragraph()
         paragraph.paragraph_format.space_after = Pt(5)
         paragraph.paragraph_format.line_spacing = 1.4
+        heading_size = {"h1": 16, "heading1": 16, "h2": 14, "heading2": 14, "h3": 12, "heading3": 12}.get(node_type, 11)
+        is_heading = node_type in {"h1", "heading1", "h2", "heading2", "h3", "heading3"}
+        if is_heading:
+            paragraph.paragraph_format.space_before = Pt(9 if node_type in {"h2", "heading2"} else 6)
+            paragraph.paragraph_format.keep_with_next = True
+            paragraph.paragraph_format.line_spacing = 1.2
+        if numbered and node_type in {"h2", "heading2"}:
+            _set_run_font(paragraph.add_run(f"{_chinese_section_number(chapter_index)}、"), heading_size, True)
+        elif numbered and node_type in {"h3", "heading3"}:
+            _set_run_font(paragraph.add_run(f"（{_chinese_section_number(subsection_index)}）"), heading_size, True)
         prefix = ""
         if node_type == "knowledge_citation":
             prefix = "来源依据  "
@@ -287,9 +318,9 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
             _set_run_font(paragraph.add_run(prefix), 10, True)
         children = [item for item in node.get("children") or [] if isinstance(item, dict)]
         if children and node_type not in {"knowledge_citation", "computed_metric", "inference_conclusion", "manual_assumption"}:
-            _append_plate_children(paragraph, children)
+            _append_plate_children(paragraph, children, font_size=heading_size, heading_bold=is_heading)
         else:
-            _set_run_font(paragraph.add_run(text), 11, False)
+            _set_run_font(paragraph.add_run(text), heading_size, is_heading)
     document.save(path)
 
 
@@ -549,9 +580,10 @@ def build_export_artifact(
     audit_summary: dict[str, Any],
     bindings: list[dict[str, Any]] | None = None,
     coordinates: dict[str, list[float]] | None = None,
+    sample_profile: dict[str, Any] | None = None,
 ) -> Path:
     if output_format == "docx":
-        build_docx(path, title=title, content=content, audit_summary=audit_summary)
+        build_docx(path, title=title, content=content, audit_summary=audit_summary, sample_profile=sample_profile)
     elif output_format == "evidence_docx":
         build_evidence_docx(
             path,
@@ -564,7 +596,7 @@ def build_export_artifact(
         )
     elif output_format == "pdf":
         source = path.with_suffix(".docx")
-        build_docx(source, title=title, content=content, audit_summary=audit_summary)
+        build_docx(source, title=title, content=content, audit_summary=audit_summary, sample_profile=sample_profile)
         executable = shutil.which("libreoffice") or shutil.which("soffice")
         if executable is None:
             raise RuntimeError("服务器未安装 LibreOffice，无法生成 PDF")

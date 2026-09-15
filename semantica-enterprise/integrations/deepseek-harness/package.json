@@ -9,6 +9,14 @@
     "test": "node --import tsx/esm --test tests/*.test.js"
   },
   "dependencies": {
+    "@deepseek-ai/cordis": "workspace:*",
+    "@deepseek-ai/cordis-plugin-group": "workspace:*",
+    "@deepseek-ai/cordis-plugin-loader": "workspace:*",
+    "@deepseek-ai/dsh-home-paths": "workspace:*",
+    "@deepseek-ai/dsh-invariants": "workspace:*",
+    "@deepseek-ai/dsh-launch-environment": "workspace:*",
+    "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/dsh-system-prompt": "workspace:*",
     "@deepseek-ai/dsh-sdk-client": "workspace:*",
     "@deepseek-ai/dsh-sdk-minimal": "workspace:*",
     "@deepseek-ai/dsh-llm-pi-ai": "workspace:*",

@@ -8,6 +8,8 @@
 
 妙笔小型真实写作演练见 [青岚演练操作脚本](docs/miaobi/MIAOBI_QINGLAN_LIVE_DEMO.md) 与 [实测记录](docs/miaobi/MIAOBI_QINGLAN_LIVE_TEST_REPORT.md)：四份虚构业务材料已在独立测试空间真实上传，验证跨文档规则依据、确定性计算、DSH写作及Word/PDF导出。材料与管理员配置分开，不把本体或答案文件当用户输入。
 
+妙笔样稿配置提炼与 Plate 指标变更的真实验收见 [样稿配置与指标联动验收](docs/miaobi/SAMPLE_PROFILE_AND_METRIC_BINDING_ACCEPTANCE.md)：在独立项目中按样稿结构生成来源可核验的讨论稿，输入数值变更可先预览并选择性应用已绑定影响。
+
 本机低内存开发模式已支持“本地应用 + 服务器独立开发中间件”，日常启动、隔离策略和数据回退见 [远端开发中间件说明](docs/REMOTE_DEVELOPMENT.md)。不要将本地开发直接连接到线上业务库或共用同名索引。
 
 推荐从仓库根目录使用部署脚本，它会生成本地 Secret、从 Semantica 源码构建 CPU 基础镜像、启动服务并等待健康检查：

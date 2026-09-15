@@ -441,7 +441,7 @@ def execute_hybrid_search(
             ):
                 raise ValueError("知识产品版本包含无效的知识快照")
             release = db.get(IndexRelease, knowledge_release.index_release_id)
-            graph_release = db.get(GraphRelease, knowledge_release.graph_release_id)
+            graph_release = db.get(GraphRelease, knowledge_release.graph_release_id) if knowledge_release.graph_release_id else None
             if release is None or release.deleted_at is not None or release.tenant_id != tenant_id:
                 raise ValueError("知识产品版本对应的检索快照不可用")
             releases.append(release)

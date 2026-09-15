@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
@@ -32,6 +34,8 @@ from apps.api.writing_schemas import (
     WritingDocumentCreate,
     WritingDocumentMaterialsUpdate,
     WritingDocumentUpdate,
+    WritingSampleProfileRequest,
+    WritingSampleProfileApply,
     WritingDocumentValidate,
     WritingDocumentVersionCreate,
     WritingCommentCreate,
@@ -41,6 +45,7 @@ from apps.api.writing_schemas import (
     WritingKnowledgeSearch,
     WritingAgentMessageCreate,
     WritingGenerateReportRequest,
+    WritingSectionRevisionRequest,
     WritingAgentEditCreate,
     WritingAgentEditDecision,
     WritingInputChangeApply,
@@ -62,6 +67,7 @@ from packages.platform.database import get_db
 from packages.platform.knowledge_search import execute_hybrid_search
 from packages.platform.models import (
     AgentEventProjection,
+    AuditEvent,
     AlternativePlan,
     Application,
     ComputationDefinition,
@@ -121,10 +127,17 @@ from packages.platform.writing import (
 from packages.platform.writing_flow import (
     assemble_report_content,
     build_generation_prompt,
+    normalize_agent_heading_refs,
     report_quality_review,
+    renumber_chapter_citations,
     validate_agent_edit,
     validate_and_parse_agent_report,
 )
+from packages.platform.writing_impact import find_plate_node, propose_bound_text_change
+from packages.platform.writing_sample_profile import (
+    extract_sample_profile, sample_main_body_lengths, validate_sample_profile,
+)
+from packages.platform.index_release import activate_knowledge_release
 from packages.platform.writing_export import CONTENT_TYPES, build_export_artifact
 from packages.platform.writing_configuration import (
     business_scenario_from_contract,
@@ -292,6 +305,23 @@ def _release_for_space(db: Session, space_id: str, user: User) -> KnowledgeProdu
             _active(KnowledgeRelease),
         ).order_by(KnowledgeRelease.release_number.desc())
     )
+    latest_index = db.scalar(
+        select(IndexRelease).where(
+            IndexRelease.tenant_id == user.tenant_id,
+            IndexRelease.space_id == space.id,
+            IndexRelease.status == "published",
+            _active(IndexRelease),
+        ).order_by(IndexRelease.release_number.desc())
+    )
+    # Existing vector-only spaces predate the optional-graph release model.
+    # Bind the *actual* latest index snapshot, never an outdated graph/index
+    # pair or an invented graph projection.
+    if latest_index and (knowledge_release is None or knowledge_release.index_release_id != latest_index.id):
+        graph = db.get(GraphRelease, latest_index.graph_release_id) if latest_index.graph_release_id else None
+        knowledge_release = activate_knowledge_release(
+            db, tenant_id=user.tenant_id, space_id=space.id,
+            graph_release=graph, index_release=latest_index,
+        )
     if knowledge_release is None:
         raise HTTPException(status_code=409, detail="该知识空间尚未完成知识加工")
 
@@ -448,6 +478,24 @@ def _project_material_document_ids(
     return sorted({row.document_id for row in _project_material_rows(db, project_id, writing_document)})
 
 
+def _sample_material_for_article(
+    db: Session, document: WritingDocument, material_id: str, user: User,
+) -> tuple[WritingProjectMaterial, DocumentVersion]:
+    material = _tenant_row(db, WritingProjectMaterial, material_id, user.tenant_id, "样稿")
+    if (material.project_id != document.project_id or material.material_role != "sample_style"
+            or material.status != "active" or material.deleted_at is not None):
+        raise HTTPException(status_code=404, detail="当前文章未选择这份样稿")
+    if document.adopted_material_ids is not None and material.id not in set(document.adopted_material_ids or []):
+        raise HTTPException(status_code=409, detail="请先将样稿加入本文资料")
+    source = _tenant_row(db, Document, material.document_id, user.tenant_id, "样稿来源")
+    if not has_space_permission(db, user, source.space_id, "read"):
+        raise HTTPException(status_code=403, detail="无权读取这份样稿")
+    version = _tenant_row(db, DocumentVersion, material.version_id, user.tenant_id, "样稿版本")
+    if version.document_id != source.id or version.status not in {"processed", "published", "ready"}:
+        raise HTTPException(status_code=409, detail="样稿尚未完成解析")
+    return material, version
+
+
 _INTERNAL_WRITING_MATERIAL_SUFFIXES = (
     ".ontology.yaml",
     ".ontology.yml",
@@ -503,7 +551,11 @@ def _project_allowed_document_ids(
     compatibility, but legacy ontology/spec/chunk contracts are never exposed
     to the writing Agent as report evidence.
     """
-    selected = _project_material_document_ids(db, project_id, writing_document)
+    # A sample determines structure and tone, never factual answer evidence.
+    selected = sorted({
+        row.document_id for row in _project_material_rows(db, project_id, writing_document)
+        if row.material_role != "sample_style"
+    })
     if writing_document is not None and writing_document.adopted_material_ids is not None:
         return selected, selected
     if selected:
@@ -552,6 +604,112 @@ def _section_plan(version: ScenarioPackageVersion) -> list[dict[str, Any]]:
     if not result:
         raise HTTPException(status_code=409, detail="当前报告模板没有可用章节")
     return result
+
+
+def _section_plan_for_article(
+    db: Session, version: ScenarioPackageVersion, document: WritingDocument | None, user: User,
+) -> list[dict[str, Any]]:
+    if document is None:
+        return _section_plan(version)
+    profile = dict((document.applicability or {}).get("sample_profile") or {})
+    if profile.get("status") != "confirmed":
+        return _section_plan(version)
+    material_id = str(profile.get("material_id") or "")
+    _, sample_version = _sample_material_for_article(db, document, material_id, user)
+    try:
+        chapters = validate_sample_profile(
+            profile, source_version_id=sample_version.id, source_sha256=sample_version.sha256,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=f"本文样稿配置已失效：{exc}") from exc
+    if content_hash(chapters) != profile.get("profile_hash"):
+        raise HTTPException(status_code=409, detail="本文样稿配置已变化，请重新确认")
+    return chapters
+
+
+def _localized_factual_section_plan(
+    db: Session, project: WritingProject, document: WritingDocument,
+    user: User, chapters: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Adapt a sample heading only when the pinned, readable factual source says so.
+
+    A sample supplies structure, not jurisdictional facts.  For a 州 article,
+    a sampled 市-level heading may be localized only if the replacement phrase
+    actually appears in a pinned non-sample source.  The confirmed sample
+    profile is left intact and every adaptation is recorded on the run.
+    """
+    region = str((document.applicability or {}).get("region") or "").strip()
+    if not region:
+        return chapters, []
+    factual_versions = []
+    for material in _project_material_rows(db, project.id, document):
+        if material.material_role == "sample_style":
+            continue
+        source = db.get(Document, material.document_id)
+        version = db.get(DocumentVersion, material.version_id)
+        if (source is None or version is None or version.document_id != source.id
+                or version.status not in {"processed", "published", "ready"}
+                or not has_space_permission(db, user, source.space_id, "read")):
+            continue
+        factual_versions.append(version.id)
+    if not factual_versions:
+        return chapters, []
+    localized = []
+    adaptations = []
+    for chapter in chapters:
+        revised = dict(chapter)
+        headings = []
+        for heading in chapter.get("subheadings") or []:
+            replacement = "州" + heading[1:] if region.endswith("州") and heading.startswith("市") else ""
+            source_count = (
+                db.scalar(select(func.count()).select_from(Chunk).where(
+                    Chunk.version_id.in_(factual_versions), Chunk.text.contains(replacement),
+                )) or 0
+            ) if replacement else 0
+            if source_count:
+                headings.append(replacement)
+                adaptations.append({
+                    "section_key": str(chapter["key"]), "sample_heading": heading,
+                    "factual_heading": replacement, "region": region,
+                    "evidence": "pinned_factual_chunk", "matching_chunks": str(source_count),
+                })
+            else:
+                if any(term in heading for term in ("海域", "海啸", "沿海", "港口")):
+                    matches = db.scalar(select(func.count()).select_from(Chunk).where(
+                        Chunk.version_id.in_(factual_versions), Chunk.text.contains(heading),
+                    )) or 0
+                    if not matches:
+                        adaptations.append({
+                            "section_key": str(chapter["key"]), "sample_heading": heading,
+                            "factual_heading": "", "region": region,
+                            "evidence": "no_pinned_factual_chunk",
+                            "reason": "location_specific_heading_not_supported",
+                        })
+                        continue
+                headings.append(heading)
+        revised["subheadings"] = headings
+        localized.append(revised)
+    return localized, adaptations
+
+
+def _article_sample_body_lengths(
+    db: Session, document: WritingDocument, user: User,
+) -> dict[str, Any]:
+    profile = dict((document.applicability or {}).get("sample_profile") or {})
+    style = dict(profile.get("style") or {})
+    if profile.get("status") != "confirmed" or document.document_type != "emergency_plan":
+        return {}
+    if style.get("reference_body_characters"):
+        return style
+    material_id = str(profile.get("material_id") or "")
+    _, sample_version = _sample_material_for_article(db, document, material_id, user)
+    if not ("pdf" in str(sample_version.content_type or "").lower()
+            or str(sample_version.filename or "").lower().endswith(".pdf")):
+        return {}
+    import pdfplumber
+    with pdfplumber.open(io.BytesIO(object_storage.get_bytes(sample_version.object_key))) as pdf:
+        text = "\n".join((page.extract_text(layout=True) or "") for page in pdf.pages[:100])
+    return sample_main_body_lengths(text, list(profile.get("chapters") or []))
 
 
 def _latest_computation_rows(db: Session, project_id: str) -> list[ComputationRun]:
@@ -697,6 +855,7 @@ def _strict_report_quality(
     db: Session,
     *,
     project: WritingProject,
+    user: User,
     document: WritingDocument | None = None,
     content: list[dict[str, Any]],
     bindings: dict[str, dict[str, Any]],
@@ -717,15 +876,32 @@ def _strict_report_quality(
             )
             or 0
         )
-    reference_characters = (scenario.config or {}).get("reference_final_characters")
+    sample_profile = dict((document.applicability or {}).get("sample_profile") or {}) if document else {}
+    sample_confirmed = sample_profile.get("status") == "confirmed"
+    if sample_confirmed:
+        # A reference sample defines article form, not this project's factual
+        # calculations or inferred conclusions.  Only adopted results can be
+        # required by the article-specific quality gate.
+        computations = []
+        inference_count = 0
+    reference_characters = (
+        (sample_profile.get("style") or {}).get("reference_characters")
+        if sample_confirmed else (scenario.config or {}).get("reference_final_characters")
+    )
+    sample_body = _article_sample_body_lengths(db, document, user) if document and sample_confirmed else {}
+    if sample_body.get("reference_body_characters"):
+        reference_characters = int(sample_body["reference_body_characters"])
     return report_quality_review(
         content,
-        section_plan=_section_plan(scenario),
+        section_plan=_section_plan_for_article(db, scenario, document, user) if document and sample_confirmed else _section_plan(scenario),
         bindings=bindings,
         expected_computation_count=len(computations),
         expected_inference_count=inference_count,
         reference_characters=int(reference_characters) if reference_characters else None,
         require_citations=bool(writing_policy.get("require_citations", True)),
+        draft_requires_signoff=sample_confirmed
+        and bool((sample_profile.get("style") or {}).get("notice_requires_authorized_signoff"))
+        and bool(re.search(r"讨论稿|草稿|征求意见稿", document.title if document else "")),
     )
 
 
@@ -733,6 +909,7 @@ def _generated_report_quality(
     db: Session,
     *,
     project: WritingProject,
+    user: User,
     document: WritingDocument,
     content: list[dict[str, Any]],
     bindings: dict[str, dict[str, Any]],
@@ -747,7 +924,7 @@ def _generated_report_quality(
     )
     if generated is None:
         return None
-    return _strict_report_quality(db, project=project, document=document, content=content, bindings=bindings)
+    return _strict_report_quality(db, project=project, user=user, document=document, content=content, bindings=bindings)
 
 
 def _ensure_formula_version(db: Session, user: User, operation: str) -> ComputationDefinitionVersion:
@@ -1242,12 +1419,18 @@ def list_writing_spaces(user: User = Depends(get_current_user), db: Session = De
             KnowledgeRelease.status == "published",
             _active(KnowledgeRelease),
         ).order_by(KnowledgeRelease.release_number.desc()))
+        index = db.scalar(select(IndexRelease).where(
+            IndexRelease.tenant_id == user.tenant_id,
+            IndexRelease.space_id == space.id,
+            IndexRelease.status == "published",
+            _active(IndexRelease),
+        ).order_by(IndexRelease.release_number.desc()))
         result.append({
             "id": space.id,
             "name": space.name,
             "code": space.code,
-            "ready": release is not None,
-            "knowledge_version": release.release_number if release else None,
+            "ready": index is not None,
+            "knowledge_version": release.release_number if release else (index.release_number if index else None),
         })
     return result
 
@@ -1661,7 +1844,7 @@ def get_project_knowledge_context(
     ):
         space = _tenant_row(db, KnowledgeSpace, item.space_id, user.tenant_id, "知识空间")
         knowledge_release = _tenant_row(db, KnowledgeRelease, item.knowledge_release_id, user.tenant_id, "知识版本")
-        graph_release = db.get(GraphRelease, knowledge_release.graph_release_id)
+        graph_release = db.get(GraphRelease, knowledge_release.graph_release_id) if knowledge_release.graph_release_id else None
         index_release = db.get(IndexRelease, knowledge_release.index_release_id)
         spaces.append(
             {
@@ -2222,7 +2405,10 @@ def start_report_generation(
     if active_run is not None:
         raise HTTPException(status_code=409, detail="当前已有报告生成任务正在执行")
     scenario, _, _ = _scenario_runtime_settings(db, project, document)
-    full_section_plan = _section_plan(scenario)
+    full_section_plan = _section_plan_for_article(db, scenario, document, user)
+    if (document and (document.applicability or {}).get("sample_profile", {}).get("status") == "confirmed"
+            and not any(row.material_role != "sample_style" for row in _project_material_rows(db, project.id, document))):
+        raise HTTPException(status_code=409, detail="样稿只提供结构和文风；请先为新文章上传业务资料或正式依据")
     known_section_keys = {str(item["key"]) for item in full_section_plan}
     unknown_section_keys = set(payload.section_keys) - known_section_keys
     if unknown_section_keys:
@@ -2346,6 +2532,11 @@ def start_report_generation(
             detail={"message": "当前没有可生成的章节；请补充对应资料或确认关键信息", "unavailable_sections": unavailable_sections},
         )
     section_plan = ready_sections
+    heading_adaptations: list[dict[str, str]] = []
+    if document is not None:
+        section_plan, heading_adaptations = _localized_factual_section_plan(
+            db, project, document, user, section_plan,
+        )
     if document is None:
         title_pattern = str(
             (scenario.output_schema or {}).get("title_pattern")
@@ -2388,6 +2579,7 @@ def start_report_generation(
 
     input_snapshot = {
         "document_version_id": document.current_version_id,
+        "sample_profile_hash": ((document.applicability or {}).get("sample_profile") or {}).get("profile_hash"),
         "chapter_evidence": knowledge_packet,
         "scenario_package_version_id": scenario.id,
         "knowledge_product_release_id": release_id,
@@ -2421,6 +2613,10 @@ def start_report_generation(
     # Reuse the existing, tested domain endpoints. They execute deterministic
     # formulas and the Semantica adapter; no model is involved in these values.
     toolbox_config = dict((scenario.config or {}).get("toolbox") or {})
+    if document and (document.applicability or {}).get("sample_profile", {}).get("status") == "confirmed":
+        # A formal sample without validated formulas must not activate the
+        # earthquake event toolbox merely because of the project fallback.
+        toolbox_config = {**toolbox_config, "reasoning_enabled": False, "calculation_enabled": False}
     reasoning_enabled = toolbox_config.get("reasoning_enabled", True) is not False
     calculation_enabled = toolbox_config.get("calculation_enabled", True) is not False
     criteria_result: dict[str, Any] = {"items": [], "skipped": True, "reason": "disabled_by_scenario"}
@@ -2507,6 +2703,7 @@ def start_report_generation(
             "computations": computation_result,
             "plans": generated_plans,
             "selected_plan_id": current_selected.id if current_selected else None,
+            "factual_heading_adaptations": heading_adaptations,
         },
         section_plan=section_plan,
         quality_report={},
@@ -2717,6 +2914,94 @@ def get_report_generation_run(
     return _generation_payload(db, row)
 
 
+@router.post("/generation-runs/{run_id}/revise-section")
+def revise_report_section(
+    run_id: str,
+    payload: WritingSectionRevisionRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Ask the real writing Agent to improve one chapter without silent overwrite."""
+    run, project, document = _generation(db, run_id, user, "editor")
+    if run.status not in {"quality_failed", "completed"}:
+        raise HTTPException(status_code=409, detail="当前文章尚不可按章节修订")
+    if run.status == "completed":
+        completed_version = db.get(WritingDocumentVersion, document.current_version_id)
+        completion = db.scalar(select(AuditEvent).where(
+            AuditEvent.tenant_id == user.tenant_id,
+            AuditEvent.action == "writing.generation.complete",
+            AuditEvent.object_id == run.id,
+        ).order_by(AuditEvent.created_at.desc()))
+        if not completed_version or not completion or (completion.detail or {}).get("document_version_id") != completed_version.id:
+            raise HTTPException(status_code=409, detail="正文已被修改，请从当前版本建立新的写作修订任务")
+        run.input_snapshot = {**(run.input_snapshot or {}), "document_version_id": completed_version.id}
+    if (run.input_snapshot or {}).get("document_version_id") != document.current_version_id:
+        raise HTTPException(status_code=409, detail="正文版本已变化，请重新建立写作任务")
+    if ((document.applicability or {}).get("sample_profile") or {}).get("status") == "confirmed":
+        effective_plan, adaptations = _localized_factual_section_plan(
+            db, project, document, user, run.section_plan or [],
+        )
+        if adaptations:
+            run.section_plan = effective_plan
+            run.toolbox_result = {
+                **(run.toolbox_result or {}), "factual_heading_adaptations": adaptations,
+            }
+    chapter = next((item for item in run.section_plan or []
+                    if str(item.get("key") or "") == payload.section_key), None)
+    if chapter is None:
+        raise HTTPException(status_code=404, detail="本次文章没有这个章节")
+    parts = dict((run.toolbox_result or {}).get("agent_section_parts") or {})
+    prior = parts.pop(payload.section_key, None)
+    if prior is None:
+        raise HTTPException(status_code=409, detail="该章节尚未有可修订的初稿")
+    history = list((run.toolbox_result or {}).get("section_revision_history") or [])
+    attempts = sum(1 for entry in history if entry.get("section_key") == payload.section_key)
+    if attempts >= 2:
+        raise HTTPException(status_code=409, detail="本章已重写两次仍未通过，请人工检查资料与要求")
+    prior_chars = sum(len(str(node.get("text") or ""))
+                      for node in (prior["section"].get("content_nodes") or []))
+    allowed_headings = set(chapter.get("subheadings") or [])
+    revision_nodes = []
+    skip_unsupported = False
+    for node in prior["section"].get("content_nodes") or []:
+        if node.get("type") == "h3":
+            skip_unsupported = str(node.get("text") or "") not in allowed_headings
+        if not skip_unsupported:
+            revision_nodes.append(node)
+    body_lengths = _article_sample_body_lengths(db, document, user)
+    sample_chars = int((body_lengths.get("reference_section_characters") or {}).get(payload.section_key) or 0)
+    target_chars = min(4000, max(prior_chars + 500, int(sample_chars * 0.72), 1200))
+    history.append({
+        "section_key": payload.section_key,
+        "assistant_message_id": prior["assistant_message_id"],
+        "previous_characters": prior_chars,
+        "target_characters": target_chars,
+        "attempt": attempts + 1,
+    })
+    run.toolbox_result = {
+        **(run.toolbox_result or {}),
+        "agent_section_parts": parts,
+        "section_revision_history": history,
+        "section_revision_draft": {
+            "section_key": payload.section_key,
+            "section": {**prior["section"], "content_nodes": revision_nodes},
+            "target_characters": target_chars,
+        },
+    }
+    run.assistant_message_id = None
+    run.status = "awaiting_agent"
+    run.stage = "narrative_revision"
+    run.progress = 55 + (30 * len(parts) // max(1, len(run.section_plan or [])))
+    run.error_code = None
+    run.error_message = None
+    run.quality_report = {}
+    run.finished_at = None
+    audit(db, user.tenant_id, user.id, "writing.generation.section.revise", "writing_generation_run", run.id,
+          {"section_key": payload.section_key, "attempt": attempts + 1, "target_characters": target_chars})
+    db.commit()
+    return _generation_payload(db, run)
+
+
 @router.post("/generation-runs/{run_id}/agent")
 def stream_report_generation_agent(
     run_id: str,
@@ -2735,17 +3020,78 @@ def stream_report_generation_agent(
     if conversation.status == "generating":
         raise HTTPException(status_code=409, detail="写作 Agent 正在生成")
     scenario, _, _ = _scenario_runtime_settings(db, project, document)
-    reference_characters = (scenario.config or {}).get("reference_final_characters")
+    sample_profile = dict((document.applicability or {}).get("sample_profile") or {})
+    if sample_profile.get("status") == "confirmed":
+        effective_plan, adaptations = _localized_factual_section_plan(
+            db, project, document, user, run.section_plan or [],
+        )
+        if adaptations:
+            run.section_plan = effective_plan
+            run.toolbox_result = {
+                **(run.toolbox_result or {}),
+                "factual_heading_adaptations": adaptations,
+            }
+    sectional = sample_profile.get("status") == "confirmed" and int(
+        ((sample_profile.get("style") or {}).get("reference_characters") or 0)
+    ) >= 8000 and len(run.section_plan or []) > 1
+    completed_parts = dict((run.toolbox_result or {}).get("agent_section_parts") or {})
+    pending = [item for item in run.section_plan or [] if str(item.get("key") or "") not in completed_parts]
+    if sectional and not pending:
+        raise HTTPException(status_code=409, detail="所有章节已生成，请执行质量检查")
+    section_plan = [pending[0]] if sectional else (run.section_plan or [])
+    reference_characters = (
+        (sample_profile.get("style") or {}).get("reference_characters")
+        if sample_profile.get("status") == "confirmed"
+        else (scenario.config or {}).get("reference_final_characters")
+    )
+    if sectional and reference_characters:
+        reference_characters = max(900, int(reference_characters) // len(run.section_plan or []))
+    revision_draft = dict((run.toolbox_result or {}).get("section_revision_draft") or {})
+    if revision_draft.get("section_key") == str(section_plan[0].get("key") or ""):
+        reference_characters = int(revision_draft["target_characters"])
     prompt = build_generation_prompt(
         project_name=project.name,
-        section_plan=run.section_plan or [],
+        section_plan=section_plan,
         reference_characters=int(reference_characters) if reference_characters else None,
+        document_brief={
+            "title": document.title, "article_type": document.document_type,
+            "audience": document.audience, "purpose": document.purpose,
+            "applicability": {key: value for key, value in (document.applicability or {}).items() if key != "sample_profile"},
+            "writing_requirements": document.writing_requirements,
+        },
+        sample_style={
+            "genre": sample_profile.get("genre"),
+            "register": (sample_profile.get("style") or {}).get("register"),
+            "heading_numbering": (sample_profile.get("style") or {}).get("heading_numbering"),
+            "notice_requires_authorized_signoff": (sample_profile.get("style") or {}).get("notice_requires_authorized_signoff"),
+            "attachments": sample_profile.get("attachments") or [],
+        } if sample_profile.get("status") == "confirmed" else None,
+        revision_mode=bool(revision_draft),
     )
-    _, assistant = _create_turn_messages(db, conversation, user, "生成完整报告草稿")
+    if revision_draft.get("section_key") == str(section_plan[0].get("key") or ""):
+        factual_keys = sorted({str(row.fact_key) for row in db.scalars(
+            select(ProjectFact).where(ProjectFact.project_id == project.id,
+                                      ProjectFact.active.is_(True), _active(ProjectFact))
+        )})
+        metric_keys = sorted({str(((row.result or {}).get("output_fact") or {}).get("fact_key") or "")
+                              for row in _latest_computation_rows(db, project.id)})
+        prompt += (
+            "\n这是同一章节的质量修订，不是新章节。下面初稿只用于识别表达缺口，"
+            "其中旧的[数字]引用不可直接复用；请重新调用真实知识工具确认材料，"
+            "引用本轮工具返回的编号，保留有来源的事实并补足职责、触发条件、"
+            "信息流转和衔接措施，不重复原句、不虚构资料未支持的内容。"
+            f"修订章节纯正文目标约 {int(revision_draft['target_characters'])} 字。"
+            "input_refs 只能填下列已确认事实编码，metric_refs 只能填下列真实计算编码；"
+            "二级标题不是事实编码，没有对应编码时两个数组都必须为空。"
+            f"\n已确认事实编码：{factual_keys}；计算编码：{metric_keys}"
+            f"\n待修订初稿：{revision_draft['section']}"
+        )
+    chapter_label = str(section_plan[0].get("title") or "章节") if sectional else "完整报告"
+    _, assistant = _create_turn_messages(db, conversation, user, f"生成{chapter_label}草稿")
     run.assistant_message_id = assistant.id
     run.status = "agent_running"
     run.stage = "narrative_generation"
-    run.progress = 55
+    run.progress = 55 + (30 * len(completed_parts) // max(1, len(run.section_plan or [])))
     audit(db, user.tenant_id, user.id, "writing.generation.agent.start", "writing_generation_run", run.id)
     db.commit()
     return StreamingResponse(
@@ -2793,8 +3139,28 @@ def finalize_report_generation(
         run.finished_at = datetime.now(timezone.utc)
         db.commit()
         raise HTTPException(status_code=409, detail=run.error_message)
+    sample_profile = dict((document.applicability or {}).get("sample_profile") or {})
+    if sample_profile.get("status") == "confirmed":
+        effective_plan, adaptations = _localized_factual_section_plan(
+            db, project, document, user, run.section_plan or [],
+        )
+        if adaptations:
+            run.section_plan = effective_plan
+            run.toolbox_result = {
+                **(run.toolbox_result or {}),
+                "factual_heading_adaptations": adaptations,
+            }
+    sectional = sample_profile.get("status") == "confirmed" and int(
+        ((sample_profile.get("style") or {}).get("reference_characters") or 0)
+    ) >= 8000 and len(run.section_plan or []) > 1
+    saved_parts = dict((run.toolbox_result or {}).get("agent_section_parts") or {})
+    pending = [item for item in run.section_plan or [] if str(item.get("key") or "") not in saved_parts]
+    if sectional and not pending:
+        raise HTTPException(status_code=409, detail="章节结果已收齐，当前输出不能重复应用")
     try:
-        sections = validate_and_parse_agent_report(assistant.content, run.section_plan or [])
+        parsed_sections = validate_and_parse_agent_report(
+            assistant.content, [pending[0]] if sectional else (run.section_plan or [])
+        )
     except ValueError as exc:
         run.status = "quality_failed"
         run.stage = "structured_output_validation"
@@ -2805,9 +3171,67 @@ def finalize_report_generation(
         run.finished_at = datetime.now(timezone.utc)
         db.commit()
         raise HTTPException(status_code=422, detail=run.quality_report) from exc
+    citation_message_ids = [assistant.id]
+    if sectional:
+        run.error_code = None
+        run.error_message = None
+        run.quality_report = {}
+        chapter = pending[0]
+        key = str(chapter["key"])
+        saved_parts[key] = {"section": parsed_sections[0], "assistant_message_id": assistant.id}
+        updated_toolbox = {**(run.toolbox_result or {}), "agent_section_parts": saved_parts}
+        if (updated_toolbox.get("section_revision_draft") or {}).get("section_key") == key:
+            updated_toolbox.pop("section_revision_draft", None)
+        run.toolbox_result = updated_toolbox
+        remaining = [item for item in run.section_plan or [] if str(item.get("key") or "") not in saved_parts]
+        if remaining:
+            run.assistant_message_id = None
+            run.status = "awaiting_agent"
+            run.stage = "narrative_generation"
+            run.progress = 55 + (30 * len(saved_parts) // max(1, len(run.section_plan or [])))
+            audit(db, user.tenant_id, user.id, "writing.generation.agent.section", "writing_generation_run", run.id,
+                  {"section_key": key, "remaining": len(remaining)})
+            db.commit()
+            return _generation_payload(db, run)
+        sections = [saved_parts[str(item["key"])]["section"] for item in run.section_plan or []]
+        citation_message_ids = [str(saved_parts[str(item["key"])]["assistant_message_id"]) for item in run.section_plan or []]
+    else:
+        sections = parsed_sections
+    known_input_keys = {
+        str(row.fact_key) for row in db.scalars(select(ProjectFact).where(
+            ProjectFact.project_id == project.id, ProjectFact.active.is_(True),
+            _active(ProjectFact),
+        ))
+    }
+    known_metric_keys = {
+        str(((row.result or {}).get("output_fact") or {}).get("fact_key") or "")
+        for row in _latest_computation_rows(db, project.id)
+    }
+    try:
+        sections, corrected_heading_refs = normalize_agent_heading_refs(
+            sections, run.section_plan or [],
+            input_keys=known_input_keys, metric_keys=known_metric_keys,
+        )
+    except ValueError as exc:
+        run.status = "quality_failed"
+        run.stage = "dependency_validation"
+        run.progress = 100
+        run.error_code = "INVALID_AGENT_DEPENDENCIES"
+        run.error_message = str(exc)
+        run.quality_report = {"ok": False, "issues": [{
+            "code": "invalid_agent_dependencies", "severity": "error", "message": str(exc),
+        }]}
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=422, detail=run.quality_report) from exc
+    if corrected_heading_refs:
+        run.toolbox_result = {
+            **(run.toolbox_result or {}),
+            "normalized_heading_refs": corrected_heading_refs,
+        }
     citations = []
     for citation_row in db.scalars(
-        select(Citation).where(Citation.message_id == assistant.id).order_by(Citation.citation_number)
+        select(Citation).where(Citation.message_id.in_(citation_message_ids)).order_by(Citation.citation_number)
     ):
         citation = serialize_row(citation_row)
         snapshot = dict(citation.get("snapshot") or {})
@@ -2820,6 +3244,23 @@ def finalize_report_generation(
             snapshot["version_number"] = source_version.version_number
         citation["snapshot"] = snapshot
         citations.append(citation)
+    if sectional:
+        try:
+            sections, citations = renumber_chapter_citations(
+                sections, citation_message_ids, citations,
+            )
+        except ValueError as exc:
+            run.status = "quality_failed"
+            run.stage = "citation_validation"
+            run.progress = 100
+            run.error_code = "INVALID_AGENT_CITATIONS"
+            run.error_message = str(exc)
+            run.quality_report = {"ok": False, "issues": [{
+                "code": "invalid_agent_citations", "severity": "error", "message": str(exc),
+            }]}
+            run.finished_at = datetime.now(timezone.utc)
+            db.commit()
+            raise HTTPException(status_code=422, detail=run.quality_report) from exc
     toolbox_config = dict((scenario.config or {}).get("toolbox") or {})
     computations = (
         [serialize_row(row) for row in _latest_computation_rows(db, project.id)]
@@ -2860,7 +3301,7 @@ def finalize_report_generation(
         input_facts=[serialize_row(f) for f in db.scalars(select(ProjectFact).where(ProjectFact.project_id == project.id, ProjectFact.active.is_(True), _active(ProjectFact)))],
     )
     binding_map = {item["block_id"]: item for item in new_bindings}
-    quality = _strict_report_quality(db, project=project, document=document, content=content, bindings=binding_map)
+    quality = _strict_report_quality(db, project=project, user=user, document=document, content=content, bindings=binding_map)
     if not quality["ok"]:
         run.status = "quality_failed"
         run.stage = "quality_gate"
@@ -2925,6 +3366,7 @@ def finalize_report_generation(
     run.stage = "completed"
     run.progress = 100
     run.quality_report = quality
+    run.toolbox_result = {**(run.toolbox_result or {}), "generated_document_version_id": version.id}
     run.finished_at = datetime.now(timezone.utc)
     project.status = "reviewing"
     audit(
@@ -3414,6 +3856,54 @@ def preview_input_changes(
             ).strip() or current_section
         if str(node.get("id") or "") in affected_blocks:
             block_sections[str(node["id"])] = current_section
+    binding_by_block = {row.block_id: row for row in bindings}
+    calculation_by_run = {item["previous_run_id"]: item for item in affected_calculations}
+    calculation_by_key = {item["result_key"]: item for item in affected_calculations if item.get("result_key")}
+    content_proposals: list[dict[str, Any]] = []
+    for block_id in affected_blocks:
+        binding = binding_by_block[block_id]
+        node = find_plate_node((current_version.content if current_version else []) or [], block_id)
+        section = block_sections.get(block_id, "报告正文")
+        if node is None:
+            content_proposals.append({"block_id": block_id, "section": section, "selectable": False, "reason": "正文块已移除，请人工核对"})
+            continue
+        if str(node.get("type") or "") == "computed_metric":
+            old_run_id = str(node.get("computation_run_id") or binding.computation_run_id or "")
+            calculation = calculation_by_run.get(old_run_id)
+            if calculation is None:
+                calculation = calculation_by_key.get(bound_result_keys.get(old_run_id, ""))
+            if calculation:
+                old_text = "".join(str(child.get("text") or "") for child in node.get("children") or [] if isinstance(child, dict))
+                label = str(calculation.get("label") or node.get("label") or "测算结果")
+                unit = str(calculation.get("unit") or node.get("unit") or "")
+                content_proposals.append({
+                    "block_id": block_id, "section": section, "kind": "computed_metric", "selectable": True,
+                    "old_text": old_text, "new_text": f"经核验与测算，{label}为{calculation['new_value']}{unit}。",
+                    "reason": "确定性公式已重新预览；选择是否更新正文中的测算结果",
+                })
+                continue
+        metadata = binding.metadata_json or {}
+        direct_changes = [
+            change for change in requested
+            if change["fact_id"] == binding.fact_id
+            or change["fact_id"] in (metadata.get("input_fact_ids") or [])
+            or change["fact_key"] in (metadata.get("input_keys") or [])
+        ]
+        metric_changes = [
+            calculation for calculation in affected_calculations
+            if calculation["previous_run_id"] == binding.computation_run_id
+            or calculation["previous_run_id"] in (metadata.get("computation_run_ids") or [])
+            or calculation.get("result_key") in (metadata.get("metric_keys") or [])
+        ]
+        changes = [
+            {"old_value": change["old_value"], "new_value": change["new_value"]}
+            for change in direct_changes
+        ] + [
+            {"old_value": calculation["old_value"], "new_value": calculation["new_value"]}
+            for calculation in metric_changes
+        ]
+        proposal = propose_bound_text_change(node, changes)
+        content_proposals.append({"block_id": block_id, "section": section, "kind": str(node.get("type") or ""), **proposal})
     unchanged = []
     affected_keys = {str(item.get("result_key") or "") for item in affected_calculations}
     for run in all_latest:
@@ -3437,6 +3927,7 @@ def preview_input_changes(
             {"block_id": block_id, "section": block_sections.get(block_id, "报告正文")}
             for block_id in affected_blocks
         ],
+        "content_proposals": content_proposals,
         "unaffected_results": unchanged,
         "automatic_overwrite": False,
     }
@@ -3501,7 +3992,23 @@ def apply_input_changes(
         preview.status = "superseded"
         db.commit()
         raise HTTPException(status_code=409, detail="输入已在预览后发生变化，请重新查看影响")
+    proposals = {
+        str(item.get("block_id") or ""): item
+        for item in (preview.impact or {}).get("content_proposals") or []
+        if item.get("selectable")
+    }
+    if payload.accepted_block_ids is None:
+        # Legacy clients did not receive narrative suggestions. Keep their
+        # behaviour compatible: authoritative metric nodes update only.
+        accepted_block_ids = {
+            block_id for block_id, item in proposals.items() if item.get("kind") == "computed_metric"
+        }
+    else:
+        accepted_block_ids = set(payload.accepted_block_ids)
+        if accepted_block_ids - set(proposals):
+            raise HTTPException(status_code=422, detail="只能接受本次预览中可安全更新的正文内容")
     created_fact_ids: list[str] = []
+    replacement_fact_ids: dict[str, str] = {}
     for item in preview.changes or []:
         previous = current_facts[item["fact_key"]]
         previous.active = False
@@ -3534,13 +4041,21 @@ def apply_input_changes(
         db.add(row)
         db.flush()
         created_fact_ids.append(row.id)
-    db.commit()
-    recomputed = recompute_impacts(
-        document.id,
-        WritingRecomputeRequest(changed_fact_ids=created_fact_ids),
-        user=user,
-        db=db,
-    )
+        replacement_fact_ids[previous.id] = row.id
+    # Keep fact replacement, deterministic recomputation and the document
+    # version in one transaction.  If a formula or a bound node fails, no
+    # half-applied input can leak into the current project.
+    db.flush()
+    db.info["writing_atomic_input_apply"] = True
+    try:
+        recomputed = recompute_impacts(
+            document.id,
+            WritingRecomputeRequest(changed_fact_ids=created_fact_ids),
+            user=user,
+            db=db,
+        )
+    finally:
+        db.info.pop("writing_atomic_input_apply", None)
     replacement_by_old = {
         str(item.get("previous_run_id")): item
         for item in recomputed.get("replacement_runs") or []
@@ -3557,9 +4072,40 @@ def apply_input_changes(
         raise HTTPException(status_code=409, detail="文稿当前版本不存在")
 
     changed_blocks: list[str] = []
+    affected_block_ids = {str(item.get("block_id") or "") for item in (preview.impact or {}).get("report_blocks") or []}
 
     def update_node(node: dict[str, Any]) -> dict[str, Any]:
         updated = dict(node)
+        block_id = str(updated.get("id") or "")
+        proposal = proposals.get(block_id)
+        if block_id in accepted_block_ids and proposal and proposal.get("kind") != "computed_metric":
+            proposed_node = proposal.get("new_node")
+            if not isinstance(proposed_node, dict):
+                raise HTTPException(status_code=409, detail="正文修改提案已失效，请重新预览")
+            if str(proposed_node.get("id") or "") != block_id:
+                raise HTTPException(status_code=409, detail="正文修改提案与当前内容不匹配")
+            updated = proposed_node
+            binding = db.scalar(select(WritingBlockBinding).where(
+                WritingBlockBinding.document_id == document.id,
+                WritingBlockBinding.block_id == block_id,
+                _active(WritingBlockBinding),
+            ))
+            if binding:
+                metadata = dict(binding.metadata_json or {})
+                metadata["input_fact_ids"] = [replacement_fact_ids.get(fid, fid) for fid in metadata.get("input_fact_ids") or []]
+                metadata["computation_run_ids"] = [
+                    replacement_by_old.get(run_id, {}).get("replacement_run_id", run_id)
+                    for run_id in metadata.get("computation_run_ids") or []
+                ]
+                metadata["input_change_id"] = preview.id
+                binding.metadata_json = metadata
+                binding.fact_id = replacement_fact_ids.get(binding.fact_id, binding.fact_id)
+                binding.computation_run_id = replacement_by_old.get(binding.computation_run_id or "", {}).get(
+                    "replacement_run_id", binding.computation_run_id
+                )
+                binding.freshness_status = "current"
+                binding.content_hash = content_hash(updated)
+            changed_blocks.append(block_id)
         if str(updated.get("type") or "") == "computed_metric":
             old_run_id = str(updated.get("computation_run_id") or "")
             replacement = replacement_by_old.get(old_run_id)
@@ -3570,7 +4116,7 @@ def apply_input_changes(
                     or ""
                 )
                 replacement = replacement_by_result_key.get(old_result_key)
-            if replacement:
+            if replacement and block_id in accepted_block_ids:
                 new_run = db.get(ComputationRun, replacement["replacement_run_id"])
                 if new_run is not None:
                     result = dict(new_run.result or {})
@@ -3610,6 +4156,16 @@ def apply_input_changes(
                             "input_change_id": preview.id,
                         }
                     changed_blocks.append(str(updated.get("id") or ""))
+        if block_id in affected_block_ids and block_id not in accepted_block_ids:
+            updated["freshness_status"] = "stale"
+            binding = db.scalar(select(WritingBlockBinding).where(
+                WritingBlockBinding.document_id == document.id,
+                WritingBlockBinding.block_id == block_id,
+                _active(WritingBlockBinding),
+            ))
+            if binding:
+                binding.freshness_status = "stale"
+                binding.content_hash = content_hash(updated)
         if isinstance(updated.get("children"), list):
             updated["children"] = [
                 update_node(child) if isinstance(child, dict) else child for child in updated["children"]
@@ -3634,7 +4190,7 @@ def apply_input_changes(
         scenario_package_version_id=document.scenario_package_version_id or project.scenario_package_version_id,
         knowledge_product_release_id=document.knowledge_product_release_id or project.knowledge_product_release_id,
         status="draft",
-        change_summary="应用输入变化并局部更新受影响测算",
+        change_summary="确认输入变化并逐项更新正文",
         created_by=user.id,
     )
     db.add(version)
@@ -3649,6 +4205,8 @@ def apply_input_changes(
         **(preview.impact or {}),
         "applied": True,
         "changed_block_ids": sorted(set(changed_blocks)),
+        "accepted_block_ids": sorted(accepted_block_ids),
+        "pending_review_block_ids": sorted(affected_block_ids - accepted_block_ids),
         "replacement_runs": recomputed.get("replacement_runs") or [],
     }
     audit(db, user.tenant_id, user.id, "writing.input_change.apply", "writing_input_change", preview.id, {"document_version_id": version.id, "changed_blocks": sorted(set(changed_blocks))})
@@ -4151,6 +4709,68 @@ def get_document(document_id: str, user: User = Depends(get_current_user), db: S
     return {**serialize_row(row), "role": _project_role(db, project, user), "current_version": serialize_row(current) if current else None}
 
 
+@router.post("/documents/{document_id}/sample-profile/preview")
+def preview_article_sample_profile(
+    document_id: str,
+    payload: WritingSampleProfileRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read the actual pinned sample, but extract style/structure only."""
+    document, _ = _document(db, document_id, user, "editor")
+    material, version = _sample_material_for_article(db, document, payload.material_id, user)
+    if version.size > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="样稿超过结构提取上限，请选择精简版本")
+    text = ""
+    if "pdf" in str(version.content_type or "").lower() or str(version.filename or "").lower().endswith(".pdf"):
+        import pdfplumber
+        try:
+            with pdfplumber.open(io.BytesIO(object_storage.get_bytes(version.object_key))) as pdf:
+                text = "\n".join((page.extract_text(layout=True) or "") for page in pdf.pages[:100])
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="样稿 PDF 无法读取版式，请检查文件或使用已解析文本") from exc
+    else:
+        text = "\n".join(
+            chunk.text for chunk in db.scalars(
+                select(Chunk).where(Chunk.version_id == version.id, _active(Chunk)).order_by(Chunk.ordinal)
+            )
+        )
+    try:
+        profile = extract_sample_profile(text, version_id=version.id, source_sha256=version.sha256)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    audit(db, user.tenant_id, user.id, "writing.sample_profile.preview", "writing_document", document.id,
+          {"sample_material_id": material.id, "chapter_count": len(profile["chapters"]), "source_version_id": version.id})
+    db.commit()
+    return {"material_id": material.id, "profile": profile, "preview_only": True}
+
+
+@router.put("/documents/{document_id}/sample-profile")
+def apply_article_sample_profile(
+    document_id: str,
+    payload: WritingSampleProfileApply,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Confirm a reviewable article-scoped writing profile."""
+    document, _ = _document(db, document_id, user, "editor")
+    material, version = _sample_material_for_article(db, document, payload.material_id, user)
+    current = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+    if current and current.change_summary not in {"创建文稿", "创建报告草稿"}:
+        raise HTTPException(status_code=409, detail="当前文章已有正文；样稿目录变更需新建文章，避免覆盖人工修改")
+    try:
+        chapters = validate_sample_profile(payload.profile, source_version_id=version.id, source_sha256=version.sha256)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    profile = {**payload.profile, "status": "confirmed", "chapters": chapters,
+               "material_id": material.id, "profile_hash": content_hash(chapters)}
+    document.applicability = {**(document.applicability or {}), "sample_profile": profile}
+    audit(db, user.tenant_id, user.id, "writing.sample_profile.apply", "writing_document", document.id,
+          {"sample_material_id": material.id, "profile_hash": profile["profile_hash"], "chapter_count": len(chapters)})
+    db.commit()
+    return {"document_id": document.id, "profile": profile}
+
+
 @router.post("/documents/{document_id}/collaboration-token")
 def collaboration_token(
     document_id: str,
@@ -4385,6 +5005,7 @@ def create_document_version(
     strict_quality = _generated_report_quality(
         db,
         project=project,
+        user=user,
         document=document,
         content=payload.content,
         bindings=bindings,
@@ -4455,6 +5076,20 @@ def upsert_binding(
     db: Session = Depends(get_db),
 ):
     document, project = _document(db, document_id, user, "editor")
+    if payload.block_type in {"p", "li", "table"}:
+        current = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+        saved_node = find_plate_node((current.content if current else []) or [], payload.block_id)
+        if saved_node is None or saved_node != payload.block_content or payload.content_hash != content_hash(saved_node):
+            raise HTTPException(status_code=409, detail="正文已变化，请先保存并重新建立依据绑定")
+        metadata = payload.metadata or {}
+        for fact_id in metadata.get("input_fact_ids") or []:
+            linked = _tenant_row(db, ProjectFact, str(fact_id), user.tenant_id, "关联输入")
+            if linked.project_id != project.id:
+                raise HTTPException(status_code=403, detail="正文依据不能关联其他项目的输入")
+        for run_id in metadata.get("computation_run_ids") or []:
+            linked = _tenant_row(db, ComputationRun, str(run_id), user.tenant_id, "关联计算")
+            if linked.project_id != project.id:
+                raise HTTPException(status_code=403, detail="正文依据不能关联其他项目的计算")
     effective_release_id = document.knowledge_product_release_id or project.knowledge_product_release_id
     if payload.knowledge_product_release_id and payload.knowledge_product_release_id != effective_release_id:
         raise HTTPException(status_code=409, detail="引用必须属于项目选择的知识空间")
@@ -4527,6 +5162,7 @@ def validate_document(
     strict_quality = _generated_report_quality(
         db,
         project=project,
+        user=user,
         document=document,
         content=content,
         bindings=bindings,
@@ -4667,7 +5303,10 @@ def recompute_impacts(
             }
         )
     audit(db, user.tenant_id, user.id, "writing.document.impact", "writing_document", document.id, impact)
-    db.commit()
+    if db.info.get("writing_atomic_input_apply"):
+        db.flush()
+    else:
+        db.commit()
     return {
         **impact,
         "action": "recomputed_and_marked_stale",
@@ -4710,6 +5349,7 @@ def create_export(
     strict_quality = _generated_report_quality(
         db,
         project=project,
+        user=user,
         document=document,
         content=version.content or [],
         bindings=bindings,
@@ -4789,6 +5429,7 @@ def create_export(
             ) or 0
         ),
         "selected_plan": selected_plan,
+        "sample_profile_hash": ((document.applicability or {}).get("sample_profile") or {}).get("profile_hash"),
     }
     job = ExportJob(
         tenant_id=user.tenant_id,
@@ -4829,6 +5470,7 @@ def create_export(
                 audit_summary=audit_summary,
                 bindings=list(bindings.values()),
                 coordinates=dict(route_coordinates or {}),
+                sample_profile=dict((document.applicability or {}).get("sample_profile") or {}),
             )
             checksum = hashlib.sha256(target.read_bytes()).hexdigest()
             object_storage.put_file(object_key, target, CONTENT_TYPES[payload.output_format])

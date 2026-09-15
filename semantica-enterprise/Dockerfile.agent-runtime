@@ -32,8 +32,12 @@ COPY semantica-enterprise/integrations/deepseek-harness/ /opt/deepseek-harness/p
 # plugin. Expose the same reviewed package at the workspace root so the locked
 # SDK can resolve it without modifying Harness core code.
 RUN ln -s .pnpm/tsx@4.22.4/node_modules/tsx /opt/deepseek-harness/node_modules/tsx
+# The filtered production install leaves workspace peers unlinked at the root.
+# Link only packages from the already copied and commit-locked Harness tree.
+RUN node packages/integration/chuanshen-knowledge/link-locked-peers.mjs
 RUN cd packages/integration/chuanshen-knowledge \
-    && node --import tsx/esm -e "Promise.all([import('/opt/deepseek-harness/packages/sdk/client/src/index.ts'), import('/opt/deepseek-harness/packages/sdk/client/src/launch.ts').then(m => m.resolveDshLaunch({profile:'sdk-minimal'})), import('@deepseek-ai/dsh-tools')])"
+    && node --import tsx/esm -e "Promise.all([import('/opt/deepseek-harness/packages/sdk/client/src/index.ts'), import('/opt/deepseek-harness/packages/sdk/client/src/launch.ts').then(m => m.resolveDshLaunch({profile:'sdk-minimal'})), import('/opt/deepseek-harness/packages/boot/app-boot/lib/index.js'), import('/opt/deepseek-harness/packages/core/system-prompt/lib/index.js'), import('@deepseek-ai/dsh-tools')])"
+RUN cd packages/integration/chuanshen-knowledge && node -e "import('./index.js')"
 RUN cd packages/integration/chuanshen-knowledge && pnpm test
 
 RUN groupadd --gid 10002 harness \
