@@ -23,9 +23,13 @@ RUN test "$(cat packages/integration/chuanshen-knowledge/HARNESS_COMMIT)" = "cd5
 RUN node packages/integration/chuanshen-knowledge/patch-sdk-server.mjs \
     packages/sdk/server/src/server.ts
 RUN --mount=type=cache,id=chuanshen-dsh-filtered-pnpm,target=/root/.local/share/pnpm/store \
-    pnpm install --filter chuanshen-knowledge-harness... --prod --no-frozen-lockfile --ignore-scripts \
+    pnpm install --filter chuanshen-knowledge-harness... --filter @deepseek-ai/dsh-root --no-frozen-lockfile --ignore-scripts \
     && pnpm rebuild esbuild koffi node-pty \
     && pnpm --filter @deepseek-ai/dsh-subprocess-local run postinstall
+# A production server builds from a clean pinned checkout; package lib/
+# artifacts are intentionally not committed to Harness. Build its public
+# host/client exports before the SDK-minimal source launch resolves them.
+RUN pnpm run build:lib
 COPY semantica-enterprise/integrations/deepseek-harness/ /opt/deepseek-harness/packages/integration/chuanshen-knowledge/
 # The source-launch path resolves its TypeScript loader from the SDK package,
 # while the filtered workspace install links tsx only into our out-of-tree
