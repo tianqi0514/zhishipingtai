@@ -123,6 +123,9 @@ def writing_extraction_prompt(
 5. 主体、客体、单位或时间不清时设置 needs_confirmation=true，并在 ambiguities 中说明。
 6. aliases 只保存原文实际出现或同一批次明确说明的别名。
 7. 输出严格满足以下顶层键，不能增加字段：entities、claims、relations、metrics、sample_profile、ambiguities。
+8. 输出紧凑 JSON；空值或默认值字段可以省略，同义实体和同义陈述必须合并，禁止复述原文。
+9. 每批最多输出30个实体、40个Claim、30条关系、30个指标；只保留对专业写作有用的原子知识。
+10. metrics 只列原文明确出现的数值指标；relations 只列实体到实体的关系，不得把普通数值Claim重复扩写成关系。
 
 材料用途：{material_role}
 签发 Evidence：
@@ -144,7 +147,7 @@ def writing_output_token_budget(
     """Return a bounded response budget proportional to signed source text."""
 
     source_chars = sum(len(item.text) for item in evidence)
-    return max(768, min(int(configured_max_tokens), 4096, source_chars * 2 + 512))
+    return max(1024, min(int(configured_max_tokens), 2048, source_chars * 3 + 512))
 
 
 def extract_writing_knowledge(

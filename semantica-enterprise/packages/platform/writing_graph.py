@@ -120,8 +120,8 @@ def ensure_writing_evidence(
 def evidence_batches(
     evidence: list[WritingEvidence],
     *,
-    target_chars: int = 8_000,
-    max_items: int = 12,
+    target_chars: int = 1_600,
+    max_items: int = 4,
 ) -> list[list[WritingEvidence]]:
     target_chars = max(500, min(int(target_chars), 40_000))
     max_items = max(1, min(int(max_items), 50))
@@ -397,9 +397,9 @@ def process_writing_graph_version(
     material_role: str = "task_data",
     generator: Callable[[str], dict[str, Any]] | None = None,
     request_parameters: dict[str, Any] | None = None,
-    timeout: float = 120,
-    max_retries: int = 2,
-    max_tokens: int = 4096,
+    timeout: float = 180,
+    max_retries: int = 1,
+    max_tokens: int = 2048,
 ) -> dict[str, Any]:
     evidence = ensure_writing_evidence(
         db, document=document, version=version, actor_id=actor_id,

@@ -2411,17 +2411,22 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         base_url=llm_model.base_url,
                         material_role=material_role,
                         request_parameters=(llm_model.config or {}).get("parameters"),
-                        timeout=float((llm_model.config or {}).get("timeout", 120)),
+                        timeout=float(
+                            (llm_model.config or {}).get(
+                                "writing_graph_timeout",
+                                max(180, float((llm_model.config or {}).get("timeout", 120))),
+                            )
+                        ),
                         max_retries=int(
                             (llm_model.config or {}).get(
-                                "max_retries", (llm_model.config or {}).get("retry", 2)
+                                "writing_graph_max_retries", 1
                             )
                         ),
                         max_tokens=max(
                             768,
                             min(
-                                int((llm_model.config or {}).get("writing_graph_max_tokens", 4096)),
-                                4096,
+                                int((llm_model.config or {}).get("writing_graph_max_tokens", 2048)),
+                                2048,
                             ),
                         ),
                     )
