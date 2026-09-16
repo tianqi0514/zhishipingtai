@@ -142,6 +142,7 @@ from packages.platform.writing_flow import (
     normalize_agent_heading_refs,
     report_quality_review,
     renumber_chapter_citations,
+    retryable_agent_report_protocol_failure,
     validate_agent_edit,
     validate_and_parse_agent_report,
     validate_public_reference_refs,
@@ -3376,13 +3377,16 @@ def stream_report_generation_agent(
     db: Session = Depends(get_db),
 ):
     run, project, document = _generation(db, run_id, user, "editor")
-    if run.status not in {"awaiting_agent", "agent_failed"}:
+    retry_protocol_failure = retryable_agent_report_protocol_failure(
+        run.status, run.stage, run.error_code,
+    )
+    if run.status not in {"awaiting_agent", "agent_failed"} and not retry_protocol_failure:
         raise HTTPException(status_code=409, detail="当前报告生成任务不能启动写作 Agent")
     if run.agent_session_id is None:
         raise HTTPException(status_code=409, detail="报告生成任务缺少写作会话")
     completed_before = dict((run.toolbox_result or {}).get("agent_section_parts") or {})
     rotate_for_next_chapter = bool(completed_before) and run.assistant_message_id is None
-    if run.status == "agent_failed" or rotate_for_next_chapter:
+    if run.status == "agent_failed" or rotate_for_next_chapter or retry_protocol_failure:
         # A failed provider turn may already have written an incomplete user
         # message to Harness persistence. Reusing that identity would append
         # the same large report prompt and can exhaust the context window
@@ -3390,7 +3394,7 @@ def stream_report_generation_agent(
         # and attach a fresh report-generation session to this same run.
         failed_session = db.get(WritingAgentSession, run.agent_session_id)
         if failed_session is not None:
-            failed_session.status = "failed" if run.status == "agent_failed" else "completed"
+            failed_session.status = "failed" if run.status in {"agent_failed", "quality_failed"} else "completed"
         db.commit()
         replacement = create_writing_agent_session(
             project.id,
@@ -3413,7 +3417,7 @@ def stream_report_generation_agent(
             db,
             user.tenant_id,
             user.id,
-            "writing.generation.agent.retry" if run.status == "agent_failed" else "writing.generation.agent.next_chapter",
+            "writing.generation.agent.retry" if run.status in {"agent_failed", "quality_failed"} else "writing.generation.agent.next_chapter",
             "writing_generation_run",
             run.id,
             {"replacement_session_id": replacement["id"]},

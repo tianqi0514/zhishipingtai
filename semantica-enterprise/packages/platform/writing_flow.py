@@ -35,6 +35,21 @@ PLATFORM_PROCESS_PHRASES = (
     "规则推演结论为：",
 )
 
+
+def retryable_agent_report_protocol_failure(status: str, stage: str, error_code: str | None) -> bool:
+    """Allow a fresh isolated Turn only for a rejected chapter protocol.
+
+    Content-quality failures after all chapters are assembled require the
+    explicit section revision workflow.  This narrow predicate lets a model
+    retry malformed JSON or node enums without regenerating already accepted
+    chapters and without weakening the fail-closed validator.
+    """
+    return (
+        status == "quality_failed"
+        and stage == "structured_output_validation"
+        and error_code == "INVALID_AGENT_REPORT"
+    )
+
 RESULT_SECTION_HINTS = {
     "disaster_grade": ("grading", "assessment", "situation"),
     "rescue_gap": ("actions", "safeguards", "response"),
@@ -463,6 +478,7 @@ def build_generation_prompt(
         "JSON 字段名是机器协议，必须逐字使用下方英文名称，严禁翻译、改名、重复或新增字段。"
         "content_nodes 中每个对象只允许 type、text、items、input_refs、metric_refs、writing_fact_refs、"
         "writing_evidence_refs、writing_relation_refs、public_reference_refs；段落不得出现 items，表格不得出现 text。"
+        "type 只允许 p、ul、ol、blockquote、table、h3；普通段落必须逐字填写 p，禁止使用 paragraph、text 或 prose。"
         "即使某类依赖为空，也要使用对应的英文 key 返回空数组，不能把多个字段合并成‘写作工具’等自定义字段。"
         "请为下列报告生成一次且仅一次的全部章节。只输出一个 JSON 对象，不要 Markdown 代码围栏之外的文字。"
         "严禁输出思考过程、自我对话、工具名称、检索说明、英文工作草稿、内部 ID 或系统实现。"

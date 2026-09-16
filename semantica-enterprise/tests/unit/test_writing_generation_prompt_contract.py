@@ -4,7 +4,8 @@ import pytest
 
 from packages.platform.writing_flow import (
     build_generation_prompt, normalize_agent_heading_refs, renumber_chapter_citations,
-    report_quality_review, validate_and_parse_agent_report, validate_public_reference_refs,
+    report_quality_review, retryable_agent_report_protocol_failure,
+    validate_and_parse_agent_report, validate_public_reference_refs,
     validate_writing_graph_refs,
 )
 
@@ -26,6 +27,19 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     assert "不要再逐条调用图谱对象工具" in prompt
     assert "JSON 字段名是机器协议" in prompt
     assert "不能把多个字段合并成‘写作工具’" in prompt
+    assert "普通段落必须逐字填写 p" in prompt
+
+
+def test_only_structured_agent_protocol_failures_can_retry_the_same_chapter():
+    assert retryable_agent_report_protocol_failure(
+        "quality_failed", "structured_output_validation", "INVALID_AGENT_REPORT"
+    )
+    assert not retryable_agent_report_protocol_failure(
+        "quality_failed", "quality_validation", "REPORT_QUALITY_FAILED"
+    )
+    assert not retryable_agent_report_protocol_failure(
+        "completed", "structured_output_validation", "INVALID_AGENT_REPORT"
+    )
 
 
 def test_generation_keeps_optional_citations_optional():
