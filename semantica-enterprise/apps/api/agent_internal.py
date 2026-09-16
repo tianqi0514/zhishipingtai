@@ -393,7 +393,7 @@ def _writing_model_capacity(
     # paying for chat-sized output budgets that one chapter cannot use.
     section_output_cap = max(
         512,
-        int(config.get("writing_section_max_tokens", 1800)),
+        int(config.get("writing_section_max_tokens", 1600)),
     )
     max_tokens = min(max_tokens, section_output_cap)
     context_window = int(

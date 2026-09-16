@@ -94,7 +94,7 @@ def test_writing_model_capacity_keeps_provider_context_headroom() -> None:
         "context_window": 15872,
         "provider_flag": True,
     }
-    assert max_tokens == 1800
+    assert max_tokens == 1600
 
 
 def test_writing_model_capacity_preserves_provider_parameters_without_context() -> None:
@@ -103,7 +103,7 @@ def test_writing_model_capacity_preserves_provider_parameters_without_context() 
         4096,
     )
 
-    assert max_tokens == 1800
+    assert max_tokens == 1600
     assert parameters == {"enable_thinking": False}
 
 
