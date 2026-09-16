@@ -249,9 +249,9 @@ function successfulToolNames(events, turn = undefined) {
     : -1
   const scopedEvents = turn === undefined
     ? allEvents.slice(Math.max(0, lastTurnStart))
-    : allEvents.filter(event => event.data?.turn === turn)
+    : allEvents
   const calls = new Map(scopedEvents
-    .filter(event => event.type === 'tool/call')
+    .filter(event => event.type === 'tool/call' && (turn === undefined || event.data?.turn === turn))
     .map(event => [String(event.data?.callId || ''), event.data?.name]))
   const successful = new Set()
   for (const event of scopedEvents) {
