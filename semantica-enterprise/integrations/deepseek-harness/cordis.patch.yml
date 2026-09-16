@@ -92,7 +92,11 @@
           config:
             thresholdRatio: 0.65
             retainRatio: 0.12
-            maxTokens: 2048
+            # Formal-writing turns carry several typed evidence results.  A
+            # truncated checkpoint is rejected by upstream Harness and leaves
+            # the original oversized surface in place, so use the bounded
+            # per-session budget selected by the platform runtime.
+            maxTokens: !!js Number(process.env.DSH_COMPACTION_MAX_TOKENS || 2048)
             compactionRetries: 2
             maxOverflowRetries: 2
     - id: chuanshen-knowledge-tools

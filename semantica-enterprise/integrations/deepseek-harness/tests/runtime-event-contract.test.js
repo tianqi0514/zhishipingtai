@@ -62,3 +62,12 @@ test('runtime makes the platform thinking switch an explicit SDK effort', () => 
   assert.match(patch, /supportsDeveloperRole: false/)
   assert.match(patch, /thinkingFormat:/)
 })
+
+test('runtime gives formal-writing compaction a bounded non-truncating budget', () => {
+  const runtime = readFileSync(new URL('../runtime.js', import.meta.url), 'utf8')
+  const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  assert.match(runtime, /function compactionMaxTokens\(model\)/)
+  assert.match(runtime, /Math\.min\(3072, Math\.max\(2048, configured\)\)/)
+  assert.match(runtime, /DSH_COMPACTION_MAX_TOKENS: String\(compactionMaxTokens\(model\)\)/)
+  assert.match(patch, /maxTokens: !!js Number\(process\.env\.DSH_COMPACTION_MAX_TOKENS \|\| 2048\)/)
+})

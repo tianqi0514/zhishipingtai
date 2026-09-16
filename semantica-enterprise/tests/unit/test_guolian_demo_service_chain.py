@@ -236,6 +236,9 @@ def test_harness_runtime_mounts_upstream_long_session_compaction() -> None:
     assert "maxOverflowRetries: 2" in patch
     assert "DSH_MODEL_CONTEXT_WINDOW" in runtime
     assert "modelContextWindow(model)" in runtime
+    assert "DSH_COMPACTION_MAX_TOKENS" in runtime
+    assert "compactionMaxTokens(model)" in runtime
+    assert "DSH_COMPACTION_MAX_TOKENS" in patch
     assert "DSH_MODEL_ENABLE_THINKING" in runtime
     assert "DSH_MODEL_THINKING_FORMAT" in patch
     assert "reasoningEfforts:" in patch

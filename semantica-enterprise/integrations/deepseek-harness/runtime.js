@@ -79,6 +79,17 @@ function modelContextWindow(model) {
   return Number.isInteger(configured) && configured > 0 ? configured : 131072
 }
 
+function compactionMaxTokens(model) {
+  const configured = Number(model?.max_tokens || 4096)
+  if (!Number.isInteger(configured) || configured <= 0) return 2048
+  // A formal-writing turn carries several typed tool results.  The upstream
+  // 2K default can truncate the checkpoint itself, after which Harness must
+  // send the uncompacted surface to the provider.  Give the checkpoint the
+  // same bounded output budget as the writing request without allowing an
+  // unexpectedly large general-chat model limit to inflate compaction.
+  return Math.min(3072, Math.max(2048, configured))
+}
+
 async function harnessFor(sessionId) {
   const closing = closingSessions.get(sessionId)
   if (closing) await closing
@@ -96,6 +107,7 @@ async function harnessFor(sessionId) {
     DSH_MODEL_MAX_RETRIES: String(model.max_retries || 2),
     DSH_MODEL_TEMPERATURE: String(model.temperature ?? 0.2),
     DSH_MODEL_CONTEXT_WINDOW: String(modelContextWindow(model)),
+    DSH_COMPACTION_MAX_TOKENS: String(compactionMaxTokens(model)),
     DSH_SESSION_KIND: String(model.session_kind || 'chat'),
     DSH_MODEL_THINKING_FORMAT: String(model.thinking_format || 'openai'),
     DSH_MODEL_ENABLE_THINKING: String(model.enable_thinking !== false),
