@@ -41,6 +41,7 @@ test('formal report sessions expose only writing evidence tools', () => {
     [...REPORT_GENERATION_TOOL_NAMES].sort(),
   )
   assert.equal(tools.some(tool => tool.name.startsWith('structured_')), false)
+  assert.equal(tools.some(tool => ['writing_graph_search', 'writing_get_fact', 'writing_get_evidence', 'writing_get_relation_path'].includes(tool.name)), false)
 })
 
 

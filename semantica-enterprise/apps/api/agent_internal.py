@@ -78,6 +78,7 @@ from packages.platform.models import (
     WritingBlockBinding,
     WritingDocument,
     WritingDocumentVersion,
+    WritingGenerationRun,
     WritingProject,
     WritingProjectMaterial,
     WritingGraphRelease,
@@ -1347,8 +1348,30 @@ def agent_writing_chapter_source_pack(
     chapters = (list(profile.get("chapters") or []) if profile.get("status") == "confirmed"
                 else list((scenario.chapter_template or {}).get("chapters") or []) if scenario else [])
     chapter = next((item for item in chapters if str(item.get("key") or "") == payload.section_key), None)
+    generation = db.scalar(
+        select(WritingGenerationRun).where(
+            WritingGenerationRun.agent_session_id == session.id,
+            WritingGenerationRun.document_id == document.id,
+            _active(WritingGenerationRun),
+        ).order_by(WritingGenerationRun.created_at.desc()).limit(1)
+    )
+    # The formal generation run owns the confirmed chapter contract.  The
+    # sample profile is only a structural fallback and may not carry the
+    # required fact/metric keys used by this particular article.
+    if generation is not None:
+        confirmed = next(
+            (
+                item for item in generation.section_plan or []
+                if str(item.get("key") or "") == payload.section_key
+            ),
+            None,
+        )
+        if confirmed is not None:
+            chapter = {**(chapter or {}), **confirmed}
     if chapter is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "本文没有这个章节")
+    required_inputs = [str(item) for item in chapter.get("required_inputs") or [] if str(item)]
+    toolbox_outputs = [str(item) for item in chapter.get("toolbox_outputs") or [] if str(item)]
     terms = [str(chapter.get("title") or "")] + [str(term) for term in chapter.get("subheadings") or []]
     adopted = None if document.adopted_material_ids is None else set(document.adopted_material_ids)
     materials = list(db.scalars(select(WritingProjectMaterial).where(
@@ -1388,15 +1411,125 @@ def agent_writing_chapter_source_pack(
         if remaining < 300:
             truncated = True
             break
+
+    snapshot_facts = {
+        str(item.get("fact_key") or ""): item
+        for item in ((generation.input_snapshot or {}).get("facts") or [])
+    } if generation is not None else {}
+    if not snapshot_facts:
+        snapshot_facts = {
+            row.fact_key: {
+                "id": row.id,
+                "fact_key": row.fact_key,
+                "label": row.label,
+                "value": row.value,
+                "unit": row.unit,
+                "version": row.version,
+                "verification_status": row.verification_status,
+            }
+            for row in db.scalars(select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.active.is_(True),
+                ProjectFact.verification_status == "verified",
+                _active(ProjectFact),
+            ))
+        }
+    verified_inputs = [snapshot_facts[key] for key in required_inputs if key in snapshot_facts]
+
+    computation_items = list(
+        (((generation.toolbox_result or {}).get("computations") or {}).get("items") or [])
+    ) if generation is not None else []
+    computed_metrics: list[dict[str, Any]] = []
+    for item in computation_items:
+        run = dict(item.get("run") or {})
+        result = dict(run.get("result") or {})
+        key = str((result.get("output_fact") or {}).get("fact_key") or "")
+        if key not in toolbox_outputs:
+            continue
+        fact = dict(item.get("fact") or {})
+        computed_metrics.append({
+            "metric_key": key,
+            "label": (result.get("output_fact") or {}).get("label"),
+            "unit": (result.get("output_fact") or {}).get("unit"),
+            "value": result.get("value"),
+            "inputs": result.get("inputs") or {},
+            "dependencies": result.get("dependencies") or {},
+            "computation_run_id": run.get("id"),
+            "project_fact_id": fact.get("id"),
+            "verification_status": fact.get("verification_status"),
+        })
+
+    release = _writing_tool_graph_release(db, project, document, claims)
+    graph_query = " ".join(filter(None, [
+        *terms,
+        str(chapter.get("instruction") or ""),
+        *[str(item.get("label") or item.get("fact_key") or "") for item in verified_inputs],
+    ]))
+    graph_hits = search_writing_graph_release(
+        db,
+        release,
+        query=graph_query,
+        object_types={"fact", "relation"},
+        limit=14,
+    )
+    graph_facts = [item["snapshot"] for item in graph_hits if item["object_type"] == "fact"][:8]
+    graph_relations = [item["snapshot"] for item in graph_hits if item["object_type"] == "relation"][:6]
+    evidence_ids: list[str] = []
+    for snapshot in [*graph_facts, *graph_relations]:
+        for evidence_id in snapshot.get("evidence_ids") or []:
+            value = str(evidence_id)
+            if value and value not in evidence_ids:
+                evidence_ids.append(value)
+    graph_evidence: list[dict[str, Any]] = []
+    for evidence_id in evidence_ids[:8]:
+        try:
+            evidence = get_release_object(
+                db, release, object_type="evidence", object_id=evidence_id,
+            )
+        except LookupError:
+            continue
+        evidence = dict(evidence)
+        text = str(evidence.get("text") or "")
+        if len(text) > 800:
+            evidence["text"] = text[:800].rstrip() + "…"
+            evidence["text_truncated"] = True
+        graph_evidence.append(evidence)
     audit(db, claims["tenant_id"], claims["sub"], "agent.writing.chapter_source_pack",
           "writing_agent_session", session.id,
-          {"section_key": payload.section_key, "source_count": len(items), "truncated": truncated})
+          {
+              "section_key": payload.section_key,
+              "source_count": len(items),
+              "verified_input_count": len(verified_inputs),
+              "computed_metric_count": len(computed_metrics),
+              "writing_graph_fact_count": len(graph_facts),
+              "writing_graph_relation_count": len(graph_relations),
+              "truncated": truncated,
+          })
     db.commit()
     return {
         "section_key": payload.section_key, "terms": terms,
         "items": items, "source_count": len(items),
         "character_count": payload.max_characters - remaining,
         "truncated": truncated,
+        "chapter_contract": {
+            "instruction": chapter.get("instruction"),
+            "required_inputs": required_inputs,
+            "toolbox_outputs": toolbox_outputs,
+        },
+        "verified_inputs": verified_inputs,
+        "missing_required_inputs": sorted(set(required_inputs) - set(snapshot_facts)),
+        "computed_metrics": computed_metrics,
+        "writing_graph": {
+            "release_id": release.id,
+            "release_number": release.release_number,
+            "facts": graph_facts,
+            "relations": graph_relations,
+            "evidence": graph_evidence,
+            "binding_policy": (
+                "这里返回的 fact/relation/evidence id 均来自本文锁定的不可变写作图谱版本，"
+                "只有节点正文实际使用时才可写入对应 writing_*_refs。"
+            ),
+        },
         "warnings": [] if items else ["本章已固定的业务资料没有匹配片段，请补充资料或调整目录"],
     }
 

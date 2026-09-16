@@ -27,7 +27,7 @@ const PROMPT = `你是“传神智库”的组织知识问答 Agent。必须遵�
 
 const WRITING_PROMPT = `当用户请求以“[妙笔写作任务]”或“[妙笔正式报告生成]”开头时，你正在处理知识约束写作：
 1. 先调用 writing_get_project_context，读取文章类型、目标读者、写作目的、适用范围、锁定版本和已核验项目事实。需要原文时调用 knowledge_search；需要经治理事实或关系时，先用 writing_graph_search，再按返回 ID 调用 writing_get_fact、writing_get_evidence 或 writing_get_relation_path。这些工具只读文章锁定的不可变 WritingGraphRelease，不得把候选区内容当成事实。只有用户明确要求“路线、调度、备选方案、方案比较或推荐方案”时，才调用 writing_compare_alternative_plans 并引用其中的路线、时长、风险或资源结果；其他写作请求不得主动加入方案细节。
-2. 交互式写作任务的目录使用 writing_create_outline_draft，章节草稿可使用 writing_generate_section_draft。对于“[妙笔正式报告生成]”，目录和章节契约已经由用户确认，禁止重新生成目录；每轮只写提示词指定的一章，必须调用 writing_get_chapter_source_pack 读取本文采用的固定版本原文片段。它只提供写作材料，不直接产生正式引用编号；写入正文的事实还要调用 knowledge_search 核验可引用来源，引用标签必须来自真实检索事件。
+2. 交互式写作任务的目录使用 writing_create_outline_draft，章节草稿可使用 writing_generate_section_draft。对于“[妙笔正式报告生成]”，目录和章节契约已经由用户确认，禁止重新生成目录；每轮只写提示词指定的一章，必须调用 writing_get_chapter_source_pack。该工具一次返回本章固定版本原文、已确认项目输入、确定性计算，以及本文锁定 WritingGraphRelease 中与本章相关的 Fact、Evidence 和 Relation。只有正文实际采用时才绑定其中的 writing_*_refs；正式[数字]文档引用仍须调用 knowledge_search 取得真实引用标签。资料包已提供的对象不要再逐项查询。
 3. 权威数字只能来自已核验项目事实、structured_execute_query 或确定性 ComputationRun；不得自行心算后冒充正式测算。
 4. 正式推演结论只能来自 knowledge_reason/Semantica 结果；不得用语言模型猜测灾害等级、响应等级或资源缺口。
 5. 生成内容作为“待用户接受的修订建议”，不得声称已经覆盖或发布文稿。证据绑定必须调用 writing_bind_evidence。
@@ -45,14 +45,8 @@ export const REPORT_GENERATION_TOOL_NAMES = new Set([
   'knowledge_search',
   'knowledge_get_fragment',
   'writing_get_project_context',
-  'writing_get_release',
-  'writing_graph_search',
-  'writing_get_fact',
-  'writing_get_evidence',
-  'writing_get_relation_path',
   'writing_search_public_standard',
   'writing_get_chapter_source_pack',
-  'writing_compare_alternative_plans',
 ])
 
 export function toolAllowedForSessionKind(name, sessionKind = process.env.DSH_SESSION_KIND || 'chat') {
@@ -625,7 +619,7 @@ export function apply(ctx) {
 
   registerTool(defineTool({
     name: 'writing_get_chapter_source_pack',
-    description: '经 FastAPI 权限与文档版本校验，按本文目录标题读取已发布业务资料的相关原文片段；不包含样稿，不直接生成引用编号。',
+    description: '经 FastAPI 权限和版本校验，一次读取本章固定原文、已确认输入、确定性计算及锁定写作图谱中的 Fact/Evidence/Relation。资料包内 ID 可按实际使用写入 writing_*_refs；[数字]文档引用仍由 knowledge_search 提供。',
     parameters: {
       section_key: { type: 'string', required: true },
       max_characters: { type: 'integer', description: '原文字符上限，300 到 20000。' },

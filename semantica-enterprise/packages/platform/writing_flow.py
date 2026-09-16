@@ -415,7 +415,9 @@ def build_generation_prompt(
     focused_chapter = (
         "这是已经由用户确认目录的单章写作任务，不要重复建立目录，不要检索其他章节。"
         "先以本章 section_key 调用 writing_get_chapter_source_pack，读取本文固定版本的相关原文；"
-        "该工具的片段没有正式引用编号，事实句仍要经 knowledge_search 核验并取得真实引用标签。"
+        "该资料包还包含本章已确认输入、确定性计算及锁定写作图谱中的 Fact、Evidence、Relation；"
+        "正文实际采用这些对象时直接填写资料包返回的 writing_*_refs，不要再逐条调用图谱对象工具。"
+        "资料包的原文片段没有正式[数字]引用编号，事实句仍要经 knowledge_search 核验并取得真实引用标签。"
         + (
             "这是针对质量不足章节的修订。按二级标题分别检索不同的原文位置，"
             "可作三至四次有差异的知识检索，并对必要结果读取完整片段；"
@@ -452,8 +454,8 @@ def build_generation_prompt(
         "对应章节必须使用这些依据补全责任、依赖和影响，不能把缺失关系说成不存在风险。"
         "对应章节有关系依据时至少引用一条；使用其中的结论时在句末标注其精确引用编号，例如[K0123456789ab]；不要自行创造编号。"
         "每个 content_nodes 节点另返回 input_refs 和 metric_refs 字符串数组，列出该段实际使用的项目事实 key 和计算结果 key。"
-        "若本轮使用 writing_get_fact、writing_get_evidence 或 writing_get_relation_path，节点还必须分别返回 writing_fact_refs、"
-        "writing_evidence_refs 和 writing_relation_refs；只能填写这些工具从本文固定 WritingGraphRelease 返回的真实对象 ID。"
+        "若本轮使用章节资料包中的写作图谱对象，节点还必须分别返回 writing_fact_refs、"
+        "writing_evidence_refs 和 writing_relation_refs；只能填写资料包从本文固定 WritingGraphRelease 返回的真实对象 ID。"
         "若使用 writing_search_public_standard，还必须在 public_reference_refs 中填写工具返回的 public_reference_id。"
         "未实际用于该节点的对象不得绑定；不能根据名称猜测 ID，也不能使用写作图谱候选区对象。"
         "章节契约若含 subheadings，可用 h3 节点逐项表达已确认的二级标题；h3.text 必须精确等于目录标题，随后写可核验正文。"
