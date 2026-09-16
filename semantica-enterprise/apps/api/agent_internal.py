@@ -462,6 +462,7 @@ def get_agent_model(
     return {
         "provider": model.provider,
         "model_name": model.model_name,
+        "session_kind": (conversation.settings or {}).get("kind") or "chat",
         "base_url": model.base_url,
         "api_key": api_key,
         "timeout": int(config.get("timeout", 120)),

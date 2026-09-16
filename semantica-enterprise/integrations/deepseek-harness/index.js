@@ -41,6 +41,24 @@ const WRITING_PROMPT = `当用户请求以“[妙笔写作任务]”或“[妙�
 
 当请求以“[妙笔局部修订]”开头且平台策略包含 writing_revision_action 时，这是对选中文字的编辑，不是问答。先调用 writing_get_project_context 核对上下文，然后必须回到原始编辑要求。最终只输出替换选区的正文；禁止输出“已调用工具”“确认当前任务”等执行说明，不要复述要求。缩写必须实质压缩且保留业务动作、关键数值与不确定性，扩写不能增加未经证实的事实。不从历史消息或工具结果新增引用编号，只保留选区已有引用。`
 
+export const REPORT_GENERATION_TOOL_NAMES = new Set([
+  'knowledge_search',
+  'knowledge_get_fragment',
+  'writing_get_project_context',
+  'writing_get_release',
+  'writing_graph_search',
+  'writing_get_fact',
+  'writing_get_evidence',
+  'writing_get_relation_path',
+  'writing_search_public_standard',
+  'writing_get_chapter_source_pack',
+  'writing_compare_alternative_plans',
+])
+
+export function toolAllowedForSessionKind(name, sessionKind = process.env.DSH_SESSION_KIND || 'chat') {
+  return sessionKind !== 'writing_generation' || REPORT_GENERATION_TOOL_NAMES.has(name)
+}
+
 const nullableString = { oneOf: [{ type: 'string' }, { type: 'null' }] }
 const nullableInteger = { oneOf: [{ type: 'integer' }, { type: 'null' }] }
 const expressionSchema = {
@@ -246,7 +264,10 @@ function successfulToolNames(events, turn) {
 export function apply(ctx) {
   ctx.effect(() => ctx.systemPrompt.section({ name: 'chuanshen-knowledge-policy', order: 1200, text: PROMPT }))
   ctx.effect(() => ctx.systemPrompt.section({ name: 'miaobi-writing-policy', order: 1210, text: WRITING_PROMPT }))
-  const registerTool = definition => ctx.effect(() => ctx.tools.register(definition))
+  const registerTool = definition => {
+    if (!toolAllowedForSessionKind(definition.name)) return undefined
+    return ctx.effect(() => ctx.tools.register(definition))
+  }
 
   // The locked SDK does not expose temperature on its high-level constructor.
   // Keep the compatibility shim in this out-of-tree plugin so model settings

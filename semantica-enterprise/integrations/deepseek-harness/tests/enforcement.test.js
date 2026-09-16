@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { apply } from '../index.js'
+import { apply, REPORT_GENERATION_TOOL_NAMES } from '../index.js'
 import { evidenceRequirements } from '../query-policy.js'
 
 
-function fixture() {
+function fixture(sessionKind = undefined) {
   const listeners = new Map()
   const tools = []
   const sections = []
@@ -21,9 +21,27 @@ function fixture() {
       return dispose
     },
   }
-  apply(ctx)
+  const previousKind = process.env.DSH_SESSION_KIND
+  if (sessionKind === undefined) delete process.env.DSH_SESSION_KIND
+  else process.env.DSH_SESSION_KIND = sessionKind
+  try {
+    apply(ctx)
+  } finally {
+    if (previousKind === undefined) delete process.env.DSH_SESSION_KIND
+    else process.env.DSH_SESSION_KIND = previousKind
+  }
   return { listeners, sections, tools, dispose: () => [...disposers].reverse().forEach(item => item()) }
 }
+
+
+test('formal report sessions expose only writing evidence tools', () => {
+  const { tools } = fixture('writing_generation')
+  assert.deepEqual(
+    tools.map(tool => tool.name).sort(),
+    [...REPORT_GENERATION_TOOL_NAMES].sort(),
+  )
+  assert.equal(tools.some(tool => tool.name.startsWith('structured_')), false)
+})
 
 
 test('registers typed knowledge tools and turn enforcement', () => {
