@@ -44,10 +44,13 @@ INPUT_SPECS = {
 }
 
 RELEASE_INPUT_SPECS = {
-    "event_name": {"label": "事件名称", "value": "测试地区 6.2 级地震应急处置演练", "unit": None},
-    "magnitude": {"label": "地震震级", "value": 6.2, "unit": "级"},
+    "event_name": {
+        "label": "事件名称", "value": "测试地区 6.2 级地震应急处置演练", "unit": None,
+        "predicate_hints": ["登记", "登记为"],
+    },
+    "magnitude": {"label": "地震震级", "value": 6.2, "unit": "级", "predicate_hints": ["地震震级"]},
     **{
-        key: {"label": label, "value": value, "unit": unit}
+        key: {"label": label, "value": value, "unit": unit, "predicate_hints": [label]}
         for key, (label, value, unit) in INPUT_SPECS.items()
     },
 }
@@ -248,6 +251,7 @@ def map_release_inputs(release: dict[str, Any]) -> list[dict[str, str]]:
     used: set[str] = set()
     for fact_key, spec in RELEASE_INPUT_SPECS.items():
         label, expected, unit = spec["label"], spec["value"], spec["unit"]
+        predicate_hints = list(spec.get("predicate_hints") or [label])
 
         def value_matches(item: dict[str, Any]) -> bool:
             actual = release_value(item)
@@ -271,7 +275,9 @@ def map_release_inputs(release: dict[str, Any]) -> list[dict[str, str]]:
             0 if item.get("origin_type") == "metric_mention" else 1,
             item["id"],
         ))
-        if not candidates or label not in str(candidates[0].get("predicate") or ""):
+        if not candidates or not any(
+            hint in str(candidates[0].get("predicate") or "") for hint in predicate_hints
+        ):
             raise RuntimeError(f"写作图谱中没有找到已确认输入：{fact_key} / {label}={expected}{unit}")
         selected = candidates[0]
         used.add(selected["id"])

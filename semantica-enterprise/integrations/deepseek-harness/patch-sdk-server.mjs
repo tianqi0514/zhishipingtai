@@ -42,11 +42,19 @@ const CREATE_SESSION_REPLACEMENT = `  private async createSession(sessionId: str
     let handle: AgentHandle | undefined
     if (persistence !== undefined) {
       try {
-        await persistence.inspect(id)
-        handle = await this.ctx.agents.resume({
-          resumeSessionId: id,
-          agentOptions,
-        })
+        const inspection = await persistence.inspect(id)
+        // The JSON-RPC client and persistence plugin can observe an empty,
+        // unmaterialized identity during first-turn setup.  It is not a
+        // resumable conversation: attempting resume produces the misleading
+        // session-not-found failure seen by the platform.  Only durable
+        // event history is resumed; an empty inspection follows the normal
+        // create path below.
+        if (inspection.events.length > 0) {
+          handle = await this.ctx.agents.resume({
+            resumeSessionId: id,
+            agentOptions,
+          })
+        }
       } catch (error) {
         if (!(error instanceof SessionPersistenceNotFoundError)) throw error
       }
@@ -80,4 +88,3 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const patched = patchSdkServer(source)
   writeFileSync(target, patched)
 }
-
