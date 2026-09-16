@@ -354,6 +354,90 @@ def normalize_agent_heading_refs(
     return corrected, removed
 
 
+def normalize_agent_reference_kinds(
+    sections: list[dict[str, Any]],
+    *,
+    project_fact_keys_by_id: dict[str, str],
+    allowed_ids: dict[str, set[str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Reclassify only IDs whose authoritative type is known exactly.
+
+    Tool results expose both project facts (addressed by ``fact_key``) and
+    immutable writing-graph objects (addressed by release-scoped UUID).  Some
+    models preserve the correct UUID but place it in the wrong reference
+    array.  This function never guesses from prose: it moves a reference only
+    when the database supplied an unambiguous target type.  Unknown IDs remain
+    untouched and are rejected by the strict validators that follow.
+    """
+
+    field_types = {
+        "writing_fact_refs": "fact",
+        "writing_evidence_refs": "evidence",
+        "writing_relation_refs": "relation",
+    }
+    target_fields = {value: key for key, value in field_types.items()}
+    known_graph_type: dict[str, str] = {}
+    for object_type, ids in allowed_ids.items():
+        for object_id in ids:
+            previous = known_graph_type.get(str(object_id))
+            if previous is not None and previous != object_type:
+                # Ambiguous release data must fail closed in the validator.
+                known_graph_type.pop(str(object_id), None)
+                continue
+            known_graph_type[str(object_id)] = object_type
+
+    corrected: list[dict[str, Any]] = []
+    changes: list[dict[str, str]] = []
+    for section in sections:
+        revised_nodes: list[dict[str, Any]] = []
+        for node_index, node in enumerate(section.get("content_nodes") or []):
+            revised = dict(node)
+            collected = {
+                field: list(dict.fromkeys(map(str, node.get(field) or [])))
+                for field in field_types
+            }
+            input_refs = list(dict.fromkeys(map(str, node.get("input_refs") or [])))
+            for source_field, source_type in field_types.items():
+                kept: list[str] = []
+                for ref in collected[source_field]:
+                    if ref in set(allowed_ids.get(source_type) or set()):
+                        kept.append(ref)
+                        continue
+                    fact_key = project_fact_keys_by_id.get(ref)
+                    if fact_key is not None:
+                        input_refs.append(fact_key)
+                        changes.append({
+                            "section_key": str(section.get("section_key") or ""),
+                            "node_index": str(node_index),
+                            "reference": ref,
+                            "from": source_field,
+                            "to": "input_refs",
+                        })
+                        continue
+                    actual_type = known_graph_type.get(ref)
+                    if actual_type is not None:
+                        target_field = target_fields[actual_type]
+                        collected[target_field].append(ref)
+                        changes.append({
+                            "section_key": str(section.get("section_key") or ""),
+                            "node_index": str(node_index),
+                            "reference": ref,
+                            "from": source_field,
+                            "to": target_field,
+                        })
+                        continue
+                    kept.append(ref)
+                collected[source_field] = kept
+            if "input_refs" in node or input_refs:
+                revised["input_refs"] = list(dict.fromkeys(input_refs))
+            for field, refs in collected.items():
+                if field in node or refs:
+                    revised[field] = list(dict.fromkeys(refs))
+            revised_nodes.append(revised)
+        corrected.append({**section, "content_nodes": revised_nodes})
+    return corrected, changes
+
+
 def validate_writing_graph_refs(
     sections: list[dict[str, Any]],
     *,
@@ -493,6 +577,8 @@ def build_generation_prompt(
         "每个 content_nodes 节点另返回 input_refs 和 metric_refs 字符串数组，列出该段实际使用的项目事实 key 和计算结果 key。"
         "若本轮使用章节资料包中的写作图谱对象，节点还必须分别返回 writing_fact_refs、"
         "writing_evidence_refs 和 writing_relation_refs；只能填写资料包从本文固定 WritingGraphRelease 返回的真实对象 ID。"
+        "项目事实只能把 fact_key 填入 input_refs，严禁把 ProjectFact 的 UUID 填入 writing_fact_refs；"
+        "写作图谱工具返回的 Fact、Evidence、Relation ID 必须分别放入对应同名 refs，禁止跨类型放置。"
         "若使用 writing_search_public_standard，还必须在 public_reference_refs 中填写工具返回的 public_reference_id。"
         "未实际用于该节点的对象不得绑定；不能根据名称猜测 ID，也不能使用写作图谱候选区对象。"
         "章节契约若含 subheadings，可用 h3 节点逐项表达已确认的二级标题；h3.text 必须精确等于目录标题，随后写可核验正文。"

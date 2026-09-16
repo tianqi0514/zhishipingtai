@@ -140,6 +140,7 @@ from packages.platform.writing_flow import (
     assemble_report_content,
     build_generation_prompt,
     normalize_agent_heading_refs,
+    normalize_agent_reference_kinds,
     report_quality_review,
     renumber_chapter_citations,
     retryable_agent_report_protocol_failure,
@@ -3588,16 +3589,32 @@ def finalize_report_generation(
     # metric_refs) surfaced only after every later chapter had completed.
     # Keep the final all-chapter pass below for historical/in-flight runs, but
     # make new runs fail locally and retry only the rejected chapter.
-    known_input_keys = {
-        str(row.fact_key) for row in db.scalars(select(ProjectFact).where(
+    active_input_facts = list(db.scalars(select(ProjectFact).where(
             ProjectFact.project_id == project.id, ProjectFact.active.is_(True),
             _active(ProjectFact),
-        ))
-    }
+        )))
+    known_input_keys = {str(row.fact_key) for row in active_input_facts}
+    project_fact_keys_by_id = {str(row.id): str(row.fact_key) for row in active_input_facts}
     known_metric_keys = {
         str(((row.result or {}).get("output_fact") or {}).get("fact_key") or "")
         for row in _latest_computation_rows(db, project.id)
     }
+    release_id = document.writing_graph_release_id or project.writing_graph_release_id
+    allowed_graph_ids: dict[str, set[str]] = {
+        "fact": set(), "evidence": set(), "relation": set(),
+    }
+    if release_id:
+        for item in db.scalars(select(WritingGraphReleaseItem).where(
+            WritingGraphReleaseItem.release_id == release_id,
+            WritingGraphReleaseItem.object_type.in_(sorted(allowed_graph_ids)),
+            _active(WritingGraphReleaseItem),
+        )):
+            allowed_graph_ids[item.object_type].add(str(item.object_id))
+    parsed_sections, current_graph_ref_corrections = normalize_agent_reference_kinds(
+        parsed_sections,
+        project_fact_keys_by_id=project_fact_keys_by_id,
+        allowed_ids=allowed_graph_ids,
+    )
     try:
         parsed_sections, current_heading_refs = normalize_agent_heading_refs(
             parsed_sections,
@@ -3617,6 +3634,28 @@ def finalize_report_generation(
         run.finished_at = datetime.now(timezone.utc)
         db.commit()
         raise HTTPException(status_code=422, detail=run.quality_report) from exc
+    try:
+        validate_writing_graph_refs(parsed_sections, allowed_ids=allowed_graph_ids)
+    except ValueError as exc:
+        run.status = "quality_failed"
+        run.stage = "writing_graph_reference_validation"
+        run.progress = 100
+        run.error_code = "INVALID_WRITING_GRAPH_REFS"
+        run.error_message = str(exc)
+        run.quality_report = {"ok": False, "issues": [{
+            "code": "invalid_writing_graph_refs", "severity": "error", "message": str(exc),
+        }]}
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=422, detail=run.quality_report) from exc
+    if current_graph_ref_corrections:
+        run.toolbox_result = {
+            **(run.toolbox_result or {}),
+            "normalized_graph_refs": [
+                *((run.toolbox_result or {}).get("normalized_graph_refs") or []),
+                *current_graph_ref_corrections,
+            ],
+        }
     if current_heading_refs:
         run.toolbox_result = {
             **(run.toolbox_result or {}),
@@ -3651,6 +3690,19 @@ def finalize_report_generation(
         citation_message_ids = [str(saved_parts[str(item["key"])]["assistant_message_id"]) for item in run.section_plan or []]
     else:
         sections = parsed_sections
+    sections, historical_graph_ref_corrections = normalize_agent_reference_kinds(
+        sections,
+        project_fact_keys_by_id=project_fact_keys_by_id,
+        allowed_ids=allowed_graph_ids,
+    )
+    if sectional:
+        for planned_section, normalized_section in zip(run.section_plan or [], sections, strict=True):
+            key = str(planned_section["key"])
+            saved_parts[key] = {**saved_parts[key], "section": normalized_section}
+        run.toolbox_result = {
+            **(run.toolbox_result or {}),
+            "agent_section_parts": saved_parts,
+        }
     try:
         sections, corrected_heading_refs = normalize_agent_heading_refs(
             sections, run.section_plan or [],
@@ -3673,17 +3725,14 @@ def finalize_report_generation(
             **(run.toolbox_result or {}),
             "normalized_heading_refs": corrected_heading_refs,
         }
-    release_id = document.writing_graph_release_id or project.writing_graph_release_id
-    allowed_graph_ids: dict[str, set[str]] = {
-        "fact": set(), "evidence": set(), "relation": set(),
-    }
-    if release_id:
-        for item in db.scalars(select(WritingGraphReleaseItem).where(
-            WritingGraphReleaseItem.release_id == release_id,
-            WritingGraphReleaseItem.object_type.in_(sorted(allowed_graph_ids)),
-            _active(WritingGraphReleaseItem),
-        )):
-            allowed_graph_ids[item.object_type].add(str(item.object_id))
+    if historical_graph_ref_corrections:
+        run.toolbox_result = {
+            **(run.toolbox_result or {}),
+            "normalized_graph_refs": [
+                *((run.toolbox_result or {}).get("normalized_graph_refs") or []),
+                *historical_graph_ref_corrections,
+            ],
+        }
     try:
         validate_writing_graph_refs(sections, allowed_ids=allowed_graph_ids)
         validate_public_reference_refs(

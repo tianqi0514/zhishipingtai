@@ -3,7 +3,8 @@ import json
 import pytest
 
 from packages.platform.writing_flow import (
-    assemble_report_content, build_generation_prompt, normalize_agent_heading_refs, renumber_chapter_citations,
+    assemble_report_content, build_generation_prompt, normalize_agent_heading_refs,
+    normalize_agent_reference_kinds, renumber_chapter_citations,
     report_quality_review, retryable_agent_report_protocol_failure,
     validate_and_parse_agent_report, validate_public_reference_refs,
     validate_writing_graph_refs,
@@ -244,3 +245,40 @@ def test_writing_graph_refs_are_strict_and_release_scoped():
     invented_field["sections"][0]["content_nodes"][0]["physical_table"] = "writing_facts"
     with pytest.raises(ValueError, match="结构不受支持"):
         validate_and_parse_agent_report(json.dumps(invented_field, ensure_ascii=False), plan)
+
+
+def test_reference_kind_normalization_is_id_typed_and_fail_closed():
+    sections = [{
+        "section_key": "resources",
+        "title": "资源保障",
+        "content_nodes": [{
+            "type": "p",
+            "text": "搜救力量和依据已核验。",
+            "writing_fact_refs": ["project-fact-id", "graph-fact-id", "unknown-id"],
+            "writing_relation_refs": ["graph-evidence-id", "graph-relation-id"],
+        }],
+    }]
+    normalized, changes = normalize_agent_reference_kinds(
+        sections,
+        project_fact_keys_by_id={"project-fact-id": "rescue_required"},
+        allowed_ids={
+            "fact": {"graph-fact-id"},
+            "evidence": {"graph-evidence-id"},
+            "relation": {"graph-relation-id"},
+        },
+    )
+    node = normalized[0]["content_nodes"][0]
+    assert node["input_refs"] == ["rescue_required"]
+    assert node["writing_fact_refs"] == ["graph-fact-id", "unknown-id"]
+    assert node["writing_evidence_refs"] == ["graph-evidence-id"]
+    assert node["writing_relation_refs"] == ["graph-relation-id"]
+    assert {item["to"] for item in changes} == {"input_refs", "writing_evidence_refs"}
+    assert sections[0]["content_nodes"][0]["writing_relation_refs"] == [
+        "graph-evidence-id", "graph-relation-id",
+    ]
+    with pytest.raises(ValueError, match="unknown-id"):
+        validate_writing_graph_refs(normalized, allowed_ids={
+            "fact": {"graph-fact-id"},
+            "evidence": {"graph-evidence-id"},
+            "relation": {"graph-relation-id"},
+        })
