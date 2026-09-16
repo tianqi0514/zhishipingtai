@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import unicodedata
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -34,8 +35,8 @@ from .models import (
 )
 
 
-WRITING_GRAPH_STRATEGY_VERSION = "writing-graph-v1"
-WRITING_GRAPH_SCHEMA_VERSION = "joint-v1"
+WRITING_GRAPH_STRATEGY_VERSION = "writing-graph-v2"
+WRITING_GRAPH_SCHEMA_VERSION = "joint-v2"
 WRITING_GRAPH_STATUSES = {
     "candidate", "verified", "rejected", "conflicted", "superseded", "stale",
 }
@@ -57,8 +58,67 @@ def normalized_name(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
-def stable_evidence_key(version_id: str, chunk_id: str, chunk_hash: str) -> str:
-    return hashlib.sha256(f"writing-evidence-v1:{version_id}:{chunk_id}:{chunk_hash}".encode()).hexdigest()
+def stable_evidence_key(
+    version_id: str,
+    chunk_id: str,
+    chunk_hash: str,
+    segment_index: int = 0,
+    segment_hash: str = "",
+) -> str:
+    return hashlib.sha256(
+        f"writing-evidence-v2:{version_id}:{chunk_id}:{chunk_hash}:{segment_index}:{segment_hash}".encode()
+    ).hexdigest()
+
+
+def writing_evidence_segments(text: str, *, max_chars: int = 600) -> list[dict[str, Any]]:
+    """Split a parser chunk into exact, addressable writing evidence spans.
+
+    Search chunks intentionally favour retrieval context and may contain many
+    atomic facts.  Writing extraction needs smaller signed spans so a local
+    model can return complete strict JSON.  The original chunk remains the
+    provenance owner; offsets make every derived span deterministic and
+    reversible to the source text.
+    """
+
+    max_chars = max(120, min(int(max_chars), 1200))
+    blocks = [
+        match
+        for match in re.finditer(r"(?:^|\n[ \t]*\n)(.*?)(?=\n[ \t]*\n|\Z)", text, re.S)
+        if match.group(1).strip()
+    ]
+    spans: list[dict[str, Any]] = []
+    pending_heading: re.Match[str] | None = None
+    for match in blocks:
+        value = match.group(1).strip()
+        if not value:
+            continue
+        if value.startswith("#") and "\n" not in value and len(value) <= 160:
+            pending_heading = match
+            continue
+        heading_start = pending_heading.start(1) if pending_heading else match.start(1)
+        start = heading_start + len(text[heading_start:match.end(1)]) - len(text[heading_start:match.end(1)].lstrip())
+        raw = text[start:match.end(1)].strip()
+        pending_heading = None
+        cursor = 0
+        while len(raw) - cursor > max_chars:
+            window = raw[cursor:cursor + max_chars]
+            split_at = max(window.rfind(mark) for mark in ("。", "；", "！", "？", "\n"))
+            if split_at < max_chars // 2:
+                split_at = max_chars - 1
+            piece = raw[cursor:cursor + split_at + 1].strip()
+            if piece:
+                piece_start = text.find(piece, start + cursor, match.end(1) + 1)
+                spans.append({"text": piece, "start": piece_start, "end": piece_start + len(piece)})
+            cursor += split_at + 1
+        piece = raw[cursor:].strip()
+        if piece:
+            piece_start = text.find(piece, start + cursor, match.end(1) + 1)
+            spans.append({"text": piece, "start": piece_start, "end": piece_start + len(piece)})
+    if pending_heading is not None:
+        value = pending_heading.group(1).strip()
+        start = pending_heading.start(1) + len(pending_heading.group(1)) - len(pending_heading.group(1).lstrip())
+        spans.append({"text": value, "start": start, "end": start + len(value)})
+    return spans or ([{"text": text, "start": 0, "end": len(text)}] if text.strip() else [])
 
 
 def ensure_writing_evidence(
@@ -76,18 +136,30 @@ def ensure_writing_evidence(
         Chunk.status != "superseded",
     ).order_by(Chunk.ordinal)))
     result: list[WritingEvidence] = []
-    for index, chunk in enumerate(chunks):
-        key = stable_evidence_key(version.id, chunk.chunk_id, chunk.content_hash)
+    evidence_drafts: list[tuple[Chunk, ContentElement | None, int, dict[str, Any]]] = []
+    for chunk in chunks:
+        element = db.get(ContentElement, chunk.element_id) if chunk.element_id else None
+        for segment_index, segment in enumerate(writing_evidence_segments(chunk.text)):
+            evidence_drafts.append((chunk, element, segment_index, segment))
+    for index, (chunk, element, segment_index, segment) in enumerate(evidence_drafts):
+        segment_hash = hashlib.sha256(segment["text"].encode("utf-8")).hexdigest()
+        key = stable_evidence_key(
+            version.id, chunk.chunk_id, chunk.content_hash, segment_index, segment_hash,
+        )
         row = db.scalar(select(WritingEvidence).where(
             WritingEvidence.tenant_id == version.tenant_id,
             WritingEvidence.evidence_key == key,
             WritingEvidence.deleted_at.is_(None),
         ))
-        element = db.get(ContentElement, chunk.element_id) if chunk.element_id else None
         locator = {
             "page": chunk.page_number,
             "structural_path": chunk.structural_path,
-            "source_span": chunk.source_span or {},
+            "source_span": {
+                **(chunk.source_span or {}),
+                "segment_index": segment_index,
+                "char_start": segment["start"],
+                "char_end": segment["end"],
+            },
             "element_type": element.element_type if element else None,
             "element_id": element.element_id if element else None,
             "element_metadata": element.element_metadata if element else {},
@@ -104,10 +176,13 @@ def ensure_writing_evidence(
                 filename=version.filename,
                 file_version=version.version_number,
                 locator=locator,
-                text=chunk.text,
-                context_before=chunks[index - 1].text[-500:] if index else "",
-                context_after=chunks[index + 1].text[:500] if index + 1 < len(chunks) else "",
-                content_hash=chunk.content_hash,
+                text=segment["text"],
+                context_before=evidence_drafts[index - 1][3]["text"][-500:] if index else "",
+                context_after=(
+                    evidence_drafts[index + 1][3]["text"][:500]
+                    if index + 1 < len(evidence_drafts) else ""
+                ),
+                content_hash=segment_hash,
                 status="current",
                 created_by=actor_id,
             )
@@ -120,8 +195,8 @@ def ensure_writing_evidence(
 def evidence_batches(
     evidence: list[WritingEvidence],
     *,
-    target_chars: int = 1_600,
-    max_items: int = 4,
+    target_chars: int = 320,
+    max_items: int = 2,
 ) -> list[list[WritingEvidence]]:
     target_chars = max(500, min(int(target_chars), 40_000))
     max_items = max(1, min(int(max_items), 50))

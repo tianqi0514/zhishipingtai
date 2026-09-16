@@ -24,8 +24,20 @@ from packages.platform.writing_graph import (
     govern_writing_object,
     process_writing_graph_version,
     publish_writing_graph,
+    writing_evidence_segments,
     writing_graph_release_payload,
 )
+
+
+def test_writing_evidence_segments_preserve_exact_source_spans() -> None:
+    text = "# 事件信息\n\n测试地区发生6.2级地震。\n\n## 资源\n\n可用人员320人，需求500人。"
+    segments = writing_evidence_segments(text, max_chars=120)
+    assert [item["text"] for item in segments] == [
+        "# 事件信息\n\n测试地区发生6.2级地震。",
+        "## 资源\n\n可用人员320人，需求500人。",
+    ]
+    for item in segments:
+        assert text[item["start"]:item["end"]] == item["text"]
 
 
 def graph_fixture() -> tuple[Session, Tenant, User, KnowledgeSpace, Document, DocumentVersion]:
