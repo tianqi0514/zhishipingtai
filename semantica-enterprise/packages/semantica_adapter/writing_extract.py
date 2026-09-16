@@ -158,8 +158,8 @@ def writing_output_token_budget(
     """Return a bounded response budget proportional to signed source text."""
 
     source_chars = sum(len(item.text) for item in evidence)
-    ceiling = max(512, min(int(configured_max_tokens), 1536))
-    return min(ceiling, max(768, source_chars * 4 + 768))
+    ceiling = max(512, min(int(configured_max_tokens), 2048))
+    return min(ceiling, max(768, source_chars * 5 + 1024))
 
 
 def extract_writing_knowledge(
