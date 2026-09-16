@@ -108,6 +108,7 @@ async function harnessFor(sessionId) {
     cwd: '/workspace',
     provider: 'knowledge-model',
     model: model.model_name,
+    reasoningEffort: model.enable_thinking === false ? 'off' : 'high',
     maxTokens: model.max_tokens || 4096,
     env,
     initializeTimeoutMs: Number(process.env.DSH_INITIALIZE_TIMEOUT_MS || 90000),

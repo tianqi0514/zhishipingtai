@@ -53,3 +53,11 @@ test('runtime serializes cancel cleanup and evicts failed SDK initialization', (
   assert.match(source, /if \(!turnState\.startedAt\) await disposeSession\(sessionId, entry\)/)
   assert.match(source, /await disposeSession\(sessionId, entry\)/)
 })
+
+test('runtime makes the platform thinking switch an explicit SDK effort', () => {
+  const runtime = readFileSync(new URL('../runtime.js', import.meta.url), 'utf8')
+  const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  assert.match(runtime, /reasoningEffort: model\.enable_thinking === false \? 'off' : 'high'/)
+  assert.match(patch, /reasoningEfforts:\s+off:\s+high: high/s)
+  assert.match(patch, /thinkingFormat:/)
+})
