@@ -269,7 +269,9 @@ function successfulToolNames(events, turn = undefined) {
 
 export function apply(ctx) {
   const sessionKind = process.env.DSH_SESSION_KIND || 'chat'
-  ctx.effect(() => ctx.systemPrompt.section({ name: 'chuanshen-knowledge-policy', order: 1200, text: PROMPT }))
+  if (sessionKind !== 'writing_generation') {
+    ctx.effect(() => ctx.systemPrompt.section({ name: 'chuanshen-knowledge-policy', order: 1200, text: PROMPT }))
+  }
   ctx.effect(() => ctx.systemPrompt.section({ name: 'miaobi-writing-policy', order: 1210, text: WRITING_PROMPT }))
   const registerTool = definition => {
     if (!toolAllowedForSessionKind(definition.name)) return undefined
@@ -351,7 +353,9 @@ export function apply(ctx) {
           conversation_id: credential.conversation_id,
           query: args.query,
           space_ids: args.space_ids || [],
-          top_k: args.top_k || 10,
+          top_k: sessionKind === 'writing_generation'
+            ? Math.min(args.top_k || 6, 6)
+            : (args.top_k || 10),
           use_keyword: args.use_keyword ?? true,
           use_vector: args.use_vector ?? true,
           use_graph: args.use_graph ?? true,

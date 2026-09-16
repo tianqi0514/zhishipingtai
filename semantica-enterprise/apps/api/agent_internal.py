@@ -395,10 +395,10 @@ def _writing_model_capacity(
     section_output_cap = max(
         512,
         # A 1,600-token cap truncates a valid Chinese chapter once the strict
-        # JSON node/binding fields are included.  3,072 remains below the
-        # tested 16K private-model context after the 9,216-token input reserve,
-        # while allowing one evidence-rich chapter to close its JSON object.
-        int(config.get("writing_section_max_tokens", 3072)),
+        # JSON node/binding fields are included.  2,800, together with the
+        # bounded evidence pack, remains below the tested 16K private-model
+        # context while allowing one evidence-rich chapter to close its JSON.
+        int(config.get("writing_section_max_tokens", 2800)),
     )
     max_tokens = min(max_tokens, section_output_cap)
     context_window = int(
@@ -1476,8 +1476,8 @@ def agent_writing_chapter_source_pack(
         object_types={"fact", "relation"},
         limit=14,
     )
-    graph_facts = [item["snapshot"] for item in graph_hits if item["object_type"] == "fact"][:8]
-    graph_relations = [item["snapshot"] for item in graph_hits if item["object_type"] == "relation"][:6]
+    graph_facts = [item["snapshot"] for item in graph_hits if item["object_type"] == "fact"][:4]
+    graph_relations = [item["snapshot"] for item in graph_hits if item["object_type"] == "relation"][:4]
     evidence_ids: list[str] = []
     for snapshot in [*graph_facts, *graph_relations]:
         for evidence_id in snapshot.get("evidence_ids") or []:
@@ -1485,7 +1485,7 @@ def agent_writing_chapter_source_pack(
             if value and value not in evidence_ids:
                 evidence_ids.append(value)
     graph_evidence: list[dict[str, Any]] = []
-    for evidence_id in evidence_ids[:8]:
+    for evidence_id in evidence_ids[:4]:
         try:
             evidence = get_release_object(
                 db, release, object_type="evidence", object_id=evidence_id,
@@ -1494,8 +1494,8 @@ def agent_writing_chapter_source_pack(
             continue
         evidence = dict(evidence)
         text = str(evidence.get("text") or "")
-        if len(text) > 800:
-            evidence["text"] = text[:800].rstrip() + "…"
+        if len(text) > 400:
+            evidence["text"] = text[:400].rstrip() + "…"
             evidence["text_truncated"] = True
         graph_evidence.append(evidence)
     audit(db, claims["tenant_id"], claims["sub"], "agent.writing.chapter_source_pack",

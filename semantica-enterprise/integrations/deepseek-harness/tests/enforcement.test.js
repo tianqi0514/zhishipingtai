@@ -34,14 +34,15 @@ function fixture(sessionKind = undefined) {
 }
 
 
-test('formal report sessions expose only writing evidence tools', () => {
-  const { tools } = fixture('writing_generation')
+test('formal report sessions expose only writing evidence tools and omit the chat-only policy', () => {
+  const { tools, sections } = fixture('writing_generation')
   assert.deepEqual(
     tools.map(tool => tool.name).sort(),
     [...REPORT_GENERATION_TOOL_NAMES].sort(),
   )
   assert.equal(tools.some(tool => tool.name.startsWith('structured_')), false)
   assert.equal(tools.some(tool => ['writing_graph_search', 'writing_get_fact', 'writing_get_evidence', 'writing_get_relation_path'].includes(tool.name)), false)
+  assert.deepEqual(sections.map(section => section.name), ['miaobi-writing-policy'])
 })
 
 
