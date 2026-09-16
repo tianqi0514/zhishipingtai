@@ -3568,7 +3568,21 @@ def finalize_report_generation(
     saved_parts = dict((run.toolbox_result or {}).get("agent_section_parts") or {})
     pending = [item for item in run.section_plan or [] if str(item.get("key") or "") not in saved_parts]
     if sectional and not pending:
-        raise HTTPException(status_code=409, detail="章节结果已收齐，当前输出不能重复应用")
+        # A final all-chapter validator can reject after the last chapter was
+        # already checkpointed.  Re-open exactly the checkpoint associated
+        # with the current completed assistant message, then deterministically
+        # re-run parsing/normalization.  No model call or prose rewrite occurs.
+        retry_key = next((
+            key for key, value in saved_parts.items()
+            if str(value.get("assistant_message_id") or "") == str(run.assistant_message_id or "")
+        ), None)
+        if not retryable_agent_report_protocol_failure(run.status, run.stage, run.error_code) or retry_key is None:
+            raise HTTPException(status_code=409, detail="章节结果已收齐，当前输出不能重复应用")
+        saved_parts.pop(retry_key)
+        pending = [
+            item for item in run.section_plan or []
+            if str(item.get("key") or "") == retry_key
+        ]
     try:
         parsed_sections = validate_and_parse_agent_report(
             assistant.content, [pending[0]] if sectional else (run.section_plan or [])

@@ -102,6 +102,9 @@ def test_only_structured_agent_protocol_failures_can_retry_the_same_chapter():
     assert retryable_agent_report_protocol_failure(
         "quality_failed", "dependency_validation", "INVALID_AGENT_DEPENDENCIES"
     )
+    assert retryable_agent_report_protocol_failure(
+        "quality_failed", "writing_graph_reference_validation", "INVALID_WRITING_GRAPH_REFS"
+    )
     assert not retryable_agent_report_protocol_failure(
         "quality_failed", "quality_validation", "REPORT_QUALITY_FAILED"
     )

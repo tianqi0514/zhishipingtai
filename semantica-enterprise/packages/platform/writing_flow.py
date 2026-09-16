@@ -47,6 +47,7 @@ def retryable_agent_report_protocol_failure(status: str, stage: str, error_code:
     return status == "quality_failed" and (stage, error_code) in {
         ("structured_output_validation", "INVALID_AGENT_REPORT"),
         ("dependency_validation", "INVALID_AGENT_DEPENDENCIES"),
+        ("writing_graph_reference_validation", "INVALID_WRITING_GRAPH_REFS"),
     }
 
 RESULT_SECTION_HINTS = {
