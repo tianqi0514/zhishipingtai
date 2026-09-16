@@ -4563,6 +4563,7 @@ def preview_input_changes(
         )
     )
     changed_fact_ids = {item["fact_id"] for item in requested}
+    changed_fact_keys = {str(item["fact_key"]) for item in requested}
     affected_result_keys = {
         str(item.get("result_key") or "") for item in affected_calculations if item.get("result_key")
     }
@@ -4587,6 +4588,12 @@ def preview_input_changes(
             or bound_result_keys.get(row.computation_run_id or "") in affected_result_keys
             or changed_fact_ids.intersection((row.metadata_json or {}).get("input_fact_ids") or [])
             or affected_run_ids.intersection((row.metadata_json or {}).get("computation_run_ids") or [])
+            # Keys remain stable across immutable Fact and Computation versions.
+            # They keep an unaccepted stale block discoverable on the next
+            # preview even though its stored dependency IDs intentionally still
+            # point to the previous versions.
+            or changed_fact_keys.intersection((row.metadata_json or {}).get("input_keys") or [])
+            or affected_result_keys.intersection((row.metadata_json or {}).get("metric_keys") or [])
         )
     ]
     current_version = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
@@ -4881,6 +4888,7 @@ def apply_input_changes(
                 )
                 binding.freshness_status = "current"
                 binding.content_hash = content_hash(updated)
+            updated["freshness_status"] = "current"
             changed_blocks.append(block_id)
         if str(updated.get("type") or "") == "computed_metric":
             old_run_id = str(updated.get("computation_run_id") or "")

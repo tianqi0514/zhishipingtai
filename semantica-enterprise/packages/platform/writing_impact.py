@@ -50,6 +50,7 @@ def propose_bound_text_change(
     old_text = "".join(leaf["text"] for leaf in original_leaves)
     if not changes:
         return {"selectable": False, "reason": "没有可验证的数值变化", "old_text": old_text}
+    replacements = 0
     for change in changes:
         old_value = _display_value(change.get("old_value"))
         new_value = _display_value(change.get("new_value"))
@@ -57,10 +58,27 @@ def propose_bound_text_change(
             return {"selectable": False, "reason": "非数值事实需要人工改写", "old_text": old_text}
         pattern = _number_pattern(old_value)
         occurrences = [(leaf, match) for leaf in leaves for match in pattern.finditer(leaf["text"])]
-        if len(occurrences) != 1:
+        if len(occurrences) > 1:
             return {"selectable": False, "reason": "旧数值未唯一出现，不能安全替换", "old_text": old_text}
+        if not occurrences:
+            continue
         leaf, match = occurrences[0]
         leaf["text"] = leaf["text"][:match.start()] + new_value + leaf["text"][match.end():]
+        replacements += 1
+    if replacements == 0:
+        # The block has a registered dependency but does not repeat the changed
+        # numeric value.  A reviewer may explicitly keep its wording while the
+        # binding is advanced to the new immutable Fact/Computation versions.
+        # This is intentionally different from an automatic edit.
+        proposed["freshness_status"] = "current"
+        return {
+            "selectable": True,
+            "review_only": True,
+            "reason": "本段依赖已变化，但正文未出现待替换数值；可在复核后保留原文",
+            "old_text": old_text,
+            "new_text": old_text,
+            "new_node": proposed,
+        }
     return {
         "selectable": True,
         "reason": "仅替换已绑定数值，引用与其他文字保持原样",

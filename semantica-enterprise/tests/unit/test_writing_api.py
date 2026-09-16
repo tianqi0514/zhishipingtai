@@ -1400,6 +1400,26 @@ def test_input_change_accepts_bound_paragraphs_individually_without_overwriting_
             "content"
         ] == paragraph
 
+        # A block left stale by a partial apply still carries stable business
+        # keys even though its immutable Fact/Computation IDs are historical.
+        # It must therefore be discoverable and explicitly reviewable in the
+        # next preview instead of becoming permanently stranded.
+        follow_up = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/preview", json={
+            "document_id": document["id"],
+            "changes": [{"fact_key": "rescue_available", "new_value": {"number": 320}, "reason": "复核回退"}],
+        })
+        assert follow_up.status_code == 200, follow_up.text
+        follow_up_proposals = {
+            item["block_id"]: item for item in follow_up.json()["impact"]["content_proposals"]
+        }
+        assert "paragraph-summary" in follow_up_proposals
+        assert follow_up_proposals["paragraph-summary"]["selectable"] is True
+        assert follow_up_proposals["paragraph-summary"]["review_only"] is True
+        cancelled = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/{follow_up.json()['id']}/cancel"
+        )
+        assert cancelled.status_code == 200, cancelled.text
+
 
 def test_real_customer_sample_profile_is_article_scoped_and_never_factual_evidence(monkeypatch) -> None:
     sample_path = Path("/Users/tianqi/Desktop/积石山县6.2级地震_本体驱动应急智能推演系统_完整升级版/样稿.pdf")

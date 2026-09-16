@@ -32,3 +32,13 @@ def test_non_numeric_claim_is_left_for_human_review() -> None:
     result = propose_bound_text_change(node, [{"old_value": {"text": "原单位"}, "new_value": {"text": "新单位"}}])
     assert result["selectable"] is False
     assert "人工" in result["reason"]
+
+
+def test_bound_dependency_without_literal_number_can_be_reviewed_without_rewriting() -> None:
+    node = {"id": "paragraph-3", "type": "p", "freshness_status": "stale", "children": [{"text": "已根据最新资源清单安排增援。"}]}
+    result = propose_bound_text_change(node, [{"old_value": 320, "new_value": 400}])
+    assert result["selectable"] is True
+    assert result["review_only"] is True
+    assert result["old_text"] == result["new_text"]
+    assert result["new_node"]["freshness_status"] == "current"
+    assert node["freshness_status"] == "stale"
