@@ -16,7 +16,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from apps.api.writing import _select_current_plan_rows, router
-from apps.api.agent_internal import agent_writing_context, agent_writing_document_outline
+from apps.api.agent_internal import (
+    _writing_model_capacity,
+    agent_writing_context,
+    agent_writing_document_outline,
+)
 from apps.api.writing_schemas import AgentWritingRequest
 from packages.platform.database import Base, get_db
 from packages.platform.models import (
@@ -74,6 +78,33 @@ def test_export_plan_selection_keeps_one_current_plan_per_objective() -> None:
         ("safety", 3),
         ("speed", 3),
     ]
+
+
+def test_writing_model_capacity_keeps_provider_context_headroom() -> None:
+    max_tokens, parameters = _writing_model_capacity(
+        {
+            "parameters": {"context_window": 16384, "provider_flag": True},
+            "writing_context_safety_tokens": 512,
+            "writing_input_reserve_tokens": 9216,
+        },
+        7000,
+    )
+
+    assert parameters == {
+        "context_window": 15872,
+        "provider_flag": True,
+    }
+    assert max_tokens == 6656
+
+
+def test_writing_model_capacity_preserves_unbounded_provider_config() -> None:
+    max_tokens, parameters = _writing_model_capacity(
+        {"parameters": {"enable_thinking": False}},
+        4096,
+    )
+
+    assert max_tokens == 4096
+    assert parameters == {"enable_thinking": False}
 
 
 def test_public_reference_is_project_scoped_versioned_metadata_not_a_fact() -> None:

@@ -379,6 +379,36 @@ def issue_credential(
     }
 
 
+def _writing_model_capacity(
+    config: dict[str, Any], max_tokens: int,
+) -> tuple[int, dict[str, Any]]:
+    """Return safe output and context limits for a tool-using writing turn."""
+
+    parameters = dict(config.get("parameters") or {})
+    context_window = int(
+        parameters.get("context_window")
+        or parameters.get("contextWindow")
+        or config.get("context_window")
+        or 0
+    )
+    if context_window <= 0:
+        return max_tokens, parameters
+    # Harness and OpenAI-compatible providers do not necessarily use the
+    # same tokenizer. Reserve headroom so a locally valid estimate cannot
+    # exceed the provider window after tool results are appended.
+    context_safety = max(
+        256,
+        int(config.get("writing_context_safety_tokens", 512)),
+    )
+    effective_context_window = max(4096, context_window - context_safety)
+    parameters["context_window"] = effective_context_window
+    input_reserve = max(4096, int(config.get("writing_input_reserve_tokens", 9216)))
+    return (
+        min(max_tokens, max(1024, effective_context_window - input_reserve)),
+        parameters,
+    )
+
+
 @router.get("/model/{harness_session_id}")
 def get_agent_model(
     harness_session_id: str,
@@ -400,6 +430,7 @@ def get_agent_model(
     if not api_key:
         raise HTTPException(409, "智能问答模型未配置可用凭据")
     config = model.config or {}
+    parameters = dict(config.get("parameters") or {})
     max_tokens = int(config.get("max_tokens", 4096))
     if (conversation.settings or {}).get("kind") == "writing_generation":
         article = db.get(WritingDocument, (conversation.settings or {}).get("writing_document_id"))
@@ -416,16 +447,7 @@ def get_agent_model(
         # strict tool schemas and the article contract.  This prevents a
         # formally valid writing task from failing before its first tool call
         # because input + requested output exceeds the real model window.
-        parameters = dict(config.get("parameters") or {})
-        context_window = int(
-            parameters.get("context_window")
-            or parameters.get("contextWindow")
-            or config.get("context_window")
-            or 0
-        )
-        if context_window > 0:
-            input_reserve = max(4096, int(config.get("writing_input_reserve_tokens", 9216)))
-            max_tokens = min(max_tokens, max(1024, context_window - input_reserve))
+        max_tokens, parameters = _writing_model_capacity(config, max_tokens)
     return {
         "provider": model.provider,
         "model_name": model.model_name,
@@ -437,7 +459,7 @@ def get_agent_model(
             model.model_name, float(config.get("temperature", 0.2))
         ),
         "max_tokens": max_tokens,
-        "parameters": dict(config.get("parameters") or {}),
+        "parameters": parameters,
     }
 
 
