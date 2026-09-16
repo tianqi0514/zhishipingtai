@@ -410,6 +410,22 @@ def get_agent_model(
             # any article text. The configured model remains authoritative;
             # this bounded writing budget was verified against its real API.
             max_tokens = max(max_tokens, min(16384, int(config.get("writing_max_tokens", 16384))))
+        # OpenAI-compatible private endpoints often advertise no context size
+        # through their protocol.  When administrators record the tested
+        # context window, reserve enough room for the locked system prompt,
+        # strict tool schemas and the article contract.  This prevents a
+        # formally valid writing task from failing before its first tool call
+        # because input + requested output exceeds the real model window.
+        parameters = dict(config.get("parameters") or {})
+        context_window = int(
+            parameters.get("context_window")
+            or parameters.get("contextWindow")
+            or config.get("context_window")
+            or 0
+        )
+        if context_window > 0:
+            input_reserve = max(4096, int(config.get("writing_input_reserve_tokens", 9216)))
+            max_tokens = min(max_tokens, max(1024, context_window - input_reserve))
     return {
         "provider": model.provider,
         "model_name": model.model_name,

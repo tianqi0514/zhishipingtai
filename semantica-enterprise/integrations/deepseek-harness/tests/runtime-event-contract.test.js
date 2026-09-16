@@ -36,6 +36,12 @@ test('runtime projects observable event time and turn duration without exposing 
   assert.match(source, /duration_ms: turnState\.startedAt/)
   assert.match(source, /normalizePublicError/)
   assert.match(source, /请求参数不符合结构化查询协议/)
+  assert.ok(
+    source.lastIndexOf("if (['failed', 'error', 'blocked'].includes(reason))")
+      < source.lastIndexOf('if (!evidenceSatisfied(turnState))'),
+    'provider errors must be projected before evidence-policy failures',
+  )
+  assert.match(source, /failure\.message \|\| reason/)
   assert.doesNotMatch(source, /chain[_-]?of[_-]?thought/i)
 })
 

@@ -3377,6 +3377,43 @@ def stream_report_generation_agent(
         raise HTTPException(status_code=409, detail="当前报告生成任务不能启动写作 Agent")
     if run.agent_session_id is None:
         raise HTTPException(status_code=409, detail="报告生成任务缺少写作会话")
+    if run.status == "agent_failed":
+        # A failed provider turn may already have written an incomplete user
+        # message to Harness persistence. Reusing that identity would append
+        # the same large report prompt and can exhaust the context window
+        # before any evidence tool runs. Preserve the failed session for audit
+        # and attach a fresh report-generation session to this same run.
+        failed_session = db.get(WritingAgentSession, run.agent_session_id)
+        if failed_session is not None:
+            failed_session.status = "failed"
+        db.commit()
+        replacement = create_writing_agent_session(
+            project.id,
+            WritingAgentSessionCreate(
+                document_id=document.id,
+                start_new=True,
+                purpose="report_generation",
+            ),
+            user=user,
+            db=db,
+        )
+        run = db.get(WritingGenerationRun, run.id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="报告生成任务不存在")
+        run.agent_session_id = replacement["id"]
+        run.error_code = None
+        run.error_message = None
+        run.finished_at = None
+        audit(
+            db,
+            user.tenant_id,
+            user.id,
+            "writing.generation.agent.retry",
+            "writing_generation_run",
+            run.id,
+            {"replacement_session_id": replacement["id"]},
+        )
+        db.commit()
     session, _, conversation = _writing_session(
         db, run.agent_session_id, user, "editor", expected_purpose="report_generation"
     )
@@ -3455,6 +3492,9 @@ def stream_report_generation_agent(
     run.status = "agent_running"
     run.stage = "narrative_generation"
     run.progress = 55 + (30 * len(completed_parts) // max(1, len(run.section_plan or [])))
+    run.error_code = None
+    run.error_message = None
+    run.finished_at = None
     audit(db, user.tenant_id, user.id, "writing.generation.agent.start", "writing_generation_run", run.id)
     db.commit()
     return StreamingResponse(

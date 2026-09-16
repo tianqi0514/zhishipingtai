@@ -329,18 +329,24 @@ function normalizeEvent(event, toolStarts, turnState) {
         }
         return cancelled
       }
+      // A provider/protocol failure happened before evidence tools could run.
+      // Preserve that real cause instead of misreporting the secondary
+      // symptom as an evidence-policy violation.
+      if (['failed', 'error', 'blocked'].includes(reason)) {
+        const failure = data.reason?.error || data.reason?.failure || {}
+        return [['turn_failed', {
+          reason,
+          code: String(failure.code || 'AGENT_TURN_FAILED'),
+          message: String(failure.message || reason),
+          duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
+          harness_seq: event.seq,
+        }]]
+      }
       if (!evidenceSatisfied(turnState)) {
         return [['turn_failed', {
           reason: 'evidence-tools-required',
           code: 'EVIDENCE_TOOLS_REQUIRED',
           missing_tools: [...turnState.requiredTools].filter(name => !turnState.satisfiedTools.has(name)),
-          duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
-          harness_seq: event.seq,
-        }]]
-      }
-      if (['failed', 'error', 'blocked'].includes(reason)) {
-        return [['turn_failed', {
-          reason,
           duration_ms: turnState.startedAt ? Date.now() - turnState.startedAt : null,
           harness_seq: event.seq,
         }]]
