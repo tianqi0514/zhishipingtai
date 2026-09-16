@@ -476,3 +476,15 @@ Python 回归在该镜像 Python 3.13.15 内只读挂载当前源码执行，共
 - DSH 适配器单独运行时缺少 Harness workspace 依赖，后续通过正式 Runtime 镜像验证。
 - 架构审计结论：现有抽取工作台只投影 Entity/Relation/ProjectFact 等已有对象，尚无独立 Claim、WritingEvidence、WritingGraphRelease 和跨写作图谱 Fact 的版本化传播。
 - 设计决定：复用现有解析、统一治理、Semantica、DSH、妙笔影响预览和 Plate；补充五层正式模型、独立发布版本、多依赖 Chunk 绑定和严格影响应用协议。
+
+## 2026-09-17 写作图谱、真实文章与事实联动验收
+
+- 正式功能均在 `semantica-enterprise` 的 `codex/writing-graph-miaobi-validation` 开发；`chuanshenmiaobi` 未被正式应用依赖。
+- 三份测试业务材料真实走全文、向量、知识图谱和写作图谱加工。独立发布版本包含 Evidence 25、Entity 78、Claim 58、Fact 93、Relation 13。
+- DeepSeek Harness 按 15 章真实生成《测试地区6.2级地震应急处置方案（测试稿）》；最终 V12 为 7,302 个中文字符、90 个引用、4 项确定性计算和一个 5×6 原生任务表，服务端质量审校 0 issues。
+- 真实执行可用搜救人员 320→400，缺口由 180→100。依赖发现使用稳定 `input_key/metric_key` 和对象 ID；11 个直接/间接影响可全选或逐项应用，未选块标记 stale，重复应用返回冲突，历史版本保持原值。
+- 生成协议改为严格章节 JSON；Agent 表格统一规范为二维单元格矩阵。修复过精确数字漏绑、历史验证无法续跑、部分接受后依赖块长期 stale、模型把 `columns/rows` 对象字符串化等问题，没有放宽质量门禁。
+- V12 DOCX/PDF 由正式接口重新生成并逐页渲染。DOCX 为 9 页、PDF 为 7 页，均为 A4；旧 320/180 出现次数为 0，新 400/100 在正文、计算结果和任务表一致。
+- Python 写作图谱/妙笔/Semantica 定向套件 204/204；Plate 7 个测试文件 40/40；TypeScript 和生产构建通过。真实浏览器验证 Plate 正文、任务表、指标弹窗取消、1280×720、1440×900、Console 0 和非预期 4xx/5xx 0。
+- 浏览器回归发现远端协同端口只绑定回环地址，页面虽有本地 IndexedDB 通道，WebSocket 实际失败。测试环境显式配置内网监听并重建协同容器后，复测“协同已同步”、2 个数据通道在线、Console 0。
+- 代码提交已推送 GitHub 分支；测试服务器仓库同步到同一提交。正式应用镜像重建仍需以完成的 Semantica CPU 基础镜像为前提，当前运行容器已热加载同一已提交文件并通过健康/浏览器回归，未删除 Volume。

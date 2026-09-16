@@ -49,7 +49,7 @@ scripts/deploy_server.sh check
 
 ## 主要能力
 
-- 文档：上传、版本、解析百分比、元素、Chunk、治理画像、增量加工与历史溯源；上传或重新加工时可选择“仅检索（全文+向量）”“仅图谱”或“检索+图谱”。
+- 文档：上传、版本、解析百分比、元素、Chunk、治理画像、增量加工与历史溯源；全文、向量、知识图谱和写作图谱可单选或组合，四路复用同一次解析并独立记录状态。
 - 多模态：可版本化媒体策略；固定间隔/FPS/场景/智能抽帧；本地 SenseVoice ASR、Tesseract OCR、统一模型配置中的云端或本地兼容 Vision；场景/关键帧/转写时间线、权限化播放器、缓存重处理和可跳转时间引用。
 - 人工治理：在 Semantica 自动画像、解析元素、Chunk、实体与事实之上叠加可回滚约束；治理工作台按“待处理—人工调整—发布记录”组织业务闭环，支持主动查找、批次归并、真实进度、失败重试和影响预览；原始自动结果不被覆盖。
 - 数据源：29 种类型统一 CRUD、连接测试、手工/定时同步、游标、去重、新版本和失败重试。
@@ -68,6 +68,8 @@ Docker Compose 共启动 14 个生产服务：API、Worker、Scheduler、Agent R
 妙笔是独立的 React + TypeScript + Plate 完整写作应用，本机入口为 <http://localhost:8080/miaobi/>，内网入口为 <http://10.5.113.232:9002/miaobi/>。普通用户只需完成“输入确认 → 分析计算 → 报告编辑”：权威数字由确定性公式产生，正式推演结论由 Semantica 产生，非推演章节由 DeepSeek Harness 基于当前知识产品 Release 撰写。所有结果进入正文前均可预览，数据变化只标记和更新受影响的可信内容，不静默覆盖人工正文。
 
 当前写作工作台进一步收敛为“准备资料 → 起草编辑 → 检查导出”。项目可以先空白创建，知识空间只是可选资料来源；一个项目可包含多篇文章，每篇文章独立选择用途、读者、材料版本和目录。缺少信息只暂停依赖它的章节，已有人工正文不会被整篇生成覆盖。产品设计、七步输入输出和手工闭环见 [写作工作台产品设计](docs/miaobi/WORKBENCH_PRODUCT_DESIGN.md)、[七步输入输出](docs/miaobi/WRITING_STEPS_INPUT_OUTPUT.md) 与 [手工演示](docs/miaobi/WORKBENCH_MANUAL_DEMO.md)。
+
+写作图谱将真实材料组织为 Evidence、Entity、Claim、Fact 和 Relation。候选必须经过治理才能形成不可变发布版本；妙笔按该版本生成章节并为每个 Plate Chunk 保存事实、来源、关系和计算依赖。权威值变化先生成影响预览，用户可全选或逐项应用，未选内容保持原文并标记待核对。当前验收文章已真实完成 `320→400`、缺口 `180→100` 的 11 处依赖传播，历史版本保持不变。
 
 编辑器以锁定的 Plate commit `8f65d77f8b4709833436e63661e4d061f709258f` 为能力基线，包含真正的 `/` 指令菜单、完整块类型、专业表格、浮动格式栏、评论、修订、协同和文档导入导出。正文中的知识、测算和推演只显示轻量 `[n]`、`测算`、`推演` 标记，完整依据统一在右侧核验。客户样本盲测已达到 100/100：九章、8,985 个可见字符、111 个引用标记，输入 320→400→320 时搜救缺口和对应正文真实执行 180→100→180。
 
@@ -173,6 +175,18 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 
 ## 文档
 
+- [写作图谱产品设计](docs/miaobi/WRITING_GRAPH_PRODUCT_DESIGN.md)
+- [写作图谱数据模型](docs/miaobi/WRITING_GRAPH_DATA_MODEL.md)
+- [写作图谱抽取](docs/miaobi/WRITING_GRAPH_EXTRACTION.md)
+- [写作知识治理](docs/miaobi/WRITING_KNOWLEDGE_GOVERNANCE.md)
+- [写作图谱可视化](docs/miaobi/WRITING_GRAPH_VISUALIZATION.md)
+- [写作图谱 API](docs/miaobi/WRITING_GRAPH_API.md)
+- [文章 Chunk 绑定](docs/miaobi/ARTICLE_CHUNK_BINDING.md)
+- [影响预览与选择性应用](docs/miaobi/IMPACT_PREVIEW_AND_APPLY.md)
+- [防幻觉约束](docs/miaobi/ANTI_HALLUCINATION_CONSTRAINTS.md)
+- [新文章质量报告](docs/miaobi/NEW_ARTICLE_QUALITY_REPORT.md)
+- [写作图谱测试报告](docs/miaobi/WRITING_GRAPH_TEST_REPORT.md)
+- [写作图谱浏览器测试](docs/miaobi/WRITING_GRAPH_BROWSER_TEST.md)
 - [妙笔简洁产品设计](docs/miaobi/MIAOBI_SIMPLE_PRODUCT_DESIGN.md)
 - [妙笔三步写作流程](docs/miaobi/MIAOBI_WRITING_FLOW.md)
 - [推演工具箱](docs/miaobi/MIAOBI_REASONING_TOOLBOX.md)
