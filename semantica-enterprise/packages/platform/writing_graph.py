@@ -195,8 +195,8 @@ def ensure_writing_evidence(
 def evidence_batches(
     evidence: list[WritingEvidence],
     *,
-    target_chars: int = 320,
-    max_items: int = 2,
+    target_chars: int = 600,
+    max_items: int = 1,
 ) -> list[list[WritingEvidence]]:
     target_chars = max(500, min(int(target_chars), 40_000))
     max_items = max(1, min(int(max_items), 50))
@@ -489,8 +489,23 @@ def process_writing_graph_version(
         "conflicts": 0,
     }
     requests = 0
-    reused = 0
-    for batch in evidence_batches(evidence):
+    successful_runs = list(db.scalars(select(WritingExtractionRun).where(
+        WritingExtractionRun.document_version_id == version.id,
+        WritingExtractionRun.strategy_version == WRITING_GRAPH_STRATEGY_VERSION,
+        WritingExtractionRun.status == "succeeded",
+        WritingExtractionRun.deleted_at.is_(None),
+    )))
+    covered_evidence_ids = {
+        str(evidence_id)
+        for run in successful_runs
+        for evidence_id in (run.evidence_ids or [])
+    }
+    reused = len(successful_runs)
+    for run in successful_runs:
+        for key in totals:
+            totals[key] += int((run.metrics or {}).get(key) or 0)
+    pending_evidence = [item for item in evidence if item.id not in covered_evidence_ids]
+    for batch in evidence_batches(pending_evidence):
         batch_key = content_hash({
             "strategy": WRITING_GRAPH_STRATEGY_VERSION,
             "schema": WRITING_GRAPH_SCHEMA_VERSION,
