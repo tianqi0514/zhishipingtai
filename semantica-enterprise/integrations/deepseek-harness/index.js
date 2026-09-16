@@ -242,12 +242,19 @@ async function authorizedPost(exec, url, payload) {
   }, exec.signal)
 }
 
-function successfulToolNames(events, turn) {
-  const calls = new Map((events || [])
-    .filter(event => event.type === 'tool/call' && event.data?.turn === turn)
+function successfulToolNames(events, turn = undefined) {
+  const allEvents = events || []
+  const lastTurnStart = turn === undefined
+    ? allEvents.findLastIndex(event => event.type === 'turn/start')
+    : -1
+  const scopedEvents = turn === undefined
+    ? allEvents.slice(Math.max(0, lastTurnStart))
+    : allEvents.filter(event => event.data?.turn === turn)
+  const calls = new Map(scopedEvents
+    .filter(event => event.type === 'tool/call')
     .map(event => [String(event.data?.callId || ''), event.data?.name]))
   const successful = new Set()
-  for (const event of events || []) {
+  for (const event of scopedEvents) {
     if (event.type !== 'tool/result') continue
     const message = event.data?.message
     const block = Array.isArray(message?.content)
@@ -277,7 +284,11 @@ export function apply(ctx) {
     const temperature = Number(process.env.DSH_MODEL_TEMPERATURE)
     const configured = Number.isFinite(temperature) ? { ...request, temperature } : request
     if (sessionKind !== 'writing_generation') return configured
-    const completed = successfulToolNames(agent.session.events, turn)
+    // `agent/request` coordinates describe the proposed request and may be
+    // one step ahead of the durable event log after a resumed SDK session.
+    // Scope by the latest durable turn/start marker rather than comparing
+    // that coordinate with persisted event turns.
+    const completed = successfulToolNames(agent.session.events)
     if (!REPORT_GENERATION_REQUIRED_TOOLS.every(tool => completed.has(tool))) return configured
     // Harness intentionally has no built-in turn budget.  Once this formal
     // chapter has loaded its signed project context, consolidated source pack

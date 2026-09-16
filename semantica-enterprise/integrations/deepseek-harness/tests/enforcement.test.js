@@ -158,6 +158,25 @@ test('formal report removes tools after the required evidence pack is complete',
 })
 
 
+test('formal report uses the latest durable turn when resumed request coordinates drift', async () => {
+  const { listeners } = fixture('writing_generation')
+  const events = [
+    { type: 'turn/start', data: { turn: 7 } },
+    { type: 'tool/call', data: { turn: 7, callId: 'context', name: 'writing_get_project_context' } },
+    { type: 'tool/result', data: { turn: 7, message: { source: { kind: 'tool', callId: 'context' }, content: [{ type: 'tool-result', toolCallId: 'context', isError: false }] } } },
+    { type: 'tool/call', data: { turn: 7, callId: 'pack', name: 'writing_get_chapter_source_pack' } },
+    { type: 'tool/result', data: { turn: 7, message: { source: { kind: 'tool', callId: 'pack' }, content: [{ type: 'tool-result', toolCallId: 'pack', isError: false }] } } },
+    { type: 'tool/call', data: { turn: 7, callId: 'search', name: 'knowledge_search' } },
+    { type: 'tool/result', data: { turn: 7, message: { source: { kind: 'tool', callId: 'search' }, content: [{ type: 'tool-result', toolCallId: 'search', isError: false }] } } },
+  ]
+  const request = await listeners.get('agent/request')(
+    { agent: { session: { events } }, turn: 9 },
+    async () => ({ provider: 'p', model: 'm', tools: [{ name: 'must-be-removed' }] }),
+  )
+  assert.deepEqual(request.tools, [])
+})
+
+
 test('formal report keeps tools until real document evidence is complete', async () => {
   const { listeners } = fixture('writing_generation')
   const events = [
