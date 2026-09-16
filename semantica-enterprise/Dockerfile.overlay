@@ -1,9 +1,20 @@
+FROM node:24-alpine AS miaobi-web-builder
+
+WORKDIR /frontend
+RUN corepack enable && corepack prepare pnpm@11.19.0 --activate
+COPY apps/miaobi-web/package.json apps/miaobi-web/pnpm-lock.yaml apps/miaobi-web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY apps/miaobi-web/index.html apps/miaobi-web/tsconfig.json apps/miaobi-web/vite.config.ts ./
+COPY apps/miaobi-web/src ./src
+RUN pnpm build
+
 ARG BASE_IMAGE=semantica-enterprise:0.10.0
 FROM ${BASE_IMAGE}
 
 USER root
 WORKDIR /app
 COPY apps /app/apps
+COPY --from=miaobi-web-builder /frontend/dist /app/apps/miaobi-web/dist
 COPY packages /app/packages
 COPY scripts /app/scripts
 RUN pip install --no-cache-dir --no-deps -e .
