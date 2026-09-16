@@ -20,10 +20,13 @@ from apps.api.agent_internal import (
     _writing_model_capacity,
     agent_writing_context,
     agent_writing_document_outline,
+    issue_credential,
 )
+from apps.api.schemas import AgentCredentialRequest
 from apps.api.writing_schemas import AgentWritingRequest
 from packages.platform.database import Base, get_db
 from packages.platform.models import (
+    AgentCredential,
     Conversation,
     Document,
     DocumentVersion,
@@ -1606,6 +1609,32 @@ def test_writing_agent_session_is_idempotent_and_release_scoped() -> None:
             AgentWritingRequest(conversation_id=conversation.id), claims=claims, db=db
         )
         assert outline["document_title"] == "助手测试文稿"
+
+
+def test_parallel_writing_tools_keep_overlapping_short_lived_credentials_valid() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        document = client.post(
+            "/api/v1/writing/documents",
+            json={"project_id": project["id"], "title": "并行工具凭据测试", "content": []},
+        ).json()
+        session_payload = client.post(
+            f"/api/v1/writing/projects/{project['id']}/agent-sessions",
+            json={"document_id": document["id"], "purpose": "report_generation"},
+        ).json()
+        request = AgentCredentialRequest(
+            harness_session_id=session_payload["harness_session_id"],
+        )
+
+        first = issue_credential(request, _=None, db=db)
+        second = issue_credential(request, _=None, db=db)
+
+        assert first["access_token"] != second["access_token"]
+        active = list(db.scalars(select(AgentCredential).where(
+            AgentCredential.conversation_id == session_payload["conversation_id"],
+            AgentCredential.revoked_at.is_(None),
+        )))
+        assert len(active) == 2
 
 
 def test_report_generation_session_is_isolated_from_editor_assistant() -> None:

@@ -339,10 +339,17 @@ def issue_credential(
         raise HTTPException(403, "会话用户不可用")
     spaces = _authorized_spaces(db, user, list((conversation.settings or {}).get("space_ids") or []))
     now = datetime.now(timezone.utc)
+    # Tool execution is allowed to be parallel.  Each invocation obtains its
+    # own short-lived bearer before calling the business API, so revoking all
+    # previous bearers here creates a race where one concurrent tool cancels
+    # another.  Keep still-valid credentials until the turn terminal event;
+    # that boundary revokes every active credential for the conversation.
+    # Expired rows can be retired eagerly without affecting in-flight calls.
     for old in db.scalars(
         select(AgentCredential).where(
             AgentCredential.conversation_id == conversation.id,
             AgentCredential.revoked_at.is_(None),
+            AgentCredential.expires_at <= now,
         )
     ):
         old.revoked_at = now

@@ -120,7 +120,9 @@ def test_revision_prompt_requires_distinct_source_reads_and_real_length():
         project_name="虚构测试", section_plan=[{"key": "chapter", "title": "应急保障", "subheadings": ["队伍保障"]}],
         reference_characters=2400, revision_mode=True,
     )
-    assert "三至四次有差异的知识检索" in prompt
+    assert "优先复用章节资料包" in prompt
+    assert "一到两次有差异的知识检索" in prompt
+    assert "三至四次有差异的知识检索" not in prompt
     assert "不得少于 1872 个中文字符" in prompt
     assert "取得足以支撑本章的真实来源后立即组织最终 JSON" not in prompt
 
