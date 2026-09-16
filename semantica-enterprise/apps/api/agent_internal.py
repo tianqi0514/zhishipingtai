@@ -385,6 +385,15 @@ def _writing_model_capacity(
     """Return safe output and context limits for a tool-using writing turn."""
 
     parameters = dict(config.get("parameters") or {})
+    # Formal reports are generated one chapter per isolated Turn. Capping the
+    # per-request completion keeps later requests (after sizeable evidence
+    # tool results) away from the provider's context boundary and avoids
+    # paying for chat-sized output budgets that one chapter cannot use.
+    section_output_cap = max(
+        512,
+        int(config.get("writing_section_max_tokens", 1800)),
+    )
+    max_tokens = min(max_tokens, section_output_cap)
     context_window = int(
         parameters.get("context_window")
         or parameters.get("contextWindow")
