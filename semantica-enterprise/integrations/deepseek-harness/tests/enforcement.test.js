@@ -140,6 +140,41 @@ test('applies the platform model temperature through the plugin boundary', async
 })
 
 
+test('formal report removes tools after the required evidence pack is complete', async () => {
+  const { listeners } = fixture('writing_generation')
+  const events = [
+    { type: 'tool/call', data: { turn: 4, callId: 'context', name: 'writing_get_project_context' } },
+    { type: 'tool/result', data: { callId: 'context', content: [] } },
+    { type: 'tool/call', data: { turn: 4, callId: 'pack', name: 'writing_get_chapter_source_pack' } },
+    { type: 'tool/result', data: { callId: 'pack', content: [] } },
+    { type: 'tool/call', data: { turn: 4, callId: 'search', name: 'knowledge_search' } },
+    { type: 'tool/result', data: { callId: 'search', content: [] } },
+  ]
+  const request = await listeners.get('agent/request')(
+    { agent: { session: { events } }, turn: 4 },
+    async () => ({ provider: 'p', model: 'm', tools: [{ name: 'should-not-remain' }] }),
+  )
+  assert.deepEqual(request.tools, [])
+})
+
+
+test('formal report keeps tools until real document evidence is complete', async () => {
+  const { listeners } = fixture('writing_generation')
+  const events = [
+    { type: 'tool/call', data: { turn: 5, callId: 'context', name: 'writing_get_project_context' } },
+    { type: 'tool/result', data: { callId: 'context', content: [] } },
+    { type: 'tool/call', data: { turn: 5, callId: 'pack', name: 'writing_get_chapter_source_pack' } },
+    { type: 'tool/result', data: { callId: 'pack', content: [] } },
+  ]
+  const tools = [{ name: 'knowledge_search' }]
+  const request = await listeners.get('agent/request')(
+    { agent: { session: { events } }, turn: 5 },
+    async () => ({ provider: 'p', model: 'm', tools }),
+  )
+  assert.equal(request.tools, tools)
+})
+
+
 test('steers an evidence search when a turn tries to finish without one', () => {
   const { listeners } = fixture()
   const steered = []

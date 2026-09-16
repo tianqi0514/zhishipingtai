@@ -43,11 +43,16 @@ const WRITING_PROMPT = `当用户请求以“[妙笔写作任务]”或“[妙�
 
 export const REPORT_GENERATION_TOOL_NAMES = new Set([
   'knowledge_search',
-  'knowledge_get_fragment',
   'writing_get_project_context',
   'writing_search_public_standard',
   'writing_get_chapter_source_pack',
 ])
+
+const REPORT_GENERATION_REQUIRED_TOOLS = [
+  'writing_get_project_context',
+  'writing_get_chapter_source_pack',
+  'knowledge_search',
+]
 
 export function toolAllowedForSessionKind(name, sessionKind = process.env.DSH_SESSION_KIND || 'chat') {
   return sessionKind !== 'writing_generation' || REPORT_GENERATION_TOOL_NAMES.has(name)
@@ -256,6 +261,7 @@ function successfulToolNames(events, turn) {
 }
 
 export function apply(ctx) {
+  const sessionKind = process.env.DSH_SESSION_KIND || 'chat'
   ctx.effect(() => ctx.systemPrompt.section({ name: 'chuanshen-knowledge-policy', order: 1200, text: PROMPT }))
   ctx.effect(() => ctx.systemPrompt.section({ name: 'miaobi-writing-policy', order: 1210, text: WRITING_PROMPT }))
   const registerTool = definition => {
@@ -266,10 +272,19 @@ export function apply(ctx) {
   // The locked SDK does not expose temperature on its high-level constructor.
   // Keep the compatibility shim in this out-of-tree plugin so model settings
   // remain platform-owned without modifying Harness core.
-  ctx.on('agent/request', async (_payload, next) => {
+  ctx.on('agent/request', async ({ agent, turn }, next) => {
     const request = await next()
     const temperature = Number(process.env.DSH_MODEL_TEMPERATURE)
-    return Number.isFinite(temperature) ? { ...request, temperature } : request
+    const configured = Number.isFinite(temperature) ? { ...request, temperature } : request
+    if (sessionKind !== 'writing_generation') return configured
+    const completed = successfulToolNames(agent.session.events, turn)
+    if (!REPORT_GENERATION_REQUIRED_TOOLS.every(tool => completed.has(tool))) return configured
+    // Harness intentionally has no built-in turn budget.  Once this formal
+    // chapter has loaded its signed project context, consolidated source pack
+    // and real document evidence, another tool step can only repeat work and
+    // may create an unbounded private-model loop.  Remove tools from the next
+    // model request so the only valid continuation is the strict final JSON.
+    return { ...configured, tools: [] }
   })
 
   registerTool(defineTool({
