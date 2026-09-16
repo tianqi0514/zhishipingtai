@@ -56,7 +56,15 @@ const CREATE_SESSION_REPLACEMENT = `  private async createSession(sessionId: str
           })
         }
       } catch (error) {
-        if (!(error instanceof SessionPersistenceNotFoundError)) throw error
+        // The filtered production workspace can load the persistence package
+        // through two reviewed workspace entry points.  In that case the
+        // error keeps its canonical name but fails JavaScript's cross-module
+        // instanceof check.  Match the exported class first and its stable
+        // name second; every other persistence/resume failure still fails
+        // closed instead of silently starting a replacement conversation.
+        const isNotFound = error instanceof SessionPersistenceNotFoundError
+          || (error instanceof Error && error.name === 'SessionPersistenceNotFoundError')
+        if (!isNotFound) throw error
       }
     }
     handle ??= await this.ctx.agents.create({
