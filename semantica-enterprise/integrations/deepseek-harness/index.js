@@ -316,7 +316,7 @@ export function apply(ctx) {
           createUserMessage({
             content: [{
               type: 'text',
-              text: '本章所需的项目上下文、章节资料包和真实文档证据已经齐备。现在停止检索，严格按照本轮正式报告 JSON 契约输出唯一根对象 {"sections":[{...}],"warnings":[]}。sections 必须是数组且本轮只有一个章节对象；根层绝不能平铺 section_key、title、content_nodes、依赖数组或 status。章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings，禁止 status、state、progress 或其他字段。不得输出工作过程、工具名或额外说明。',
+              text: '本章所需的项目上下文、章节资料包和真实文档证据已经齐备。现在停止检索，严格按照本轮正式报告 JSON 契约输出唯一根对象 {"sections":[{...}],"warnings":[]}。sections 必须是数组且本轮只有一个章节对象；根层不能把 section_key、title、content_nodes、依赖数组或 status 平铺。章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings，禁止 status、state、progress 或其他字段。不得输出工作过程、工具名或额外说明。',
             }],
             source: { kind: 'plugin', plugin: name },
           }),
