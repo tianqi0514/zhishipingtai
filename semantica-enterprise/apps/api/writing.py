@@ -3582,6 +3582,49 @@ def finalize_report_generation(
         run.finished_at = datetime.now(timezone.utc)
         db.commit()
         raise HTTPException(status_code=422, detail=run.quality_report) from exc
+    # Validate the current chapter's dependency vocabulary before persisting
+    # it into agent_section_parts.  Waiting until the last chapter meant an
+    # early model mistake (for example putting an input fact key in
+    # metric_refs) surfaced only after every later chapter had completed.
+    # Keep the final all-chapter pass below for historical/in-flight runs, but
+    # make new runs fail locally and retry only the rejected chapter.
+    known_input_keys = {
+        str(row.fact_key) for row in db.scalars(select(ProjectFact).where(
+            ProjectFact.project_id == project.id, ProjectFact.active.is_(True),
+            _active(ProjectFact),
+        ))
+    }
+    known_metric_keys = {
+        str(((row.result or {}).get("output_fact") or {}).get("fact_key") or "")
+        for row in _latest_computation_rows(db, project.id)
+    }
+    try:
+        parsed_sections, current_heading_refs = normalize_agent_heading_refs(
+            parsed_sections,
+            [pending[0]] if sectional else (run.section_plan or []),
+            input_keys=known_input_keys,
+            metric_keys=known_metric_keys,
+        )
+    except ValueError as exc:
+        run.status = "quality_failed"
+        run.stage = "dependency_validation"
+        run.progress = 100
+        run.error_code = "INVALID_AGENT_DEPENDENCIES"
+        run.error_message = str(exc)
+        run.quality_report = {"ok": False, "issues": [{
+            "code": "invalid_agent_dependencies", "severity": "error", "message": str(exc),
+        }]}
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=422, detail=run.quality_report) from exc
+    if current_heading_refs:
+        run.toolbox_result = {
+            **(run.toolbox_result or {}),
+            "normalized_heading_refs": [
+                *((run.toolbox_result or {}).get("normalized_heading_refs") or []),
+                *current_heading_refs,
+            ],
+        }
     citation_message_ids = [assistant.id]
     if sectional:
         run.error_code = None
@@ -3608,16 +3651,6 @@ def finalize_report_generation(
         citation_message_ids = [str(saved_parts[str(item["key"])]["assistant_message_id"]) for item in run.section_plan or []]
     else:
         sections = parsed_sections
-    known_input_keys = {
-        str(row.fact_key) for row in db.scalars(select(ProjectFact).where(
-            ProjectFact.project_id == project.id, ProjectFact.active.is_(True),
-            _active(ProjectFact),
-        ))
-    }
-    known_metric_keys = {
-        str(((row.result or {}).get("output_fact") or {}).get("fact_key") or "")
-        for row in _latest_computation_rows(db, project.id)
-    }
     try:
         sections, corrected_heading_refs = normalize_agent_heading_refs(
             sections, run.section_plan or [],

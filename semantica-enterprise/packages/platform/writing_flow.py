@@ -44,11 +44,10 @@ def retryable_agent_report_protocol_failure(status: str, stage: str, error_code:
     retry malformed JSON or node enums without regenerating already accepted
     chapters and without weakening the fail-closed validator.
     """
-    return (
-        status == "quality_failed"
-        and stage == "structured_output_validation"
-        and error_code == "INVALID_AGENT_REPORT"
-    )
+    return status == "quality_failed" and (stage, error_code) in {
+        ("structured_output_validation", "INVALID_AGENT_REPORT"),
+        ("dependency_validation", "INVALID_AGENT_DEPENDENCIES"),
+    }
 
 RESULT_SECTION_HINTS = {
     "disaster_grade": ("grading", "assessment", "situation"),
