@@ -32,7 +32,7 @@ RUN --mount=type=cache,id=chuanshen-dsh-filtered-pnpm,target=/root/.local/share/
 # workspace dependencies. Move that install-only stub outside the Harness
 # workspace scan while the pinned native packages emit their public exports.
 RUN mv packages/integration/chuanshen-knowledge /tmp/chuanshen-knowledge-install \
-    && pnpm run build:lib
+    && npm run build:lib
 COPY semantica-enterprise/integrations/deepseek-harness/ /opt/deepseek-harness/packages/integration/chuanshen-knowledge/
 # The source-launch path resolves its TypeScript loader from the SDK package,
 # while the filtered workspace install links tsx only into our out-of-tree
