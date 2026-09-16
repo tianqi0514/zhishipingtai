@@ -402,11 +402,12 @@ def _writing_model_capacity(
     section_output_cap = max(
         512,
         # A 1,600-token cap truncates a valid Chinese chapter once the strict
-        # JSON node/binding fields are included.  The tested private 16K model
-        # can return the accepted 1,200-character chapter well below 2,400
-        # tokens, while that cap still leaves provider-side tokenizer headroom
-        # when a failed compaction falls back to the original evidence surface.
-        int(config.get("writing_section_max_tokens", 2400)),
+        # JSON node/binding fields are included.  A 2,400-token retry produced
+        # complete prose but cut the closing JSON delimiter; 2,600 is the
+        # measured minimum for the longest accepted evidence-rich chapter.
+        # Provider headroom is instead guaranteed by the independent, larger
+        # checkpoint budget below so the original surface is not replayed.
+        int(config.get("writing_section_max_tokens", 2600)),
     )
     max_tokens = min(max_tokens, section_output_cap)
     context_window = int(
