@@ -135,7 +135,33 @@ def writing_evidence_segments(text: str, *, max_chars: int = 600) -> list[dict[s
             and any(re.match(r"^\s*\|?\s*:?-{3,}", lines[index]) for index in table_indexes[1:3])
         )
         if not is_markdown_table:
-            expanded.append({**span, "key_index": key_index})
+            # A short summary sentence may still contain many independent
+            # numeric assertions.  Split only such dense prose on its real
+            # punctuation so each piece remains an exact source substring.
+            metric_mentions = re.findall(
+                r"\d+(?:\.\d+)?\s*(?:人|张|顶|套|台|辆|万元|元|%|％|级)",
+                span["text"],
+            )
+            if len(metric_mentions) >= 3:
+                search_from = span["start"]
+                pieces = [
+                    match.group(0).strip()
+                    for match in re.finditer(r".*?(?:[，；。！？]|\Z)", span["text"], re.S)
+                    if match.group(0).strip()
+                ]
+                for value in pieces:
+                    start = text.find(value, search_from, span["end"] + 1)
+                    if start < 0:
+                        raise ValueError("无法将密集写作 Evidence 精确定位回原始片段")
+                    expanded.append({
+                        "text": value,
+                        "start": start,
+                        "end": start + len(value),
+                        "key_index": key_index,
+                    })
+                    search_from = start + len(value)
+            else:
+                expanded.append({**span, "key_index": key_index})
             continue
         first_table_index = table_indexes[0]
         last_table_index = table_indexes[-1]

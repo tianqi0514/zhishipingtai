@@ -63,6 +63,29 @@ def test_joint_extraction_rejects_extra_fields() -> None:
         })
 
 
+def test_scope_text_is_deterministically_normalized_but_other_types_are_rejected() -> None:
+    result = JointWritingExtraction.model_validate({
+        "entities": [], "claims": [], "relations": [],
+        "metrics": [{
+            "name": "县域可用床位", "value": 110, "unit": "张",
+            "applicable_scope": "测试地区县域范围",
+            "evidence_ids": ["evidence-0001"], "confidence": 0.98,
+        }],
+        "sample_profile": None, "ambiguities": [],
+    })
+    assert result.metrics[0].applicable_scope == {"description": "测试地区县域范围"}
+    with pytest.raises(ValidationError):
+        JointWritingExtraction.model_validate({
+            "entities": [], "claims": [], "relations": [],
+            "metrics": [{
+                "name": "县域可用床位", "value": 110,
+                "applicable_scope": ["测试地区"],
+                "evidence_ids": ["evidence-0001"], "confidence": 0.98,
+            }],
+            "sample_profile": None, "ambiguities": [],
+        })
+
+
 def test_joint_extraction_rejects_forged_evidence_id() -> None:
     with pytest.raises(ValueError, match="未签发"):
         extract_writing_knowledge(

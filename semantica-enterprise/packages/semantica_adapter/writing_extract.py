@@ -5,7 +5,7 @@ import json
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .extract import _effective_temperature
 from .llm_transport import apply_model_transport_options
@@ -45,6 +45,17 @@ class ClaimCandidate(StrictModel):
     confidence: float = Field(ge=0, le=1)
     needs_confirmation: bool = False
 
+    @field_validator("time_scope", "applicable_scope", mode="before")
+    @classmethod
+    def normalize_scope(cls, value: Any) -> dict[str, Any]:
+        if value is None or value == "":
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return {"description": value.strip()}
+        raise ValueError("范围必须是对象或简短文本")
+
 
 class RelationHintCandidate(StrictModel):
     subject: str = Field(min_length=1, max_length=500)
@@ -55,6 +66,11 @@ class RelationHintCandidate(StrictModel):
     evidence_ids: list[str] = Field(min_length=1, max_length=20)
     confidence: float = Field(ge=0, le=1)
     needs_confirmation: bool = False
+
+    @field_validator("time_scope", "applicable_scope", mode="before")
+    @classmethod
+    def normalize_scope(cls, value: Any) -> dict[str, Any]:
+        return ClaimCandidate.normalize_scope(value)
 
 
 class MetricMentionCandidate(StrictModel):
@@ -67,6 +83,11 @@ class MetricMentionCandidate(StrictModel):
     evidence_ids: list[str] = Field(min_length=1, max_length=20)
     confidence: float = Field(ge=0, le=1)
     needs_confirmation: bool = False
+
+    @field_validator("time_scope", "applicable_scope", mode="before")
+    @classmethod
+    def normalize_scope(cls, value: Any) -> dict[str, Any]:
+        return ClaimCandidate.normalize_scope(value)
 
 
 class SampleChapterCandidate(StrictModel):

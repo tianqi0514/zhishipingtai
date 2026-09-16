@@ -58,6 +58,21 @@ def test_markdown_table_rows_become_small_exact_evidence_spans() -> None:
         assert text[item["start"]:item["end"]] == item["text"]
 
 
+def test_dense_numeric_summary_splits_on_real_punctuation() -> None:
+    text = "初始缺口为180人，县域床位缺口220张，全域床位缺口0张，帐篷缺口1800顶。冲突值80张需要确认。"
+    segments = writing_evidence_segments(text, max_chars=600)
+    assert [item["text"] for item in segments] == [
+        "初始缺口为180人，",
+        "县域床位缺口220张，",
+        "全域床位缺口0张，",
+        "帐篷缺口1800顶。",
+        "冲突值80张需要确认。",
+    ]
+    assert len({item["key_index"] for item in segments}) == 1
+    for item in segments:
+        assert text[item["start"]:item["end"]] == item["text"]
+
+
 def graph_fixture() -> tuple[Session, Tenant, User, KnowledgeSpace, Document, DocumentVersion]:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
