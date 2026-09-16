@@ -141,6 +141,7 @@ from packages.platform.writing_flow import (
     build_generation_prompt,
     normalize_agent_heading_refs,
     normalize_agent_reference_kinds,
+    authoritative_numeric_binding_issues,
     report_quality_review,
     renumber_chapter_citations,
     retryable_agent_report_protocol_failure,
@@ -939,7 +940,7 @@ def _strict_report_quality(
     sample_body = _article_sample_body_lengths(db, document, user) if document and sample_confirmed else {}
     if sample_body.get("reference_body_characters"):
         reference_characters = int(sample_body["reference_body_characters"])
-    return report_quality_review(
+    report = report_quality_review(
         content,
         section_plan=_section_plan_for_article(db, scenario, document, user) if document and sample_confirmed else _section_plan(scenario),
         bindings=bindings,
@@ -951,6 +952,21 @@ def _strict_report_quality(
         and bool((sample_profile.get("style") or {}).get("notice_requires_authorized_signoff"))
         and bool(re.search(r"讨论稿|草稿|征求意见稿", document.title if document else "")),
     )
+    numeric_issues = authoritative_numeric_binding_issues(
+        content,
+        bindings,
+        input_facts=[serialize_row(row) for row in db.scalars(select(ProjectFact).where(
+            ProjectFact.project_id == project.id,
+            ProjectFact.active.is_(True),
+            _active(ProjectFact),
+        ))],
+        computations=[serialize_row(row) for row in _latest_computation_rows(db, project.id)],
+    )
+    if numeric_issues:
+        report["issues"].extend(numeric_issues)
+        report["ok"] = False
+    report["metrics"]["unbound_authoritative_number_count"] = len(numeric_issues)
+    return report
 
 
 def _generated_report_quality(

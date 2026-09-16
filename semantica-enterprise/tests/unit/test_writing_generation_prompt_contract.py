@@ -3,12 +3,56 @@ import json
 import pytest
 
 from packages.platform.writing_flow import (
-    assemble_report_content, build_generation_prompt, normalize_agent_heading_refs,
+    assemble_report_content, authoritative_numeric_binding_issues, build_generation_prompt, normalize_agent_heading_refs,
     normalize_agent_reference_kinds, renumber_chapter_citations,
     report_quality_review, retryable_agent_report_protocol_failure,
     validate_and_parse_agent_report, validate_public_reference_refs,
     validate_writing_graph_refs,
 )
+
+
+def test_assembly_binds_named_authoritative_numbers_even_when_agent_omits_refs():
+    plan = [{"key": "objectives", "title": "处置目标", "subheadings": []}]
+    sections = [{
+        "section_key": "objectives", "title": "处置目标",
+        "content_nodes": [{
+            "type": "p", "text": "当前可用搜救人员为320人，搜救人员缺口为180人。",
+            "input_refs": [], "metric_refs": [], "writing_fact_refs": [],
+            "writing_evidence_refs": [], "writing_relation_refs": [], "public_reference_refs": [],
+        }],
+    }]
+    facts = [{
+        "id": "fact-available", "fact_key": "rescue_available", "label": "可用搜救人员",
+        "fact_type": "official_brief", "value": {"number": 320},
+    }]
+    computations = [{
+        "id": "run-gap", "input_fact_ids": ["fact-available"],
+        "result": {"value": 180, "output_fact": {"fact_key": "rescue_gap", "label": "搜救人员缺口"}},
+    }]
+    content, bindings = assemble_report_content(
+        run_id="numeric-bind", title="测试", section_plan=plan, agent_sections=sections,
+        citations=[], computations=computations, inference_facts=[], selected_plan=None,
+        input_facts=facts,
+    )
+    paragraph = next(item for item in content if item.get("id") == "report-numeric-bind-1-1")
+    binding = next(item for item in bindings if item["block_id"] == paragraph["id"])
+    assert binding["metadata"]["input_keys"] == ["rescue_available"]
+    assert binding["metadata"]["metric_keys"] == ["rescue_gap"]
+    assert binding["metadata"]["input_fact_ids"] == ["fact-available"]
+    assert binding["metadata"]["computation_run_ids"] == ["run-gap"]
+    assert authoritative_numeric_binding_issues(
+        content, {binding["block_id"]: binding}, input_facts=facts, computations=computations,
+    ) == []
+    broken = {binding["block_id"]: {**binding, "metadata": {**binding["metadata"], "metric_keys": []}}}
+    issues = authoritative_numeric_binding_issues(
+        content, broken, input_facts=facts, computations=computations,
+    )
+    assert issues == [{
+        "code": "unbound_authoritative_number", "severity": "error",
+        "block_id": paragraph["id"],
+        "message": "正文包含已确认精确数值，但缺少对应事实或计算依赖绑定",
+        "missing_input_keys": [], "missing_metric_keys": ["rescue_gap"],
+    }]
 
 
 def test_generation_carries_per_chapter_evidence_and_computation_contract():

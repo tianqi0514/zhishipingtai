@@ -694,6 +694,89 @@ def _select_section(
     return section_keys[0]
 
 
+def _numeric_value(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("number", value.get("value"))
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def _contains_number(text: str, value: str) -> bool:
+    return bool(re.search(r"(?<![\d.])" + re.escape(value) + r"(?![\d.])", text))
+
+
+def authoritative_numeric_refs(
+    text: str,
+    *,
+    inputs_by_key: dict[str, dict[str, Any]],
+    metrics_by_key: dict[str, dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    """Find authoritative numbers explicitly named in one report block.
+
+    This is not semantic guessing.  A candidate is returned only when both its
+    authoritative business label and its exact numeric value occur in the same
+    block.  The result closes a safety gap where a model copied a verified
+    number but forgot to declare the corresponding dependency key.
+    """
+    input_refs: set[str] = set()
+    metric_refs: set[str] = set()
+    for key, fact in inputs_by_key.items():
+        if str(fact.get("fact_type") or "") in {"deterministic_computation", "semantica_inference"}:
+            continue
+        label = str(fact.get("label") or "").strip()
+        value = _numeric_value(fact.get("value"))
+        if label and value is not None and label in text and _contains_number(text, value):
+            input_refs.add(str(key))
+    for key, run in metrics_by_key.items():
+        result = dict(run.get("result") or {})
+        output = dict(result.get("output_fact") or {})
+        label = str(output.get("label") or "").strip()
+        value = _numeric_value(result.get("value"))
+        if label and value is not None and label in text and _contains_number(text, value):
+            metric_refs.add(str(key))
+    return input_refs, metric_refs
+
+
+def authoritative_numeric_binding_issues(
+    content: list[dict[str, Any]],
+    bindings: dict[str, dict[str, Any]],
+    *,
+    input_facts: list[dict[str, Any]],
+    computations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reject precise authoritative numbers whose dependency was not bound."""
+    inputs_by_key = {str(item.get("fact_key") or ""): item for item in input_facts if item.get("fact_key")}
+    metrics_by_key = {
+        str(((item.get("result") or {}).get("output_fact") or {}).get("fact_key") or ""): item
+        for item in computations
+        if ((item.get("result") or {}).get("output_fact") or {}).get("fact_key")
+    }
+    issues: list[dict[str, Any]] = []
+    for node in walk_plate_nodes(content):
+        if str(node.get("type") or "") not in {"p", "li", "table"} or not node.get("id"):
+            continue
+        expected_inputs, expected_metrics = authoritative_numeric_refs(
+            _node_text(node), inputs_by_key=inputs_by_key, metrics_by_key=metrics_by_key,
+        )
+        if not expected_inputs and not expected_metrics:
+            continue
+        binding = bindings.get(str(node["id"])) or {}
+        metadata = dict(binding.get("metadata_json") or binding.get("metadata") or {})
+        missing_inputs = sorted(expected_inputs - set(map(str, metadata.get("input_keys") or [])))
+        missing_metrics = sorted(expected_metrics - set(map(str, metadata.get("metric_keys") or [])))
+        if missing_inputs or missing_metrics:
+            issues.append({
+                "code": "unbound_authoritative_number",
+                "severity": "error",
+                "block_id": str(node["id"]),
+                "message": "正文包含已确认精确数值，但缺少对应事实或计算依赖绑定",
+                "missing_input_keys": missing_inputs,
+                "missing_metric_keys": missing_metrics,
+            })
+    return issues
+
+
 def assemble_report_content(
     *,
     run_id: str,
@@ -878,6 +961,29 @@ def assemble_report_content(
                 binding: dict[str, Any],
                 list_style_type: str | None = None,
             ) -> None:
+                inferred_inputs, inferred_metrics = authoritative_numeric_refs(
+                    source_text, inputs_by_key=inputs_by_key, metrics_by_key=metrics_by_key,
+                )
+                if inferred_inputs or inferred_metrics:
+                    binding = {**binding, "metadata": dict(binding.get("metadata") or {})}
+                    metadata = binding["metadata"]
+                    input_keys = set(map(str, metadata.get("input_keys") or [])) | inferred_inputs
+                    metric_keys = set(map(str, metadata.get("metric_keys") or [])) | inferred_metrics
+                    input_fact_ids = set(map(str, metadata.get("input_fact_ids") or []))
+                    run_ids = set(map(str, metadata.get("computation_run_ids") or []))
+                    for ref in input_keys:
+                        input_fact_ids.add(str(inputs_by_key[ref]["id"]))
+                    for ref in metric_keys:
+                        run = metrics_by_key[ref]
+                        run_ids.add(str(run["id"]))
+                        input_fact_ids.update(map(str, run.get("input_fact_ids") or []))
+                    metadata.update({
+                        "input_keys": sorted(input_keys),
+                        "metric_keys": sorted(metric_keys),
+                        "input_fact_ids": sorted(input_fact_ids),
+                        "computation_run_ids": sorted(run_ids),
+                    })
+                    binding["evidence_ids"] = sorted(set(map(str, binding.get("evidence_ids") or [])) | input_fact_ids)
                 text = source_text
                 for ref in knowledge_refs:
                     text = text.replace(f"[{ref}]", f"[{semantic_numbers[ref]}]")
@@ -958,7 +1064,26 @@ def assemble_report_content(
                     if isinstance(value, dict):
                         return {k: table_citations(v) for k, v in value.items()}
                     return value
-                content.append(_table_node(table_citations(raw["items"]), node_id))
+                rendered_items = table_citations(raw["items"])
+                table_node = _table_node(rendered_items, node_id)
+                inferred_inputs, inferred_metrics = authoritative_numeric_refs(
+                    _node_text(table_node), inputs_by_key=inputs_by_key, metrics_by_key=metrics_by_key,
+                )
+                if inferred_inputs or inferred_metrics:
+                    metadata = base_binding["metadata"]
+                    metadata["input_keys"] = sorted(set(metadata["input_keys"]) | inferred_inputs)
+                    metadata["metric_keys"] = sorted(set(metadata["metric_keys"]) | inferred_metrics)
+                    metadata["input_fact_ids"] = sorted(
+                        set(metadata["input_fact_ids"])
+                        | {str(inputs_by_key[key]["id"]) for key in inferred_inputs}
+                        | {str(item) for key in inferred_metrics for item in metrics_by_key[key].get("input_fact_ids") or []}
+                    )
+                    metadata["computation_run_ids"] = sorted(
+                        set(metadata["computation_run_ids"])
+                        | {str(metrics_by_key[key]["id"]) for key in inferred_metrics}
+                    )
+                    base_binding["evidence_ids"] = list(metadata["input_fact_ids"])
+                content.append(table_node)
                 bindings.append(base_binding)
                 continue
             if raw["type"] in {"ul", "ol"}:
