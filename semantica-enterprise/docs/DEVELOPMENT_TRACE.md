@@ -465,3 +465,14 @@ Python 回归在该镜像 Python 3.13.15 内只读挂载当前源码执行，共
 - 部署前发现服务器存在 8 个未提交热修复文件；先保存为 `58fbd5a60`，再同步为 GitHub 备份分支 `codex/remote-hotfix-backup-20260914`，未覆盖或删除。
 - 使用 `deploy_server.sh upgrade` 增量重建并运行迁移，不删除 Volume。必需服务全部通过健康检查，部署后日志未见未处理异常。
 - 真实浏览器完成远端登录、空白项目、文章、Plate `/` 指令、保存和 DOCX 生成，Console 为 0 error、0 warning。
+# 2026-09-16 写作图谱与妙笔事实联动
+
+- 开发分支：`codex/writing-graph-miaobi-validation`。
+- 基线提交：`8e401cde9a4c5e691d2896f525f1449f6b59502b`。
+- 工作区原有未提交修改已保留，没有执行清理或覆盖。
+- 本机 Docker 基线：未启动，`localhost:8080` 不可访问。
+- Python 基线：除 `docling` 未安装导致的 Semantica M4 合约失败外，其余已执行测试通过；17 项跳过。
+- 妙笔前端基线：7 个测试文件、40 项测试通过；类型检查和生产构建通过。构建存在既有大 Chunk 警告。
+- DSH 适配器单独运行时缺少 Harness workspace 依赖，后续通过正式 Runtime 镜像验证。
+- 架构审计结论：现有抽取工作台只投影 Entity/Relation/ProjectFact 等已有对象，尚无独立 Claim、WritingEvidence、WritingGraphRelease 和跨写作图谱 Fact 的版本化传播。
+- 设计决定：复用现有解析、统一治理、Semantica、DSH、妙笔影响预览和 Plate；补充五层正式模型、独立发布版本、多依赖 Chunk 绑定和严格影响应用协议。
