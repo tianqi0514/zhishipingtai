@@ -416,7 +416,12 @@ def _writing_model_capacity(
         256,
         int(config.get("writing_context_safety_tokens", 512)),
     )
-    effective_context_window = max(4096, context_window - context_safety)
+    # The locked Harness tokenizer and some OpenAI-compatible private-model
+    # tokenizers disagree by one token at an exact context boundary.  Keep a
+    # small explicit guard rather than deleting evidence or repeatedly
+    # shrinking the requested chapter output after a provider rejection.
+    tokenizer_guard = max(32, int(config.get("writing_tokenizer_guard_tokens", 128)))
+    effective_context_window = max(4096, context_window - context_safety - tokenizer_guard)
     parameters["context_window"] = effective_context_window
     input_reserve = max(4096, int(config.get("writing_input_reserve_tokens", 9216)))
     return (
