@@ -2708,7 +2708,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         entity.status = "published"
             version.parse_summary = {
                 **(version.parse_summary or {}),
-                "knowledge_status": "partial_failed" if (extraction_errors or writing_graph_error) else "published",
+                "knowledge_status": "partial_failed" if extraction_errors else "published",
                 "knowledge_processing_mode": effective_processing_mode,
                 "knowledge_processing_requested_mode": (
                     originally_requested_mode if (extraction_errors or writing_graph_error) else effective_processing_mode
@@ -2729,8 +2729,12 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "index_release": index_number,
                 "structured_materialization": structured_materialization,
             }
+            if writing_graph_error:
+                version.parse_summary["knowledge_status"] = "partial_failed"
             document.status = "ready"
-            job.status = "failed" if (extraction_errors or writing_graph_error) else "succeeded"
+            job.status = "failed" if extraction_errors else "succeeded"
+            if writing_graph_error:
+                job.status = "failed"
             job.progress = 100
             job.result = {
                 "version_id": version.id,
@@ -2755,13 +2759,14 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 warnings.append("写作图谱候选抽取失败；其他已选加工通道不受影响，可单独重试写作图谱")
             if warnings:
                 job.result["warnings"] = warnings
-                job.error_code = (
-                    "KNOWLEDGE_PROCESSING_PARTIAL"
-                    if extraction_errors and writing_graph_error
-                    else "WRITING_EXTRACTION_PARTIAL"
-                    if writing_graph_error
-                    else "SEMANTIC_EXTRACTION_PARTIAL"
-                )
+                if extraction_errors:
+                    job.error_code = "SEMANTIC_EXTRACTION_PARTIAL"
+                if writing_graph_error:
+                    job.error_code = (
+                        "KNOWLEDGE_PROCESSING_PARTIAL"
+                        if extraction_errors
+                        else "WRITING_EXTRACTION_PARTIAL"
+                    )
                 job.error_message = "；".join(warnings)
             job.finished_at = now()
             curation_batch_id = (job.input or {}).get("curation_batch_id")
