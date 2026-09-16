@@ -30,6 +30,8 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     assert "普通段落必须逐字填写 p" in prompt
     assert "subheadings 为空时严禁输出 h3" in prompt
     assert "ul 和 ol 必须使用 items 字符串数组" in prompt
+    assert "根层只能有 sections 和 warnings" in prompt
+    assert "禁止把 section_key、title、content_nodes" in prompt
 
 
 def test_agent_list_protocol_becomes_native_plate_list_paragraphs():

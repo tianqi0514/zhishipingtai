@@ -520,6 +520,8 @@ def build_generation_prompt(
         f"\n报告任务：{project_name}"
         f"\n文章任务：{json.dumps(document_brief or {}, ensure_ascii=False)}"
         f"\n样稿结构与文风（非事实来源）：{json.dumps(sample_style or {}, ensure_ascii=False)}"
+        "\n最终只允许输出上述结构的唯一根对象：根层只能有 sections 和 warnings；"
+        "sections 必须是数组。禁止把 section_key、title、content_nodes、依赖数组或 status 平铺到根层。"
         f"\n章节契约：{json.dumps(sections, ensure_ascii=False)}"
         f"\n输出结构示例：{json.dumps(schema_example, ensure_ascii=False)}"
     )

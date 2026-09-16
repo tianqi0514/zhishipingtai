@@ -216,6 +216,8 @@ test('formal report starts a tool-free request series with a final-render instru
   assert.equal(decision.startsRequestSeries, true)
   assert.equal(decision.messages.length, 1)
   assert.match(decision.messages[0].content[0].text, /停止检索/)
+  assert.match(decision.messages[0].content[0].text, /根层只能有 sections 和 warnings|唯一根对象/)
+  assert.match(decision.messages[0].content[0].text, /不能把 section_key/)
 })
 
 
