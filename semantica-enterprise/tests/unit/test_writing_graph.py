@@ -43,6 +43,21 @@ def test_writing_evidence_segments_preserve_exact_source_spans() -> None:
         assert text[item["start"]:item["end"]] == item["text"]
 
 
+def test_markdown_table_rows_become_small_exact_evidence_spans() -> None:
+    text = "# 资源台账\n\n| 指标 | 数值 | 单位 |\n|---|---:|---|\n| 人员需求 | 500 | 人 |\n| 可用人员 | 320 | 人 |\n\n结论段。"
+    segments = writing_evidence_segments(text, max_chars=600)
+    table_rows = [item for item in segments if item["text"].lstrip().startswith("|")]
+    assert [item["text"] for item in table_rows] == [
+        "| 指标 | 数值 | 单位 |",
+        "|---|---:|---|",
+        "| 人员需求 | 500 | 人 |",
+        "| 可用人员 | 320 | 人 |",
+    ]
+    assert len({item["key_index"] for item in table_rows}) == 1
+    for item in segments:
+        assert text[item["start"]:item["end"]] == item["text"]
+
+
 def graph_fixture() -> tuple[Session, Tenant, User, KnowledgeSpace, Document, DocumentVersion]:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -240,6 +255,45 @@ def test_independent_evidence_batches_extract_concurrently_and_persist_serially(
     assert metrics["model_requests"] == 2
     assert metrics["concurrency"] == 2
     assert len(thread_names) == 2
+
+
+def test_repeated_metric_merges_evidence_without_duplicate_fact_version() -> None:
+    db, _tenant, user, _space, document, version = graph_fixture()
+    chunk = db.scalar(select(Chunk).where(Chunk.version_id == version.id))
+    chunk.text = "可用人员为320人。\n\n资源表再次记录可用人员为320人。"
+    chunk.content_hash = "e" * 64
+    db.commit()
+
+    def generator(prompt: str) -> dict:
+        evidence_id = re.search(r'"evidence_id":\s*"([^"]+)"', prompt).group(1)
+        return {
+            "entities": [], "claims": [], "relations": [],
+            "metrics": [{
+                "name": "可用搜救人员", "value": 320, "value_type": "integer",
+                "unit": "人", "evidence_ids": [evidence_id], "confidence": 0.99,
+            }],
+            "sample_profile": None, "ambiguities": [],
+        }
+
+    process_writing_graph_version(
+        db,
+        document=document,
+        version=version,
+        model_config_id="model",
+        api_key="unused",
+        model="test",
+        base_url=None,
+        actor_id=user.id,
+        generator=generator,
+        concurrency=1,
+    )
+    db.commit()
+    facts = list(db.scalars(select(WritingFact).where(
+        WritingFact.predicate == "可用搜救人员",
+    )))
+    assert len(facts) == 1
+    assert len(facts[0].evidence_ids) == 2
+    assert facts[0].version == 1
 
 
 def test_fact_without_evidence_cannot_be_verified() -> None:

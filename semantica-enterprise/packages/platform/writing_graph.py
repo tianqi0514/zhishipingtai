@@ -119,7 +119,42 @@ def writing_evidence_segments(text: str, *, max_chars: int = 600) -> list[dict[s
         value = pending_heading.group(1).strip()
         start = pending_heading.start(1) + len(pending_heading.group(1)) - len(pending_heading.group(1).lstrip())
         spans.append({"text": value, "start": start, "end": start + len(value)})
-    return spans or ([{"text": text, "start": 0, "end": len(text)}] if text.strip() else [])
+    # A compact Markdown table can be short in characters yet very dense in
+    # facts.  Give each physical row its own exact Evidence span so the model
+    # does not need to emit a large JSON document for the whole table.  Rows
+    # from one original span share ``key_index``; the segment hash still makes
+    # every Evidence id unique, while following unchanged spans keep their ids.
+    expanded: list[dict[str, Any]] = []
+    for key_index, span in enumerate(spans):
+        line_matches = [match for match in re.finditer(r"[^\n]+", span["text"]) if match.group(0).strip()]
+        lines = [match.group(0).strip() for match in line_matches]
+        table_indexes = [index for index, line in enumerate(lines) if line.startswith("|")]
+        is_markdown_table = (
+            len(table_indexes) >= 3
+            and table_indexes == list(range(table_indexes[0], table_indexes[-1] + 1))
+            and any(re.match(r"^\s*\|?\s*:?-{3,}", lines[index]) for index in table_indexes[1:3])
+        )
+        if not is_markdown_table:
+            expanded.append({**span, "key_index": key_index})
+            continue
+        first_table_index = table_indexes[0]
+        last_table_index = table_indexes[-1]
+        before = span["text"][:line_matches[first_table_index].start()].strip()
+        after = span["text"][line_matches[last_table_index].end():].strip()
+        pieces = ([before] if before else []) + [lines[index] for index in table_indexes] + ([after] if after else [])
+        search_from = span["start"]
+        for value in pieces:
+            start = text.find(value, search_from, span["end"] + 1)
+            if start < 0:
+                raise ValueError("无法将写作 Evidence 精确定位回原始片段")
+            expanded.append({
+                "text": value,
+                "start": start,
+                "end": start + len(value),
+                "key_index": key_index,
+            })
+            search_from = start + len(value)
+    return expanded or ([{"text": text, "start": 0, "end": len(text), "key_index": 0}] if text.strip() else [])
 
 
 def ensure_writing_evidence(
@@ -145,7 +180,11 @@ def ensure_writing_evidence(
     for index, (chunk, element, segment_index, segment) in enumerate(evidence_drafts):
         segment_hash = hashlib.sha256(segment["text"].encode("utf-8")).hexdigest()
         key = stable_evidence_key(
-            version.id, chunk.chunk_id, chunk.content_hash, segment_index, segment_hash,
+            version.id,
+            chunk.chunk_id,
+            chunk.content_hash,
+            int(segment.get("key_index", segment_index)),
+            segment_hash,
         )
         row = db.scalar(select(WritingEvidence).where(
             WritingEvidence.tenant_id == version.tenant_id,
@@ -189,7 +228,21 @@ def ensure_writing_evidence(
             )
             db.add(row)
             db.flush()
+        else:
+            row.locator = locator
+            row.status = "current"
         result.append(row)
+    current_ids = {row.id for row in result}
+    stale_query = select(WritingEvidence).where(
+        WritingEvidence.document_version_id == version.id,
+        WritingEvidence.deleted_at.is_(None),
+        WritingEvidence.status == "current",
+    )
+    if current_ids:
+        stale_query = stale_query.where(WritingEvidence.id.notin_(current_ids))
+    for row in db.scalars(stale_query):
+        row.status = "stale"
+    db.flush()
     return result
 
 
@@ -285,6 +338,41 @@ def detect_writing_fact_conflicts(
     return conflicted
 
 
+def _merge_candidate_fact(
+    db: Session,
+    *,
+    space_id: str,
+    fact_key: str,
+    object_value: dict[str, Any],
+    unit: str | None,
+    claim_ids: list[str],
+    evidence_ids: list[str],
+) -> WritingFact | None:
+    """Reuse the same unreviewed fact while accumulating independent proof.
+
+    Different Evidence spans often repeat one numeric fact in a table and a
+    narrative summary.  Those are two pieces of support for one candidate,
+    not two fact versions.  Reviewed facts remain immutable: extraction never
+    mutates a verified/rejected/superseded row.
+    """
+
+    db.flush()
+    signature = canonical_json({"value": object_value, "unit": unit})
+    rows = list(db.scalars(select(WritingFact).where(
+        WritingFact.space_id == space_id,
+        WritingFact.fact_key == fact_key,
+        WritingFact.verification_status.in_({"candidate", "conflicted"}),
+        WritingFact.deleted_at.is_(None),
+    ).order_by(WritingFact.version.desc())))
+    for row in rows:
+        if canonical_json({"value": row.object_value, "unit": row.unit}) != signature:
+            continue
+        row.claim_ids = sorted(set(row.claim_ids or []).union(claim_ids))
+        row.evidence_ids = sorted(set(row.evidence_ids or []).union(evidence_ids))
+        return row
+    return None
+
+
 def persist_joint_extraction(
     db: Session,
     *,
@@ -347,6 +435,19 @@ def persist_joint_extraction(
             "claim-fact", normalized_name(item.subject), item.predicate,
             item.time_scope, item.applicable_scope,
         )[:160]
+        object_value = _fact_value(item.object_value)
+        existing_fact = _merge_candidate_fact(
+            db,
+            space_id=run.space_id,
+            fact_key=fact_key,
+            object_value=object_value,
+            unit=item.unit,
+            claim_ids=[claim.id],
+            evidence_ids=item.evidence_ids,
+        )
+        if existing_fact is not None:
+            facts.append(existing_fact)
+            continue
         fact = WritingFact(
             tenant_id=run.tenant_id,
             space_id=run.space_id,
@@ -357,7 +458,7 @@ def persist_joint_extraction(
                 if _candidate_by_name(entities, item.subject) else None
             ),
             predicate=item.predicate,
-            object_value=_fact_value(item.object_value),
+            object_value=object_value,
             object_candidate_id=(
                 _candidate_by_name(entities, str(item.object_value)).id
                 if item.value_type == "entity" and _candidate_by_name(entities, str(item.object_value))
@@ -381,13 +482,26 @@ def persist_joint_extraction(
         fact_key = candidate_key(
             "metric", item.name, item.time_scope, item.applicable_scope,
         )[:160]
+        object_value = {"value": item.value, "raw_value": item.value}
+        existing_fact = _merge_candidate_fact(
+            db,
+            space_id=run.space_id,
+            fact_key=fact_key,
+            object_value=object_value,
+            unit=item.unit,
+            claim_ids=[],
+            evidence_ids=item.evidence_ids,
+        )
+        if existing_fact is not None:
+            facts.append(existing_fact)
+            continue
         facts.append(WritingFact(
             tenant_id=run.tenant_id,
             space_id=run.space_id,
             fact_key=fact_key,
             subject={"name": item.applicable_scope.get("organization") or item.applicable_scope.get("region") or "当前事项"},
             predicate=item.name,
-            object_value={"value": item.value, "raw_value": item.value},
+            object_value=object_value,
             value_type=item.value_type,
             unit=item.unit,
             time_scope=item.time_scope,
@@ -409,6 +523,27 @@ def persist_joint_extraction(
             "relation", normalized_name(item.subject), item.predicate,
             normalized_name(item.object), item.time_scope, item.applicable_scope,
         )[:160]
+        object_value = {"value": item.object}
+        existing_fact = _merge_candidate_fact(
+            db,
+            space_id=run.space_id,
+            fact_key=fact_key,
+            object_value=object_value,
+            unit=None,
+            claim_ids=[],
+            evidence_ids=item.evidence_ids,
+        )
+        if existing_fact is not None:
+            relation = db.scalar(select(WritingRelation).where(
+                WritingRelation.fact_id == existing_fact.id,
+                WritingRelation.verification_status.in_({"candidate", "conflicted"}),
+                WritingRelation.deleted_at.is_(None),
+            ).order_by(WritingRelation.version.desc()))
+            if relation is not None:
+                relation.evidence_ids = sorted(set(relation.evidence_ids or []).union(item.evidence_ids))
+                relations.append(relation)
+                facts.append(existing_fact)
+                continue
         fact = WritingFact(
             tenant_id=run.tenant_id,
             space_id=run.space_id,
@@ -416,7 +551,7 @@ def persist_joint_extraction(
             subject={"name": item.subject},
             subject_candidate_id=subject_candidate.id if subject_candidate else None,
             predicate=item.predicate,
-            object_value={"value": item.object},
+            object_value=object_value,
             object_candidate_id=object_candidate.id if object_candidate else None,
             value_type="entity",
             time_scope=item.time_scope,
