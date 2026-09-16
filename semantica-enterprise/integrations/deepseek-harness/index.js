@@ -279,24 +279,49 @@ export function apply(ctx) {
   // The locked SDK does not expose temperature on its high-level constructor.
   // Keep the compatibility shim in this out-of-tree plugin so model settings
   // remain platform-owned without modifying Harness core.
-  ctx.on('agent/request', async ({ agent, turn }, next) => {
+  ctx.on('agent/request', async (_payload, next) => {
     const request = await next()
     const temperature = Number(process.env.DSH_MODEL_TEMPERATURE)
-    const configured = Number.isFinite(temperature) ? { ...request, temperature } : request
-    if (sessionKind !== 'writing_generation') return configured
-    // `agent/request` coordinates describe the proposed request and may be
-    // one step ahead of the durable event log after a resumed SDK session.
-    // Scope by the latest durable turn/start marker rather than comparing
-    // that coordinate with persisted event turns.
-    const completed = successfulToolNames(agent.session.events)
-    if (!REPORT_GENERATION_REQUIRED_TOOLS.every(tool => completed.has(tool))) return configured
-    // Harness intentionally has no built-in turn budget.  Once this formal
-    // chapter has loaded its signed project context, consolidated source pack
-    // and real document evidence, another tool step can only repeat work and
-    // may create an unbounded private-model loop.  Remove tools from the next
-    // model request so the only valid continuation is the strict final JSON.
-    return { ...configured, tools: [] }
+    return Number.isFinite(temperature) ? { ...request, temperature } : request
   })
+
+  if (sessionKind === 'writing_generation') {
+    // Tool schemas belong to PromptAssembly, not LlmCallConfig.  Once the
+    // chapter has loaded its signed context, consolidated source pack and real
+    // document evidence, expose no tools to the next model step.  This closes
+    // the private-model loop without modifying Harness core or discarding the
+    // durable tool/result events that support the chapter.
+    ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+      const assembled = await next()
+      const completed = successfulToolNames(context.agent?.session?.events)
+      if (!REPORT_GENERATION_REQUIRED_TOOLS.every(tool => completed.has(tool))) return assembled
+      return { ...assembled, tools: [] }
+    })
+
+    // Changing a request header's tool schemas must start a new request series.
+    // Also give the tool-free step one explicit, auditable instruction: render
+    // the strict chapter contract now, without another discovery cycle.
+    ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
+      const decision = await next()
+      if (decision.kind !== 'enter') return decision
+      const completed = successfulToolNames(agent.session.events)
+      if (!REPORT_GENERATION_REQUIRED_TOOLS.every(tool => completed.has(tool))) return decision
+      return {
+        ...decision,
+        startsRequestSeries: true,
+        messages: [
+          ...decision.messages,
+          createUserMessage({
+            content: [{
+              type: 'text',
+              text: '本章所需的项目上下文、章节资料包和真实文档证据已经齐备。现在停止检索，严格按照本轮正式报告 JSON 契约直接输出本章结果；不得输出工作过程、工具名或额外说明。',
+            }],
+            source: { kind: 'plugin', plugin: name },
+          }),
+        ],
+      }
+    })
+  }
 
   registerTool(defineTool({
     name: 'knowledge_search',

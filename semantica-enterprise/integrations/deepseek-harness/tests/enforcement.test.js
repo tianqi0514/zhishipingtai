@@ -140,7 +140,7 @@ test('applies the platform model temperature through the plugin boundary', async
 })
 
 
-test('formal report removes tools after the required evidence pack is complete', async () => {
+test('formal report removes assembled tools after the required evidence pack is complete', async () => {
   const { listeners } = fixture('writing_generation')
   const events = [
     { type: 'tool/call', data: { turn: 4, callId: 'context', name: 'writing_get_project_context' } },
@@ -150,11 +150,12 @@ test('formal report removes tools after the required evidence pack is complete',
     { type: 'tool/call', data: { turn: 4, callId: 'search', name: 'knowledge_search' } },
     { type: 'tool/result', data: { callId: 'search', content: [] } },
   ]
-  const request = await listeners.get('agent/request')(
-    { agent: { session: { events } }, turn: 4 },
-    async () => ({ provider: 'p', model: 'm', tools: [{ name: 'should-not-remain' }] }),
+  const assembly = await listeners.get('system-prompt/assemble')(
+    { sections: [], contexts: [], tools: [{ name: 'should-not-remain' }], variables: {} },
+    { agent: { session: { events } } },
+    async () => ({ sections: [], contexts: [], tools: [{ name: 'should-not-remain' }], variables: {} }),
   )
-  assert.deepEqual(request.tools, [])
+  assert.deepEqual(assembly.tools, [])
 })
 
 
@@ -169,15 +170,16 @@ test('formal report uses the latest durable turn when resumed request coordinate
     { type: 'tool/call', data: { turn: 7, callId: 'search', name: 'knowledge_search' } },
     { type: 'tool/result', data: { turn: 7, message: { source: { kind: 'tool', callId: 'search' }, content: [{ type: 'tool-result', toolCallId: 'search', isError: false }] } } },
   ]
-  const request = await listeners.get('agent/request')(
-    { agent: { session: { events } }, turn: 9 },
-    async () => ({ provider: 'p', model: 'm', tools: [{ name: 'must-be-removed' }] }),
+  const assembly = await listeners.get('system-prompt/assemble')(
+    { sections: [], contexts: [], tools: [{ name: 'must-be-removed' }], variables: {} },
+    { agent: { session: { events } } },
+    async () => ({ sections: [], contexts: [], tools: [{ name: 'must-be-removed' }], variables: {} }),
   )
-  assert.deepEqual(request.tools, [])
+  assert.deepEqual(assembly.tools, [])
 })
 
 
-test('formal report keeps tools until real document evidence is complete', async () => {
+test('formal report keeps assembled tools until real document evidence is complete', async () => {
   const { listeners } = fixture('writing_generation')
   const events = [
     { type: 'tool/call', data: { turn: 5, callId: 'context', name: 'writing_get_project_context' } },
@@ -186,11 +188,33 @@ test('formal report keeps tools until real document evidence is complete', async
     { type: 'tool/result', data: { callId: 'pack', content: [] } },
   ]
   const tools = [{ name: 'knowledge_search' }]
-  const request = await listeners.get('agent/request')(
-    { agent: { session: { events } }, turn: 5 },
-    async () => ({ provider: 'p', model: 'm', tools }),
+  const assembly = await listeners.get('system-prompt/assemble')(
+    { sections: [], contexts: [], tools, variables: {} },
+    { agent: { session: { events } } },
+    async () => ({ sections: [], contexts: [], tools, variables: {} }),
   )
-  assert.equal(request.tools, tools)
+  assert.equal(assembly.tools, tools)
+})
+
+
+test('formal report starts a tool-free request series with a final-render instruction', async () => {
+  const { listeners } = fixture('writing_generation')
+  const events = [
+    { type: 'turn/start', data: { turn: 4 } },
+    { type: 'tool/call', data: { turn: 4, callId: 'context', name: 'writing_get_project_context' } },
+    { type: 'tool/result', data: { callId: 'context', content: [] } },
+    { type: 'tool/call', data: { turn: 4, callId: 'pack', name: 'writing_get_chapter_source_pack' } },
+    { type: 'tool/result', data: { callId: 'pack', content: [] } },
+    { type: 'tool/call', data: { turn: 4, callId: 'search', name: 'knowledge_search' } },
+    { type: 'tool/result', data: { callId: 'search', content: [] } },
+  ]
+  const decision = await listeners.get('agent/pre-step')(
+    { agent: { session: { events } }, messages: [] },
+    async () => ({ kind: 'enter', messages: [] }),
+  )
+  assert.equal(decision.startsRequestSeries, true)
+  assert.equal(decision.messages.length, 1)
+  assert.match(decision.messages[0].content[0].text, /停止检索/)
 })
 
 
