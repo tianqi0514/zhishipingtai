@@ -26,7 +26,7 @@
 
 ## 重启与镜像持久化
 
-- 最终代码层镜像：`sha256:9333236572f6288d2ad209f0eef6adb9b15c6d3b5fd2f4e85129eebbda026f97`。
+- 最终代码层镜像：`sha256:a3efe3c692b0d95f6e87c2de0767028d5e44684184305c1c21a63c16d47212de`。
 - API、Worker、Scheduler、MCP Server 使用同一镜像；14 个必需服务均为 healthy。
 - 不删除 Volume 重建应用服务后，R1 写作图谱、12 个文章版本、197 个 Chunk、146 条绑定和 V12 DOCX/PDF 均可读。
 - 当前正文保留 400/100，历史版本保留 320/180；0 stale，质量校验 0 issues。
