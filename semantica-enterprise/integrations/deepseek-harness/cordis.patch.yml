@@ -62,6 +62,11 @@
                   off:
                   high: high
                 compat:
+                  # The private vLLM Qwen chat template accepts system/user/
+                  # assistant/tool only.  pi-ai otherwise promotes part of the
+                  # Harness system contract to OpenAI's developer role, which
+                  # this endpoint rejects before the first tool call.
+                  supportsDeveloperRole: false
                   thinkingFormat: !!js process.env.DSH_MODEL_THINKING_FORMAT || 'openai'
     # sdk-minimal deliberately omits long-session compaction.  Knowledge
     # conversations carry sizeable structured tool results, so mount the

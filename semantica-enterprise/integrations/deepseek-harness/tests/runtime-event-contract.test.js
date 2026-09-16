@@ -59,5 +59,6 @@ test('runtime makes the platform thinking switch an explicit SDK effort', () => 
   const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
   assert.match(runtime, /reasoningEffort: model\.enable_thinking === false \? 'off' : 'high'/)
   assert.match(patch, /reasoningEfforts:\s+off:\s+high: high/s)
+  assert.match(patch, /supportsDeveloperRole: false/)
   assert.match(patch, /thinkingFormat:/)
 })
