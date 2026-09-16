@@ -23,6 +23,8 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     assert example["sections"][0]["content_nodes"][0]["metric_refs"] == []
     assert example["sections"][0]["content_nodes"][0]["writing_fact_refs"] == []
     assert "只能填写这些工具从本文固定 WritingGraphRelease 返回的真实对象 ID" in prompt
+    assert "JSON 字段名是机器协议" in prompt
+    assert "不能把多个字段合并成‘写作工具’" in prompt
 
 
 def test_generation_keeps_optional_citations_optional():
