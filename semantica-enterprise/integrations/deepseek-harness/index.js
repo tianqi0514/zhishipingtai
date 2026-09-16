@@ -27,7 +27,7 @@ const PROMPT = `你是“传神智库”的组织知识问答 Agent。必须遵�
 
 const WRITING_PROMPT = `当用户请求以“[妙笔写作任务]”或“[妙笔正式报告生成]”开头时，你正在处理知识约束写作：
 1. 先调用 writing_get_project_context，读取文章类型、目标读者、写作目的、适用范围、锁定版本和已核验项目事实。需要原文时调用 knowledge_search；需要经治理事实或关系时，先用 writing_graph_search，再按返回 ID 调用 writing_get_fact、writing_get_evidence 或 writing_get_relation_path。这些工具只读文章锁定的不可变 WritingGraphRelease，不得把候选区内容当成事实。只有用户明确要求“路线、调度、备选方案、方案比较或推荐方案”时，才调用 writing_compare_alternative_plans 并引用其中的路线、时长、风险或资源结果；其他写作请求不得主动加入方案细节。
-2. 目录只能来自 writing_create_outline_draft 返回的当前文章已确认样稿配置或已激活场景包；章节材料由 writing_generate_section_draft 提供。对于“[妙笔正式报告生成]”的单章长文，还必须调用 writing_get_chapter_source_pack 读取本文已采用、固定版本的原文片段；它只提供写作材料，不直接产生正式引用编号。对写入正文的事实再调用 knowledge_search 核验可引用来源，引用标签必须来自真实检索事件。
+2. 交互式写作任务的目录使用 writing_create_outline_draft，章节草稿可使用 writing_generate_section_draft。对于“[妙笔正式报告生成]”，目录和章节契约已经由用户确认，禁止重新生成目录；每轮只写提示词指定的一章，必须调用 writing_get_chapter_source_pack 读取本文采用的固定版本原文片段。它只提供写作材料，不直接产生正式引用编号；写入正文的事实还要调用 knowledge_search 核验可引用来源，引用标签必须来自真实检索事件。
 3. 权威数字只能来自已核验项目事实、structured_execute_query 或确定性 ComputationRun；不得自行心算后冒充正式测算。
 4. 正式推演结论只能来自 knowledge_reason/Semantica 结果；不得用语言模型猜测灾害等级、响应等级或资源缺口。
 5. 生成内容作为“待用户接受的修订建议”，不得声称已经覆盖或发布文稿。证据绑定必须调用 writing_bind_evidence。
@@ -612,7 +612,7 @@ export function apply(ctx) {
     output: jsonOutput, timeoutMs: TIMEOUT_MS, isConcurrencySafe: () => true,
     execute: (args, exec) => authorizedPost(exec, '/internal/agent/writing/chapter-source-pack', {
       section_key: args.section_key,
-      max_characters: args.max_characters || 12000,
+      max_characters: args.max_characters || 3000,
     }),
   }))
 

@@ -129,8 +129,6 @@ export function evidenceRequirements(input, settings = {}) {
     return [
       'writing_get_project_context',
       'knowledge_search',
-      'writing_create_outline_draft',
-      'writing_generate_section_draft',
       'writing_get_chapter_source_pack',
     ]
   }

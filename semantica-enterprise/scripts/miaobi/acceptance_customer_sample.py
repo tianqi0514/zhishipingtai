@@ -612,14 +612,18 @@ def generate_report_one_click(
     session_id = str((started.get("agent_session") or {}).get("id") or "")
     if not session_id:
         raise RuntimeError("一键生成任务没有创建可恢复的 DSH 写作会话")
-    with api.client.stream(
-        "POST",
-        f"/writing/generation-runs/{started['id']}/agent",
-        headers={"Accept": "text/event-stream"},
-    ) as response:
-        DemoClient._raise(response)
-        streamed_events = parse_sse(response)
-    completed = api.post(f"/writing/generation-runs/{started['id']}/finalize")
+    streamed_events: list[tuple[str, dict[str, Any]]] = []
+    while True:
+        with api.client.stream(
+            "POST",
+            f"/writing/generation-runs/{started['id']}/agent",
+            headers={"Accept": "text/event-stream"},
+        ) as response:
+            DemoClient._raise(response)
+            streamed_events.extend(parse_sse(response))
+        completed = api.post(f"/writing/generation-runs/{started['id']}/finalize")
+        if completed.get("status") != "awaiting_agent":
+            break
     if completed.get("status") != "completed" or not completed.get("quality_report", {}).get("ok"):
         raise RuntimeError(f"一键生成没有通过生产质量门：{completed.get('quality_report')}")
     restored = api.get(f"/writing/agent-sessions/{session_id}")

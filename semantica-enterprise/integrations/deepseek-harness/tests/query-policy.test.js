@@ -112,8 +112,6 @@ test('uses writing evidence tools for formal reports without inventing a databas
   assert.deepEqual(evidenceRequirements(prompt), [
     'writing_get_project_context',
     'knowledge_search',
-    'writing_create_outline_draft',
-    'writing_generate_section_draft',
     'writing_get_chapter_source_pack',
   ])
   assert.equal(evidenceRequirements(prompt).includes('structured_execute_query'), false)

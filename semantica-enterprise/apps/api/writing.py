@@ -2512,7 +2512,10 @@ def create_writing_agent_session(
             "use_vector": True,
             "use_graph": True,
             "use_reranker": False,
-            "top_k": 8,
+            # Report generation is chapter-scoped. Keep its evidence set
+            # compact enough for private 16K-context models while interactive
+            # editing retains the broader default recall.
+            "top_k": 4 if payload.purpose == "report_generation" else 8,
         },
     )
     db.add(conversation)
@@ -3377,7 +3380,9 @@ def stream_report_generation_agent(
         raise HTTPException(status_code=409, detail="当前报告生成任务不能启动写作 Agent")
     if run.agent_session_id is None:
         raise HTTPException(status_code=409, detail="报告生成任务缺少写作会话")
-    if run.status == "agent_failed":
+    completed_before = dict((run.toolbox_result or {}).get("agent_section_parts") or {})
+    rotate_for_next_chapter = bool(completed_before) and run.assistant_message_id is None
+    if run.status == "agent_failed" or rotate_for_next_chapter:
         # A failed provider turn may already have written an incomplete user
         # message to Harness persistence. Reusing that identity would append
         # the same large report prompt and can exhaust the context window
@@ -3385,7 +3390,7 @@ def stream_report_generation_agent(
         # and attach a fresh report-generation session to this same run.
         failed_session = db.get(WritingAgentSession, run.agent_session_id)
         if failed_session is not None:
-            failed_session.status = "failed"
+            failed_session.status = "failed" if run.status == "agent_failed" else "completed"
         db.commit()
         replacement = create_writing_agent_session(
             project.id,
@@ -3408,7 +3413,7 @@ def stream_report_generation_agent(
             db,
             user.tenant_id,
             user.id,
-            "writing.generation.agent.retry",
+            "writing.generation.agent.retry" if run.status == "agent_failed" else "writing.generation.agent.next_chapter",
             "writing_generation_run",
             run.id,
             {"replacement_session_id": replacement["id"]},
@@ -3431,9 +3436,10 @@ def stream_report_generation_agent(
                 **(run.toolbox_result or {}),
                 "factual_heading_adaptations": adaptations,
             }
-    sectional = sample_profile.get("status") == "confirmed" and int(
-        ((sample_profile.get("style") or {}).get("reference_characters") or 0)
-    ) >= 8000 and len(run.section_plan or []) > 1
+    # Generate each confirmed chapter in an isolated Turn. Besides producing
+    # better focused prose, this keeps strict tool schemas, fixed-version
+    # evidence and the final JSON within the context limits of private models.
+    sectional = len(run.section_plan or []) > 1
     completed_parts = dict((run.toolbox_result or {}).get("agent_section_parts") or {})
     pending = [item for item in run.section_plan or [] if str(item.get("key") or "") not in completed_parts]
     if sectional and not pending:
@@ -3553,9 +3559,7 @@ def finalize_report_generation(
                 **(run.toolbox_result or {}),
                 "factual_heading_adaptations": adaptations,
             }
-    sectional = sample_profile.get("status") == "confirmed" and int(
-        ((sample_profile.get("style") or {}).get("reference_characters") or 0)
-    ) >= 8000 and len(run.section_plan or []) > 1
+    sectional = len(run.section_plan or []) > 1
     saved_parts = dict((run.toolbox_result or {}).get("agent_section_parts") or {})
     pending = [item for item in run.section_plan or [] if str(item.get("key") or "") not in saved_parts]
     if sectional and not pending:
