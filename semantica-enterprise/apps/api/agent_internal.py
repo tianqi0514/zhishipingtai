@@ -402,12 +402,12 @@ def _writing_model_capacity(
     section_output_cap = max(
         512,
         # A 1,600-token cap truncates a valid Chinese chapter once the strict
-        # JSON node/binding fields are included.  A 2,400-token retry produced
-        # complete prose but cut the closing JSON delimiter; 2,600 is the
-        # measured minimum for the longest accepted evidence-rich chapter.
+        # JSON node/binding fields are included.  A 2,600-token retry produced
+        # complete prose but cut the closing JSON delimiter on a table-rich
+        # appendix; 3,072 is the measured safe ceiling for one chapter.
         # Provider headroom is instead guaranteed by the independent, larger
         # checkpoint budget below so the original surface is not replayed.
-        int(config.get("writing_section_max_tokens", 2600)),
+        int(config.get("writing_section_max_tokens", 3072)),
     )
     max_tokens = min(max_tokens, section_output_cap)
     context_window = int(

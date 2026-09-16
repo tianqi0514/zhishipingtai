@@ -25,6 +25,8 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     assert example["sections"][0]["content_nodes"][0]["metric_refs"] == []
     assert example["sections"][0]["content_nodes"][0]["writing_fact_refs"] == []
     assert "只能填写资料包从本文固定 WritingGraphRelease 返回的真实对象 ID" in prompt
+    assert "metric_refs 只列计算结果 key" in prompt
+    assert "严禁把[数字]写入 public_reference_refs" in prompt
     assert "不要再逐条调用图谱对象工具" in prompt
     assert "JSON 字段名是机器协议" in prompt
     assert "每个章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings" in prompt

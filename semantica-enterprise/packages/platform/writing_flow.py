@@ -581,6 +581,8 @@ def build_generation_prompt(
         "项目事实只能把 fact_key 填入 input_refs，严禁把 ProjectFact 的 UUID 填入 writing_fact_refs；"
         "写作图谱工具返回的 Fact、Evidence、Relation ID 必须分别放入对应同名 refs，禁止跨类型放置。"
         "若使用 writing_search_public_standard，还必须在 public_reference_refs 中填写工具返回的 public_reference_id。"
+        "citation_refs、metric_refs、inference_refs、warnings 都必须是字符串数组；metric_refs 只列计算结果 key，"
+        "不得输出 key/value 对象。正文中的[数字]只属于 citation_refs，严禁把[数字]写入 public_reference_refs。"
         "未实际用于该节点的对象不得绑定；不能根据名称猜测 ID，也不能使用写作图谱候选区对象。"
         "章节契约若含 subheadings，可用 h3 节点逐项表达已确认的二级标题；h3.text 必须精确等于目录标题，随后写可核验正文。"
         "章节契约的 subheadings 为空时严禁输出 h3，不得自行增加‘补充建议’、‘注意事项’等二级标题；相关内容直接使用 p、ul 或 ol。"
