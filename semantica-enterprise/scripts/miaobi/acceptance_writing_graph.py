@@ -147,11 +147,14 @@ def govern(api: DemoClient) -> dict[str, Any]:
                     "id": row["id"], "reason": "缺少来源或置信度低于验收阈值",
                 })
                 continue
-            api.post(
-                f"/writing-graph/governance/items/{target_type}/{row['id']}/decide",
-                {"action": "accept", "reason": "验收人员逐项核对原文、结构化值和来源定位后确认", "changes": {}},
-            )
-            accepted[target_type].append(row["id"])
+            try:
+                api.post(
+                    f"/writing-graph/governance/items/{target_type}/{row['id']}/decide",
+                    {"action": "accept", "reason": "验收人员逐项核对原文、结构化值和来源定位后确认", "changes": {}},
+                )
+                accepted[target_type].append(row["id"])
+            except RuntimeError as exc:
+                deferred[target_type].append({"id": row["id"], "reason": str(exc)})
 
     # Relations require verified endpoint entities and their projected Fact.
     rows = api.get(
