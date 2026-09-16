@@ -395,10 +395,10 @@ def _writing_model_capacity(
     section_output_cap = max(
         512,
         # A 1,600-token cap truncates a valid Chinese chapter once the strict
-        # JSON node/binding fields are included.  2,800, together with the
-        # bounded evidence pack, remains below the tested 16K private-model
-        # context while allowing one evidence-rich chapter to close its JSON.
-        int(config.get("writing_section_max_tokens", 2800)),
+        # JSON node/binding fields are included.  2,600 leaves a measured
+        # 200-token reserve for a revision draft while still allowing the
+        # longest accepted evidence-rich chapter to close its JSON.
+        int(config.get("writing_section_max_tokens", 2600)),
     )
     max_tokens = min(max_tokens, section_output_cap)
     context_window = int(
