@@ -28,6 +28,7 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     assert "JSON 字段名是机器协议" in prompt
     assert "不能把多个字段合并成‘写作工具’" in prompt
     assert "普通段落必须逐字填写 p" in prompt
+    assert "subheadings 为空时严禁输出 h3" in prompt
 
 
 def test_only_structured_agent_protocol_failures_can_retry_the_same_chapter():
