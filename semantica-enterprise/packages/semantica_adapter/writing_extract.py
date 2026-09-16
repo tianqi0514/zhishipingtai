@@ -124,19 +124,20 @@ def writing_extraction_prompt(
 6. aliases 只保存原文实际出现或同一批次明确说明的别名。
 7. 输出严格满足以下顶层键，不能增加字段：entities、claims、relations、metrics、sample_profile、ambiguities。
 8. 输出紧凑 JSON；空值或默认值字段可以省略，同义实体和同义陈述必须合并，禁止复述原文。
-9. 每批最多输出30个实体、40个Claim、30条关系、30个指标；只保留对专业写作有用的原子知识。
-10. metrics 只列原文明确出现的数值指标；relations 只列实体到实体的关系，不得把普通数值Claim重复扩写成关系。
+9. 单个 Evidence 最多输出12个实体、16个Claim、12条关系、20个指标；只保留对专业写作有用且原文明确表达的原子知识。
+10. metrics 只列原文明确出现的数值指标；数值已经进入 metrics 时不要在 claims 中重复。relations 只列实体到实体的关系，不得把数值扩写成关系。
+11. 为避免结构化响应截断，必须输出紧凑单行 JSON。以下有默认值的字段在值为空时应省略：aliases、time_scope、applicable_scope、qualifiers、needs_confirmation、unit、value_type。
 
 字段契约（字段名必须逐字一致；禁止使用 id、name、type、source_ids 等替代字段）：
 {{
-  "entities":[{{"mention_text":"原文提及","canonical_name":"标准候选名","entity_type":"组织|人员|部门|制度|项目|产品|供应商|地点|资源|事件|其他","aliases":[],"evidence_ids":["已签发ID"],"confidence":0.95,"needs_confirmation":false}}],
-  "claims":[{{"subject":"主体","predicate":"谓词","object_value":"字符串或数值或布尔值或null","claim_type":"assertion|requirement|prediction|recommendation|opinion","value_type":"string|number|boolean|entity|date|datetime","unit":null,"time_scope":{{}},"applicable_scope":{{}},"qualifiers":{{}},"evidence_ids":["已签发ID"],"confidence":0.95,"needs_confirmation":false}}],
-  "relations":[{{"subject":"主体实体名","predicate":"关系","object":"客体实体名","time_scope":{{}},"applicable_scope":{{}},"evidence_ids":["已签发ID"],"confidence":0.95,"needs_confirmation":false}}],
-  "metrics":[{{"name":"指标名","value":320,"value_type":"integer|number|string","unit":"人","time_scope":{{}},"applicable_scope":{{}},"evidence_ids":["已签发ID"],"confidence":0.95,"needs_confirmation":false}}],
+  "entities":[{{"mention_text":"原文提及","canonical_name":"标准候选名","entity_type":"组织|人员|部门|制度|项目|产品|供应商|地点|资源|事件|其他","evidence_ids":["已签发ID"],"confidence":0.95}}],
+  "claims":[{{"subject":"主体","predicate":"谓词","object_value":"字符串或数值或布尔值或null","claim_type":"assertion|requirement|prediction|recommendation|opinion","evidence_ids":["已签发ID"],"confidence":0.95}}],
+  "relations":[{{"subject":"主体实体名","predicate":"关系","object":"客体实体名","evidence_ids":["已签发ID"],"confidence":0.95}}],
+  "metrics":[{{"name":"指标名","value":320,"value_type":"integer|number|string","unit":"人","evidence_ids":["已签发ID"],"confidence":0.95}}],
   "sample_profile":null,
   "ambiguities":[]
 }}
-除 aliases、time_scope、applicable_scope、qualifiers、needs_confirmation 这些有默认值的字段外，不得省略字段。
+除第11条列出的默认字段外，不得省略字段。
 
 材料用途：{material_role}
 签发 Evidence：
