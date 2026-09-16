@@ -145,6 +145,19 @@ def test_agent_search_bounds_model_context_and_keeps_full_fragment_route() -> No
     assert item["text"].endswith("…")
 
 
+def test_agent_search_accepts_smaller_report_generation_text_budget() -> None:
+    long_text = "知识" * 900
+    result = _agent_citation_contract({
+        "query_id": "query",
+        "items": [{"rank": 1, "title": "章节依据", "chunk_id": "c1", "text": long_text}],
+    }, text_limit=700)
+
+    item = result["items"][0]
+    assert len(item["text"]) <= 701
+    assert item["text_char_count"] == len(long_text)
+    assert item["full_text_tool"] == "knowledge_get_fragment"
+
+
 def test_ir_rejects_unlisted_function_and_sql_extension() -> None:
     _, _, version, plan, ir = _context()
     invalid = SemanticQueryIR.model_validate({**ir.model_dump(),

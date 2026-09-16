@@ -124,15 +124,17 @@ def _agent_citation_contract(
     result: dict[str, Any],
     *,
     first_citation_number: int = 1,
+    text_limit: int = AGENT_SEARCH_TEXT_LIMIT,
 ) -> dict[str, Any]:
     """Attach immutable citation labels to ranked knowledge-tool results."""
+    text_limit = max(200, int(text_limit))
     contracted = dict(result)
     contracted_items = []
     for index, raw_item in enumerate(result.get("items") or []):
         item = dict(raw_item)
         full_text = str(item.get("text") or "")
-        if len(full_text) > AGENT_SEARCH_TEXT_LIMIT:
-            item["text"] = full_text[:AGENT_SEARCH_TEXT_LIMIT].rstrip() + "…"
+        if len(full_text) > text_limit:
+            item["text"] = full_text[:text_limit].rstrip() + "…"
             item["text_truncated"] = True
             item["text_char_count"] = len(full_text)
             item["full_text_tool"] = "knowledge_get_fragment"
@@ -545,6 +547,11 @@ def agent_knowledge_search(
     contracted = _agent_citation_contract(
         result,
         first_citation_number=first_citation_number,
+        text_limit=(
+            700
+            if conversation_settings.get("kind") == "writing_generation"
+            else AGENT_SEARCH_TEXT_LIMIT
+        ),
     )
     metadata["next_document_citation_number"] = (
         first_citation_number + len(contracted.get("items") or [])

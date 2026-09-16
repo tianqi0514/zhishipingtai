@@ -2515,7 +2515,7 @@ def create_writing_agent_session(
             # Report generation is chapter-scoped. Keep its evidence set
             # compact enough for private 16K-context models while interactive
             # editing retains the broader default recall.
-            "top_k": 4 if payload.purpose == "report_generation" else 8,
+            "top_k": 2 if payload.purpose == "report_generation" else 8,
         },
     )
     db.add(conversation)
