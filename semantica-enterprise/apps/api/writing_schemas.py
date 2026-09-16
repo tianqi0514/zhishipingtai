@@ -63,6 +63,7 @@ class WritingProjectCreate(StrictModel):
     # internal/backward-compatible option for existing API clients.
     space_id: str | None = None
     knowledge_product_release_id: str | None = None
+    writing_graph_release_id: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("code")
@@ -89,6 +90,25 @@ class WritingProjectMaterialCreate(StrictModel):
 class WritingProjectMaterialUpdate(StrictModel):
     material_role: Literal["policy_basis", "task_data", "reference", "sample_style", "attachment"] | None = None
     usage_scope: Literal["task_only", "space_asset"] | None = None
+
+
+class PublicReferenceCreate(StrictModel):
+    title: str = Field(min_length=1, max_length=500)
+    publisher: str = Field(min_length=1, max_length=300)
+    url: str = Field(min_length=8, max_length=2000)
+    publication_date: str | None = Field(default=None, max_length=32)
+    excerpt: str = Field(min_length=1, max_length=20_000)
+    applicable_scope: dict[str, Any] = Field(default_factory=dict)
+    validity_status: Literal["current", "historical", "pending_review", "invalid"] = "pending_review"
+    usage_sections: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("url")
+    @classmethod
+    def public_http_url(cls, value: str) -> str:
+        normalized = value.strip()
+        if not re.fullmatch(r"https?://[^\s]+", normalized, re.IGNORECASE):
+            raise ValueError("公开材料地址必须是 http 或 https URL")
+        return normalized
 
 
 class ScenarioInputSetting(StrictModel):
@@ -309,6 +329,7 @@ class WritingDocumentCreate(StrictModel):
     writing_requirements: str = Field(default="", max_length=8000)
     scenario_package_version_id: str | None = None
     knowledge_product_release_id: str | None = None
+    writing_graph_release_id: str | None = None
     content: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -319,6 +340,7 @@ class WritingDocumentUpdate(StrictModel):
     audience: str | None = Field(default=None, max_length=300)
     applicability: dict[str, Any] | None = None
     writing_requirements: str | None = Field(default=None, max_length=8000)
+    writing_graph_release_id: str | None = None
     status: Literal["draft", "reviewing", "ready", "published", "archived"] | None = None
 
 
@@ -525,6 +547,29 @@ class WritingAgentEditDecision(StrictModel):
 
 class AgentWritingRequest(StrictModel):
     conversation_id: str
+
+
+class AgentWritingPublicStandardSearchRequest(AgentWritingRequest):
+    query: str = Field(min_length=1, max_length=2000)
+    limit: int = Field(default=10, ge=1, le=30)
+
+
+class AgentWritingGraphSearchRequest(AgentWritingRequest):
+    query: str = Field(min_length=1, max_length=2000)
+    object_types: list[Literal["evidence", "entity", "claim", "fact", "relation"]] = Field(
+        default_factory=lambda: ["fact", "relation", "entity"], max_length=5,
+    )
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class AgentWritingGraphObjectRequest(AgentWritingRequest):
+    object_id: str = Field(min_length=1, max_length=100)
+
+
+class AgentWritingGraphPathRequest(AgentWritingRequest):
+    start_entity_id: str = Field(min_length=1, max_length=100)
+    end_entity_id: str | None = Field(default=None, min_length=1, max_length=100)
+    max_hops: int = Field(default=4, ge=1, le=8)
 
 
 class AgentWritingOutlineDraftRequest(AgentWritingRequest):

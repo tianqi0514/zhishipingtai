@@ -63,8 +63,8 @@ from packages.platform.index_release import activate_knowledge_release, publish_
 from packages.platform.knowledge_processing import (
     completed_processing_targets,
     normalize_processing_mode,
+    normalize_processing_targets,
     processing_mode_for_targets,
-    processing_targets,
 )
 from packages.platform.model_routing import resolve_model_for_scene
 from packages.platform.security import decrypt_secret
@@ -93,6 +93,7 @@ from packages.platform.media import (
     require_cloud_confirmation,
 )
 from packages.platform.media_policy import resolve_media_policy
+from packages.platform.writing_graph import process_writing_graph_version
 
 
 def now() -> datetime:
@@ -915,6 +916,9 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                         input={
                             "version_id": version.id,
                             "knowledge_processing_mode": processing_mode,
+                            "knowledge_processing_targets": (version.parse_summary or {}).get(
+                                "knowledge_processing_targets"
+                            ),
                         },
                     )
                     db.add(process_job)
@@ -1754,7 +1758,15 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             _fail(db, job, "KNOWLEDGE_MODE_INVALID", str(exc))
             return {"status": "failed"}
         originally_requested_mode = processing_mode
-        requested_targets = set(processing_targets(processing_mode))
+        try:
+            requested_targets = set(normalize_processing_targets(
+                (job.input or {}).get("knowledge_processing_targets")
+                or (version.parse_summary or {}).get("knowledge_processing_targets"),
+                legacy_mode=processing_mode,
+            ))
+        except ValueError as exc:
+            _fail(db, job, "KNOWLEDGE_TARGET_INVALID", str(exc))
+            return {"status": "failed"}
         completed_targets = completed_processing_targets(version.parse_summary)
         # A forced rebuild means content or governance changed. Rebuild every
         # projection that is already effective for this version so search and
@@ -1762,8 +1774,10 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         if (job.input or {}).get("force"):
             requested_targets.update(completed_targets)
             processing_mode = processing_mode_for_targets(requested_targets)
+        fulltext_enabled = "fulltext" in requested_targets
         vector_enabled = "vector" in requested_targets
         graph_enabled = "graph" in requested_targets
+        writing_graph_enabled = "writing_graph" in requested_targets
         if requested_targets.issubset(completed_targets) and not (job.input or {}).get("force"):
             job.status = "succeeded"
             job.progress = 100
@@ -1796,7 +1810,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             missing.append("切片策略")
         if governance_policy is None:
             missing.append("治理策略")
-        if graph_enabled and generic_semantic_extraction_enabled and extraction_policy is None:
+        if (graph_enabled and generic_semantic_extraction_enabled or writing_graph_enabled) and extraction_policy is None:
             missing.append("抽取策略")
         if vector_enabled and embedding_model is None:
             missing.append("向量模型")
@@ -1810,7 +1824,8 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             explicit_model_id=extraction_policy.model_config_id if extraction_policy else None,
         ).model
         execute_semantic_extraction = graph_enabled and generic_semantic_extraction_enabled
-        if execute_semantic_extraction and (llm_model is None or not llm_model.enabled):
+        needs_extraction_model = execute_semantic_extraction or writing_graph_enabled
+        if needs_extraction_model and (llm_model is None or not llm_model.enabled):
             _fail(db, job, "EXTRACTION_MODEL_MISSING", "语义抽取策略未关联可用大模型")
             return {"status": "failed"}
 
@@ -1823,8 +1838,9 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
         prior_parse_summary = deepcopy(version.parse_summary or {})
         version.parse_summary = {
             **prior_parse_summary,
-            "knowledge_processing_protocol": "targets_v1",
+            "knowledge_processing_protocol": "targets_v2",
             "knowledge_processing_requested_mode": originally_requested_mode,
+            "knowledge_processing_targets": sorted(requested_targets),
             "knowledge_targets_requested": sorted(requested_targets),
         }
         db.commit()
@@ -2109,8 +2125,9 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 )
                 db.add(run)
                 db.flush()
+            if needs_extraction_model:
                 api_key = decrypt_secret(llm_model.api_key_encrypted)
-            if execute_semantic_extraction and not api_key:
+            if needs_extraction_model and not api_key:
                 raise ValueError("语义抽取模型未配置 API Key")
             entity_count = relation_count = event_count = 0
             selected_chunks = (
@@ -2365,7 +2382,51 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             _step(db, job.id, "semantic_extract", 3, extraction_status, extraction_metrics)
             _progress(db, job, 52)
 
-            _step(db, job.id, "governance", 4, "running")
+            writing_graph_metrics: dict[str, Any] = {
+                "skipped": not writing_graph_enabled,
+                "reason": "processing_targets_exclude_writing_graph" if not writing_graph_enabled else None,
+            }
+            writing_graph_error: dict[str, Any] | None = None
+            _step(db, job.id, "writing_graph_extract", 4, "running")
+            if writing_graph_enabled:
+                material_role = str(
+                    (job.input or {}).get("material_role")
+                    or (version.parse_summary or {}).get("material_role")
+                    or "task_data"
+                )
+                try:
+                    writing_graph_metrics = process_writing_graph_version(
+                        db,
+                        document=document,
+                        version=version,
+                        model_config_id=llm_model.id,
+                        api_key=api_key,
+                        model=llm_model.model_name,
+                        base_url=llm_model.base_url,
+                        material_role=material_role,
+                        request_parameters=(llm_model.config or {}).get("parameters"),
+                    )
+                    db.commit()
+                except Exception as exc:
+                    failure = classify_external_failure(exc, secrets=[api_key])
+                    writing_graph_error = {
+                        "error_type": failure.error_type,
+                        "error_category": failure.category,
+                        "retryable": failure.retryable,
+                        "message": failure.message,
+                    }
+                    writing_graph_metrics = {"failed": True, **writing_graph_error}
+                    db.commit()
+            _step(
+                db,
+                job.id,
+                "writing_graph_extract",
+                4,
+                "partial_failed" if writing_graph_error else "succeeded",
+                writing_graph_metrics,
+            )
+
+            _step(db, job.id, "governance", 5, "running")
             mentions = (
                 list(db.scalars(select(EntityMention).where(EntityMention.run_id == run.id)))
                 if run
@@ -2511,10 +2572,10 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "skipped": not graph_enabled,
                 "reason": "processing_mode_excludes_graph" if not graph_enabled else None,
             }
-            _step(db, job.id, "governance", 4, "succeeded", governance_metrics)
+            _step(db, job.id, "governance", 5, "succeeded", governance_metrics)
             _progress(db, job, 68)
 
-            _step(db, job.id, "graph_publish", 5, "running")
+            _step(db, job.id, "graph_publish", 6, "running")
             if graph_enabled:
                 pending_entity_ids = {
                     row.id
@@ -2566,12 +2627,12 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     "reason": "processing_mode_excludes_graph",
                     "current_release": graph_number,
                 }
-            _step(db, job.id, "graph_publish", 5, "succeeded", graph_detail)
+            _step(db, job.id, "graph_publish", 6, "succeeded", graph_detail)
             _progress(db, job, 78)
 
-            _step(db, job.id, "index_publish", 6, "running")
+            _step(db, job.id, "index_publish", 7, "running")
             index_result: dict[str, Any] = {}
-            if vector_enabled:
+            if fulltext_enabled or vector_enabled:
                 release, index_result = publish_index_snapshot(
                     db,
                     tenant_id=version.tenant_id,
@@ -2579,12 +2640,16 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                     graph_release=graph_release,
                     embedding_model=embedding_model,
                     include_pending_version_ids={version.id},
+                    publish_fulltext=fulltext_enabled,
+                    publish_vector=vector_enabled,
                 )
                 index_number = release.release_number
                 index_detail = {
                     "release": index_number,
                     "chunks": release.chunk_count,
                     "dimension": release.embedding_dimension,
+                    "fulltext_chunks": index_result["fulltext_chunk_count"],
+                    "vector_chunks": index_result["vector_chunk_count"],
                     "embedded": index_result["embedded_count"],
                     "reused": index_result["reused_vector_count"],
                 }
@@ -2603,7 +2668,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 index_number = release.release_number if release else None
                 index_detail = {
                     "skipped": True,
-                    "reason": "processing_mode_excludes_vector",
+                    "reason": "processing_targets_exclude_search",
                     "current_release": index_number,
                 }
             successful_targets = set(requested_targets)
@@ -2612,6 +2677,8 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 # the target is deliberately incomplete so a normal retry can
                 # rerun the failed extraction batches.
                 successful_targets.discard("graph")
+            if writing_graph_enabled and writing_graph_error:
+                successful_targets.discard("writing_graph")
             # A rebuilt target replaces its prior completion state. This is
             # important when a forced graph rebuild only partially succeeds:
             # the old graph completion must not mask the need for retry.
@@ -2641,14 +2708,20 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         entity.status = "published"
             version.parse_summary = {
                 **(version.parse_summary or {}),
-                "knowledge_status": "partial_failed" if extraction_errors else "published",
+                "knowledge_status": "partial_failed" if (extraction_errors or writing_graph_error) else "published",
                 "knowledge_processing_mode": effective_processing_mode,
                 "knowledge_processing_requested_mode": (
-                    originally_requested_mode if extraction_errors else effective_processing_mode
+                    originally_requested_mode if (extraction_errors or writing_graph_error) else effective_processing_mode
                 ),
                 "knowledge_targets_completed": sorted(completed_targets),
                 "semantic_extraction_status": extraction_status if graph_enabled else "skipped",
                 "semantic_extraction_failed_chunks": len(extraction_errors),
+                "writing_graph_extraction_status": (
+                    "partial_failed" if writing_graph_error
+                    else "succeeded" if writing_graph_enabled
+                    else "skipped"
+                ),
+                "writing_graph_metrics": writing_graph_metrics,
                 "chunks": len(chunks),
                 "entities": entity_count if graph_enabled else prior_parse_summary.get("entities", 0),
                 "facts": published_facts if graph_enabled else prior_parse_summary.get("facts", 0),
@@ -2657,7 +2730,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "structured_materialization": structured_materialization,
             }
             document.status = "ready"
-            job.status = "failed" if extraction_errors else "succeeded"
+            job.status = "failed" if (extraction_errors or writing_graph_error) else "succeeded"
             job.progress = 100
             job.result = {
                 "version_id": version.id,
@@ -2673,18 +2746,29 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "index_release": index_number,
                 "knowledge_release": knowledge_release.release_number if knowledge_release else None,
                 "structured_materialization": structured_materialization,
+                "writing_graph": writing_graph_metrics,
             }
+            warnings: list[str] = []
             if extraction_errors:
-                warning = f"{len(extraction_errors)} 个片段的模型语义抽取失败；已成功抽取的图谱知识仍已发布，可重试补齐"
-                job.result["warnings"] = [warning]
-                job.error_code = "SEMANTIC_EXTRACTION_PARTIAL"
-                job.error_message = warning
+                warnings.append(f"{len(extraction_errors)} 个片段的模型语义抽取失败；已成功抽取的图谱知识仍已发布，可重试补齐")
+            if writing_graph_error:
+                warnings.append("写作图谱候选抽取失败；其他已选加工通道不受影响，可单独重试写作图谱")
+            if warnings:
+                job.result["warnings"] = warnings
+                job.error_code = (
+                    "KNOWLEDGE_PROCESSING_PARTIAL"
+                    if extraction_errors and writing_graph_error
+                    else "WRITING_EXTRACTION_PARTIAL"
+                    if writing_graph_error
+                    else "SEMANTIC_EXTRACTION_PARTIAL"
+                )
+                job.error_message = "；".join(warnings)
             job.finished_at = now()
             curation_batch_id = (job.input or {}).get("curation_batch_id")
             curation_batch = db.get(CurationBatch, curation_batch_id) if curation_batch_id else None
             if curation_batch:
-                curation_batch.status = "publish_failed" if extraction_errors else "published"
-                curation_batch.published_at = None if extraction_errors else now()
+                curation_batch.status = "publish_failed" if (extraction_errors or writing_graph_error) else "published"
+                curation_batch.published_at = None if (extraction_errors or writing_graph_error) else now()
                 curation_batch.publish_error = job.error_message if extraction_errors else None
             db.commit()
             _step(db, job.id, "index_publish", 6, "succeeded", index_detail)

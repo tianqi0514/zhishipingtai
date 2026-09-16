@@ -178,6 +178,6 @@ def test_upload_ui_runs_preflight_and_parser_page_shows_model_combination() -> N
     assert "upload-processing-readiness" in APP
     assert "loadReadiness" in APP
     assert "parserSelect.onchange=loadReadiness" in APP
-    assert "[name=knowledge_processing_mode]" in APP
+    assert "[name^=processing_target_]" in APP
     assert "showParserCombination" in APP
     assert "配套加工模型" in APP

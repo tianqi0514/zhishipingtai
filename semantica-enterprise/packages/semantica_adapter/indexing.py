@@ -109,127 +109,138 @@ class SearchIndexer:
         tenant_id: str,
         space_id: str,
         release_number: int,
-        chunks: list[dict[str, Any]],
-        embedder: SemanticEmbedder,
+        chunks: list[dict[str, Any]] | None = None,
+        fulltext_chunks: list[dict[str, Any]] | None = None,
+        vector_chunks: list[dict[str, Any]] | None = None,
+        embedder: SemanticEmbedder | None = None,
+        publish_fulltext: bool = True,
+        publish_vector: bool = True,
+        previous_index: str | None = None,
         previous_collection: str | None = None,
     ) -> dict[str, Any]:
-        from semantica.vector_store.qdrant_store import QdrantStore
+        base_chunks = list(chunks or [])
+        fulltext_chunks = list(fulltext_chunks if fulltext_chunks is not None else base_chunks)
+        vector_chunks = list(vector_chunks if vector_chunks is not None else base_chunks)
+        if publish_vector and embedder is None:
+            raise ValueError("发布向量索引时必须提供向量模型")
 
         suffix = f"{space_id.replace('-', '')[:12]}_{release_number}"
-        index_name = f"knowledge_{suffix}"
+        index_name = f"knowledge_{suffix}" if publish_fulltext else previous_index
         alias_name = f"knowledge_{space_id.replace('-', '')[:12]}_active"
         collection_name = f"knowledge_{suffix}"
         mapping = opensearch_index_mapping()
-        with httpx.Client(timeout=60) as client:
-            existing = client.head(f"{self.opensearch_url}/{index_name}")
-            if existing.status_code == 200:
-                removed = client.delete(f"{self.opensearch_url}/{index_name}")
-                removed.raise_for_status()
-            response = client.put(f"{self.opensearch_url}/{index_name}", json=mapping)
-            response.raise_for_status()
-            if chunks:
-                lines: list[str] = []
-                for item in chunks:
-                    lines.append(json.dumps({"index": {"_index": index_name, "_id": item["id"]}}))
-                    lines.append(json.dumps(item, ensure_ascii=False, default=str))
-                bulk = client.post(
-                    f"{self.opensearch_url}/_bulk?refresh=true",
-                    content=("\n".join(lines) + "\n").encode("utf-8"),
-                    headers={"Content-Type": "application/x-ndjson"},
-                )
-                bulk.raise_for_status()
-                bulk_payload = bulk.json()
-                if bulk_payload.get("errors"):
-                    raise RuntimeError(f"OpenSearch 批量写入存在失败项：{summarize_bulk_errors(bulk_payload)}")
+        if publish_fulltext:
+            with httpx.Client(timeout=60) as client:
+                existing = client.head(f"{self.opensearch_url}/{index_name}")
+                if existing.status_code == 200:
+                    removed = client.delete(f"{self.opensearch_url}/{index_name}")
+                    removed.raise_for_status()
+                response = client.put(f"{self.opensearch_url}/{index_name}", json=mapping)
+                response.raise_for_status()
+                if fulltext_chunks:
+                    lines: list[str] = []
+                    for item in fulltext_chunks:
+                        lines.append(json.dumps({"index": {"_index": index_name, "_id": item["id"]}}))
+                        lines.append(json.dumps(item, ensure_ascii=False, default=str))
+                    bulk = client.post(
+                        f"{self.opensearch_url}/_bulk?refresh=true",
+                        content=("\n".join(lines) + "\n").encode("utf-8"),
+                        headers={"Content-Type": "application/x-ndjson"},
+                    )
+                    bulk.raise_for_status()
+                    bulk_payload = bulk.json()
+                    if bulk_payload.get("errors"):
+                        raise RuntimeError(f"OpenSearch 批量写入存在失败项：{summarize_bulk_errors(bulk_payload)}")
 
-        store = QdrantStore(url=self.qdrant_url)
-        # Semantica intentionally owns the Qdrant adapter.  The platform only
-        # supplies an explicit request timeout because qdrant-client's default
-        # is too short while a CPU-bound embedding job is publishing in
-        # parallel on a small demonstration host.
-        store.connect(timeout=self.qdrant_timeout_seconds)
-
-        def prepare_collection() -> Any:
-            # The release-specific collection is safe to recreate.  If a
-            # create request reached Qdrant but its response timed out, the
-            # retry first removes that incomplete collection.
-            if store.client.collection_exists(collection_name):
-                store.client.delete_collection(collection_name)
-            return store.create_collection(
-                collection_name,
-                vector_size=embedder.dimension,
-                distance="Cosine",
-            )
-
-        self._qdrant_call("准备发布集合", prepare_collection)
-        payloads = {
-            item["id"]: {
-                "tenant_id": tenant_id,
-                "space_id": space_id,
-                "document_id": item["document_id"],
-                "version_id": item["version_id"],
-                "chunk_id": item["chunk_id"],
-                "chunk_db_id": item["chunk_db_id"],
-                "title": item.get("title", ""),
-                "text": item["text"],
-                "page_number": item.get("page_number"),
-                "structural_path": item.get("structural_path", ""),
-                "source_span": item.get("source_span", {}),
-                "start_seconds": item.get("start_seconds"),
-                "end_seconds": item.get("end_seconds"),
-                "element_type": item.get("element_type"),
-                "media_type": item.get("media_type"),
-                "scene_id": item.get("scene_id"),
-                "scene_index": item.get("scene_index"),
-                "frame_indexes": item.get("frame_indexes", []),
-                "scope_tokens": item.get("scope_tokens", []),
-                "effective_hash": item.get("effective_hash"),
-                "curation_boost": float(item.get("curation_boost") or 1.0),
-                "curation_decision_id": item.get("curation_decision_id"),
-            }
-            for item in chunks
-        }
+        collection_name = f"knowledge_{suffix}" if publish_vector else previous_collection
         reused_ids: set[str] = set()
-        previous_exists = bool(
-            previous_collection
-            and self._qdrant_call(
-                "检查上一版本集合",
-                lambda: store.client.collection_exists(previous_collection),
-            )
-        )
-        if previous_collection and previous_exists and chunks:
-            from qdrant_client.models import PointStruct
+        changed_chunks: list[dict[str, Any]] = []
+        if publish_vector:
+            from semantica.vector_store.qdrant_store import QdrantStore
 
-            requested = [item["id"] for item in chunks]
-            for offset in range(0, len(requested), 256):
-                records = self._qdrant_call(
-                    "读取上一版本向量",
-                    lambda offset=offset: store.client.retrieve(
-                        collection_name=previous_collection,
-                        ids=requested[offset : offset + 256],
-                        with_vectors=True,
-                        with_payload=False,
-                    ),
+            store = QdrantStore(url=self.qdrant_url)
+            # Semantica intentionally owns the Qdrant adapter.  The platform only
+            # supplies an explicit request timeout because qdrant-client's default
+            # is too short while a CPU-bound embedding job is publishing in
+            # parallel on a small demonstration host.
+            store.connect(timeout=self.qdrant_timeout_seconds)
+
+            def prepare_collection() -> Any:
+                if store.client.collection_exists(collection_name):
+                    store.client.delete_collection(collection_name)
+                return store.create_collection(
+                    collection_name,
+                    vector_size=embedder.dimension,
+                    distance="Cosine",
                 )
-                points = []
-                for record in records:
-                    point_id = str(record.id)
-                    if record.vector is None or point_id not in payloads:
-                        continue
-                    reused_ids.add(point_id)
-                    points.append(PointStruct(id=record.id, vector=record.vector, payload=payloads[point_id]))
-                if points:
-                    self._qdrant_call(
-                        "复用上一版本向量",
-                        lambda points=points: store.client.upsert(
-                            collection_name=collection_name,
-                            points=points,
-                            wait=True,
+
+            self._qdrant_call("准备发布集合", prepare_collection)
+            payloads = {
+                item["id"]: {
+                    "tenant_id": tenant_id,
+                    "space_id": space_id,
+                    "document_id": item["document_id"],
+                    "version_id": item["version_id"],
+                    "chunk_id": item["chunk_id"],
+                    "chunk_db_id": item["chunk_db_id"],
+                    "title": item.get("title", ""),
+                    "text": item["text"],
+                    "page_number": item.get("page_number"),
+                    "structural_path": item.get("structural_path", ""),
+                    "source_span": item.get("source_span", {}),
+                    "start_seconds": item.get("start_seconds"),
+                    "end_seconds": item.get("end_seconds"),
+                    "element_type": item.get("element_type"),
+                    "media_type": item.get("media_type"),
+                    "scene_id": item.get("scene_id"),
+                    "scene_index": item.get("scene_index"),
+                    "frame_indexes": item.get("frame_indexes", []),
+                    "scope_tokens": item.get("scope_tokens", []),
+                    "effective_hash": item.get("effective_hash"),
+                    "curation_boost": float(item.get("curation_boost") or 1.0),
+                    "curation_decision_id": item.get("curation_decision_id"),
+                }
+                for item in vector_chunks
+            }
+            previous_exists = bool(
+                previous_collection
+                and self._qdrant_call(
+                    "检查上一版本集合",
+                    lambda: store.client.collection_exists(previous_collection),
+                )
+            )
+            if previous_collection and previous_exists and vector_chunks:
+                from qdrant_client.models import PointStruct
+
+                requested = [item["id"] for item in vector_chunks]
+                for offset in range(0, len(requested), 256):
+                    records = self._qdrant_call(
+                        "读取上一版本向量",
+                        lambda offset=offset: store.client.retrieve(
+                            collection_name=previous_collection,
+                            ids=requested[offset : offset + 256],
+                            with_vectors=True,
+                            with_payload=False,
                         ),
                     )
-        changed_chunks = [item for item in chunks if item["id"] not in reused_ids]
-        vectors = embedder.embed_batch([str(item["text"]) for item in changed_chunks]) if changed_chunks else []
-        if chunks:
+                    points = []
+                    for record in records:
+                        point_id = str(record.id)
+                        if record.vector is None or point_id not in payloads:
+                            continue
+                        reused_ids.add(point_id)
+                        points.append(PointStruct(id=record.id, vector=record.vector, payload=payloads[point_id]))
+                    if points:
+                        self._qdrant_call(
+                            "复用上一版本向量",
+                            lambda points=points: store.client.upsert(
+                                collection_name=collection_name,
+                                points=points,
+                                wait=True,
+                            ),
+                        )
+            changed_chunks = [item for item in vector_chunks if item["id"] not in reused_ids]
+            vectors = embedder.embed_batch([str(item["text"]) for item in changed_chunks]) if changed_chunks else []
             if changed_chunks:
                 self._qdrant_call(
                     "写入当前版本向量",
@@ -241,14 +252,16 @@ class SearchIndexer:
                     ),
                 )
 
-        with httpx.Client(timeout=30) as client:
-            aliases = client.get(f"{self.opensearch_url}/_alias/{alias_name}")
-            actions: list[dict[str, Any]] = []
-            if aliases.status_code == 200:
-                actions.extend({"remove": {"index": name, "alias": alias_name}} for name in aliases.json())
-            actions.append({"add": {"index": index_name, "alias": alias_name}})
-            switched = client.post(f"{self.opensearch_url}/_aliases", json={"actions": actions})
-            switched.raise_for_status()
+        if publish_fulltext:
+            with httpx.Client(timeout=30) as client:
+                aliases = client.get(f"{self.opensearch_url}/_alias/{alias_name}")
+                lines: list[str] = []
+                actions: list[dict[str, Any]] = []
+                if aliases.status_code == 200:
+                    actions.extend({"remove": {"index": name, "alias": alias_name}} for name in aliases.json())
+                actions.append({"add": {"index": index_name, "alias": alias_name}})
+                switched = client.post(f"{self.opensearch_url}/_aliases", json={"actions": actions})
+                switched.raise_for_status()
 
         checksum = hashlib.sha256(
             "".join(
@@ -256,15 +269,17 @@ class SearchIndexer:
                 + item["chunk_id"]
                 + item["version_id"]
                 + hashlib.sha256(str(item["text"]).encode()).hexdigest()
-                for item in chunks
+                for item in [*fulltext_chunks, *vector_chunks]
             ).encode()
         ).hexdigest()
         return {
             "opensearch_index": index_name,
             "opensearch_alias": alias_name,
             "qdrant_collection": collection_name,
-            "dimension": embedder.dimension,
-            "chunk_count": len(chunks),
+            "dimension": embedder.dimension if embedder else None,
+            "chunk_count": len({item["id"] for item in [*fulltext_chunks, *vector_chunks]}),
+            "fulltext_chunk_count": len(fulltext_chunks),
+            "vector_chunk_count": len(vector_chunks),
             "embedded_count": len(changed_chunks),
             "reused_vector_count": len(reused_ids),
             "checksum": checksum,

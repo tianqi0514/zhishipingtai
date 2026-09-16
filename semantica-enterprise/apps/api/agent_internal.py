@@ -31,6 +31,10 @@ from apps.api.writing_schemas import (
     AgentWritingSectionDraftRequest,
     AgentWritingChapterSourcePackRequest,
     AgentWritingValidateRequest,
+    AgentWritingGraphSearchRequest,
+    AgentWritingGraphObjectRequest,
+    AgentWritingGraphPathRequest,
+    AgentWritingPublicStandardSearchRequest,
 )
 from apps.api.utils import serialize_row
 from packages.platform.audit import audit
@@ -67,6 +71,7 @@ from packages.platform.models import (
     DecisionGate,
     KnowledgeProductRelease,
     ProjectFact,
+    PublicReference,
     QueryRun,
     ScenarioPackageVersion,
     WritingAgentSession,
@@ -75,6 +80,12 @@ from packages.platform.models import (
     WritingDocumentVersion,
     WritingProject,
     WritingProjectMaterial,
+    WritingGraphRelease,
+)
+from packages.platform.writing_graph_query import (
+    get_release_object,
+    search_writing_graph_release,
+    writing_relation_path,
 )
 from packages.platform.writing_source_pack import select_chapter_source_rows
 from packages.platform.structured_data import (
@@ -280,6 +291,30 @@ def _writing_tool_context(
     if not set(writing_spaces).issubset(set(claims.get("space_ids") or [])):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "内部凭据不覆盖当前报告知识范围")
     return session, project, document
+
+
+def _writing_tool_graph_release(
+    db: Session,
+    project: WritingProject,
+    document: WritingDocument | None,
+    claims: dict[str, Any],
+) -> WritingGraphRelease:
+    release_id = (
+        document.writing_graph_release_id if document and document.writing_graph_release_id
+        else project.writing_graph_release_id
+    )
+    if not release_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "当前写作任务没有选择已发布写作图谱")
+    release = db.get(WritingGraphRelease, release_id)
+    if (
+        release is None or release.deleted_at is not None
+        or release.tenant_id != claims.get("tenant_id")
+        or release.status not in {"published", "superseded"}
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, "文章锁定的写作图谱版本不可用")
+    if release.space_id not in set(claims.get("space_ids") or []):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "内部凭据不覆盖该写作图谱")
+    return release
 
 
 @router.post("/credentials")
@@ -906,8 +941,22 @@ def agent_writing_context(
             "name": project.name,
             "status": project.status,
             "knowledge_product_release_id": project.knowledge_product_release_id,
+            "knowledge_space_id": project.knowledge_space_id,
+            "writing_graph_release_id": project.writing_graph_release_id,
         },
-        "document": {"title": document.title, "status": document.status} if document else None,
+        "document": {
+            "title": document.title,
+            "article_type": document.document_type,
+            "audience": document.audience,
+            "purpose": document.purpose,
+            "applicability": {
+                key: value for key, value in (document.applicability or {}).items()
+                if key != "sample_profile"
+            },
+            "writing_requirements": document.writing_requirements,
+            "writing_graph_release_id": document.writing_graph_release_id or project.writing_graph_release_id,
+            "status": document.status,
+        } if document else None,
         "facts": [
             {
                 "fact_id": row.id,
@@ -946,6 +995,178 @@ def agent_writing_context(
             "model_may_not_silently_overwrite_document": True,
         },
     }
+
+
+@router.post("/writing/graph/release")
+def agent_writing_graph_release(
+    payload: AgentWritingRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id)
+    release = _writing_tool_graph_release(db, project, document, claims)
+    return {
+        "id": release.id,
+        "space_id": release.space_id,
+        "release_number": release.release_number,
+        "checksum": release.checksum,
+        "published_at": release.published_at,
+        "status": release.status,
+        "counts": {
+            "evidence": release.evidence_count,
+            "entities": release.entity_count,
+            "claims": release.claim_count,
+            "facts": release.fact_count,
+            "relations": release.relation_count,
+        },
+        "immutable_snapshot": True,
+    }
+
+
+@router.post("/writing/graph/search")
+def agent_writing_graph_search(
+    payload: AgentWritingGraphSearchRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    session, project, document = _writing_tool_context(db, claims, payload.conversation_id)
+    release = _writing_tool_graph_release(db, project, document, claims)
+    items = search_writing_graph_release(
+        db, release, query=payload.query,
+        object_types=payload.object_types, limit=payload.limit,
+    )
+    audit(
+        db, claims["tenant_id"], claims["sub"], "agent.writing_graph.search",
+        "writing_agent_session", session.id,
+        {"release_id": release.id, "object_types": payload.object_types, "result_count": len(items)},
+    )
+    db.commit()
+    return {"release_id": release.id, "query": payload.query, "items": items}
+
+
+def _writing_graph_object_response(
+    db: Session,
+    release: WritingGraphRelease,
+    *,
+    object_type: str,
+    object_id: str,
+) -> dict[str, Any]:
+    try:
+        snapshot = get_release_object(
+            db, release, object_type=object_type, object_id=object_id,
+        )
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return {"release_id": release.id, "object_type": object_type, "snapshot": snapshot}
+
+
+@router.post("/writing/graph/fact")
+def agent_writing_graph_fact(
+    payload: AgentWritingGraphObjectRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id)
+    release = _writing_tool_graph_release(db, project, document, claims)
+    result = _writing_graph_object_response(
+        db, release, object_type="fact", object_id=payload.object_id,
+    )
+    fact = result["snapshot"]
+    result["claims"] = [
+        get_release_object(db, release, object_type="claim", object_id=item)
+        for item in fact.get("claim_ids") or []
+    ]
+    result["evidence"] = [
+        get_release_object(db, release, object_type="evidence", object_id=item)
+        for item in fact.get("evidence_ids") or []
+    ]
+    return result
+
+
+@router.post("/writing/graph/evidence")
+def agent_writing_graph_evidence(
+    payload: AgentWritingGraphObjectRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id)
+    release = _writing_tool_graph_release(db, project, document, claims)
+    return _writing_graph_object_response(
+        db, release, object_type="evidence", object_id=payload.object_id,
+    )
+
+
+@router.post("/writing/graph/relation-path")
+def agent_writing_graph_relation_path(
+    payload: AgentWritingGraphPathRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    _, project, document = _writing_tool_context(db, claims, payload.conversation_id)
+    release = _writing_tool_graph_release(db, project, document, claims)
+    try:
+        path = writing_relation_path(
+            db, release,
+            start_entity_id=payload.start_entity_id,
+            end_entity_id=payload.end_entity_id,
+            max_hops=payload.max_hops,
+        )
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return {
+        "release_id": release.id,
+        "start_entity_id": payload.start_entity_id,
+        "end_entity_id": payload.end_entity_id,
+        "path": path,
+        "found": bool(path),
+    }
+
+
+@router.post("/writing/public-standards/search")
+def agent_writing_public_standard_search(
+    payload: AgentWritingPublicStandardSearchRequest,
+    claims: dict[str, Any] = Depends(get_agent_claims),
+    db: Session = Depends(get_db),
+):
+    """Search only reviewed project references; never browse arbitrary URLs."""
+    session, project, _ = _writing_tool_context(db, claims, payload.conversation_id)
+    query_tokens = {
+        token.casefold() for token in payload.query.replace("，", " ").replace("、", " ").split()
+        if token.strip()
+    }
+    ranked = []
+    for row in db.scalars(select(PublicReference).where(
+        PublicReference.project_id == project.id,
+        PublicReference.validity_status == "current",
+        _active(PublicReference),
+    )):
+        haystack = f"{row.title} {row.publisher} {row.excerpt}".casefold()
+        score = sum(1 for token in query_tokens if token in haystack)
+        if payload.query.casefold() in haystack:
+            score += 10
+        if score:
+            ranked.append((score, row))
+    ranked.sort(key=lambda item: (-item[0], item[1].title, item[1].id))
+    items = [{
+        "public_reference_id": row.id,
+        "title": row.title,
+        "publisher": row.publisher,
+        "url": row.url,
+        "publication_date": row.publication_date,
+        "retrieved_at": row.retrieved_at,
+        "excerpt": row.excerpt,
+        "applicable_scope": row.applicable_scope,
+        "usage_sections": row.usage_sections,
+        "validity_status": row.validity_status,
+        "content_is_untrusted": True,
+    } for _, row in ranked[: payload.limit]]
+    audit(
+        db, claims["tenant_id"], claims["sub"], "agent.writing.public_standard.search",
+        "writing_agent_session", session.id,
+        {"query": payload.query[:200], "result_count": len(items)},
+    )
+    db.commit()
+    return {"query": payload.query, "items": items, "scope": "reviewed_project_references"}
 
 
 @router.post("/writing/document-outline")

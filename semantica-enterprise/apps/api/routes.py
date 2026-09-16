@@ -158,7 +158,7 @@ from packages.platform.models import (
     WritingBlockBinding,
 )
 from packages.platform.knowledge_search import execute_hybrid_search
-from packages.platform.knowledge_processing import normalize_processing_mode
+from packages.platform.knowledge_processing import normalize_processing_mode, normalize_processing_targets
 from packages.platform.processing_readiness import build_processing_readiness
 from packages.platform.model_routing import (
     MODEL_ROUTE_SCENES,
@@ -840,6 +840,7 @@ def list_policies(user: User = Depends(get_current_user), db: Session = Depends(
 def processing_readiness(
     parser_policy_id: str | None = None,
     mode: str = "both",
+    targets: str | None = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -848,6 +849,7 @@ def processing_readiness(
             db,
             tenant_id=user.tenant_id,
             mode=mode,
+            requested_targets=targets,
             parser_policy_id=parser_policy_id,
         )
     except ValueError as exc:
@@ -988,6 +990,8 @@ async def upload_document(
     space_id: str = Form(...),
     parser_policy_id: str | None = Form(None),
     knowledge_processing_mode: str = Form("both"),
+    knowledge_processing_targets: str | None = Form(None),
+    material_role: str = Form("task_data"),
     media_policy_id: str | None = Form(None),
     media_policy_override: str | None = Form(None),
     cloud_processing_confirmed: bool = Form(False),
@@ -1000,8 +1004,14 @@ async def upload_document(
     require_space_permission(db, user, space_id, "write")
     try:
         processing_mode = normalize_processing_mode(knowledge_processing_mode)
+        requested_targets = normalize_processing_targets(
+            knowledge_processing_targets,
+            legacy_mode=processing_mode,
+        )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if material_role not in {"task_data", "policy_basis", "reference", "sample_style", "attachment"}:
+        raise HTTPException(422, "不支持的材料用途")
     if parser_policy_id:
         selected_policy = _must(db, ParserPolicy, parser_policy_id, "解析策略")
         if selected_policy.tenant_id != user.tenant_id:
@@ -1017,6 +1027,7 @@ async def upload_document(
         db,
         tenant_id=user.tenant_id,
         mode=processing_mode,
+        requested_targets=requested_targets,
         parser_policy_id=parser_policy_id,
     )
     if not readiness["ready"]:
@@ -1120,13 +1131,15 @@ async def upload_document(
             media_policy_version_id=resolved_media_version_id,
             media_policy_snapshot=resolved_media_snapshot,
             parse_summary={
-                "knowledge_processing_protocol": "targets_v1",
+                "knowledge_processing_protocol": "targets_v2",
                 "knowledge_processing_mode": processing_mode,
+                "knowledge_processing_targets": sorted(requested_targets),
+                "material_role": material_role,
             },
         )
         db.add(version); db.flush()
         job = Job(tenant_id=user.tenant_id, job_type="parse_document", idempotency_key=f"parse:{version.id}", input={"version_id": version.id})
-        db.add(job); audit(db, user.tenant_id, user.id, "document.upload", "document", document.id, {"version_id": version.id, "knowledge_processing_mode": processing_mode}); _commit(db)
+        db.add(job); audit(db, user.tenant_id, user.id, "document.upload", "document", document.id, {"version_id": version.id, "knowledge_processing_mode": processing_mode, "knowledge_processing_targets": sorted(requested_targets), "material_role": material_role}); _commit(db)
         warning = _dispatch_job(db, job, parse_version_task)
         response = {"document": serialize_row(document), "version": serialize_row(version), "job": serialize_row(job)}
         if warning:
@@ -4946,14 +4959,23 @@ def process_document(
     active = list(db.scalars(select(Job).where(Job.tenant_id == user.tenant_id, Job.job_type == "process_knowledge", Job.status.in_(["queued", "running"]), _active(Job))))
     if any((row.input or {}).get("version_id") == document.current_version_id for row in active): raise HTTPException(409, "该文档已有知识加工任务")
     version = _must_tenant(db, DocumentVersion, document.current_version_id, user.tenant_id, "文档版本")
-    processing_mode = normalize_processing_mode(
-        payload.mode if payload else (version.parse_summary or {}).get("knowledge_processing_mode")
-    )
+    try:
+        processing_mode = normalize_processing_mode(
+            payload.mode if payload else (version.parse_summary or {}).get("knowledge_processing_mode")
+        )
+        requested_targets = normalize_processing_targets(
+            payload.targets if payload else (version.parse_summary or {}).get("knowledge_processing_targets"),
+            legacy_mode=processing_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     version.parse_summary = {
         **(version.parse_summary or {}),
         "knowledge_processing_requested_mode": processing_mode,
+        "knowledge_processing_protocol": "targets_v2",
+        "knowledge_processing_targets": sorted(requested_targets),
     }
-    job = Job(tenant_id=user.tenant_id, job_type="process_knowledge", idempotency_key=f"knowledge:{document.current_version_id}:{datetime.now(timezone.utc).isoformat()}" if force else f"knowledge-manual:{document.current_version_id}:{datetime.now(timezone.utc).isoformat()}", input={"version_id": document.current_version_id, "force": force, "knowledge_processing_mode": processing_mode})
+    job = Job(tenant_id=user.tenant_id, job_type="process_knowledge", idempotency_key=f"knowledge:{document.current_version_id}:{datetime.now(timezone.utc).isoformat()}" if force else f"knowledge-manual:{document.current_version_id}:{datetime.now(timezone.utc).isoformat()}", input={"version_id": document.current_version_id, "force": force, "knowledge_processing_mode": processing_mode, "knowledge_processing_targets": sorted(requested_targets)})
     db.add(job)
     audit(
         db,
@@ -4962,7 +4984,7 @@ def process_document(
         "document.process",
         "document",
         document.id,
-        {"version_id": document.current_version_id, "knowledge_processing_mode": processing_mode, "force": force},
+        {"version_id": document.current_version_id, "knowledge_processing_mode": processing_mode, "knowledge_processing_targets": sorted(requested_targets), "force": force},
     )
     db.commit()
     warning = _dispatch_job(db, job, process_version_task)

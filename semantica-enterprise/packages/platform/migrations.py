@@ -26,7 +26,19 @@ def run_migrations(engine: Engine) -> None:
         for path in migration_files:
             if path.stem in applied:
                 continue
-            statements = [item.strip() for item in path.read_text(encoding="utf-8").split(";\n") if item.strip()]
+            source = path.read_text(encoding="utf-8")
+            # A leading dialect directive applies to the complete migration.
+            # Earlier single-statement migrations happened to work with the
+            # statement-level parser, but multi-statement PostgreSQL migrations
+            # must never leak JSONB casts or ALTER syntax into SQLite tests.
+            first_line, separator, remaining = source.partition("\n")
+            if first_line.startswith("-- dialect:"):
+                file_dialects = {
+                    item.strip()
+                    for item in first_line.removeprefix("-- dialect:").split(",")
+                }
+                source = remaining if separator and engine.dialect.name in file_dialects else ""
+            statements = [item.strip() for item in source.split(";\n") if item.strip()]
             for statement in statements:
                 if statement.startswith("-- dialect:"):
                     directive, _, sql = statement.partition("\n")

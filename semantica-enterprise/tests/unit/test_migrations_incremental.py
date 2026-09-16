@@ -47,6 +47,10 @@ def test_schema_migrations_are_repeatable_on_fresh_database() -> None:
             "0029_writing_document_business_scope",
             "0030_writing_optional_knowledge_scope",
             "0031_index_only_knowledge_release",
+        "0032_writing_graph",
+        "0033_independent_search_targets",
+        "0034_writing_document_graph_release",
+        "0035_writing_public_references",
         ]
     assert profile_table == "document_profiles"
 

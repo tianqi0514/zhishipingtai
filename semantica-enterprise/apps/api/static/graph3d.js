@@ -3,7 +3,10 @@
 
   const TYPE_COLORS = {
     '组织': '#50d2b6', '人物': '#7fb4ff', '产品': '#ffbd66', '时间': '#d49bff',
-    '地点': '#71df8b', '事件': '#ff7d8f', '技术': '#55c5e8', '其他': '#92a7bc'
+    '地点': '#71df8b', '事件': '#ff7d8f', '技术': '#55c5e8', '其他': '#92a7bc',
+    'entity': '#2878d0', 'evidence': '#7a55c7', 'claim': '#df7a23',
+    'fact': '#239b69', 'relation': '#1199a6', 'metric': '#c58b00',
+    'inferred_fact': '#9a3fc1', 'historical': '#87909c'
   };
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 

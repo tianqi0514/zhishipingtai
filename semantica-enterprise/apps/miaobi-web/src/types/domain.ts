@@ -26,6 +26,8 @@ export type Project = {
   status: string;
   scenario_package_version_id: string;
   knowledge_product_release_id?: string;
+  knowledge_space_id?: string;
+  writing_graph_release_id?: string;
   role?: string;
   facts?: number;
   pending_gates?: number;
@@ -96,6 +98,10 @@ export type KnowledgeContext = {
   task_material_count: number;
   task_material_roles: Record<string, number>;
   retrieval_scope: 'task_materials' | 'knowledge_product_release';
+  writing_graph?: {
+    id: string; release_number: number; checksum: string; status: string;
+    published_at?: string; fact_count: number; relation_count: number; snapshot_locked: boolean;
+  } | null;
 };
 
 export type ProjectMaterial = {
@@ -125,6 +131,35 @@ export type ProjectMaterialCandidate = {
   already_linked: boolean;
 };
 
+export type ExtractionWorkbenchItem = Record<string, unknown> & {
+  id: string;
+  needs_confirmation?: boolean;
+};
+
+export type ExtractionWorkbenchStep = {
+  key: 'material_role' | 'sample_profile' | 'evidence' | 'entity' | 'claim' | 'fact' | 'relation' | 'metric';
+  title: string;
+  short_title: string;
+  purpose: string;
+  input_label: string;
+  output_label: string;
+  prompt: string;
+  status: 'ready' | 'needs_confirmation' | 'not_required' | 'waiting_material' | 'waiting_result';
+  count: number;
+  pending_count: number;
+  items: ExtractionWorkbenchItem[];
+};
+
+export type ExtractionWorkbenchSnapshot = {
+  project_id: string;
+  document_id?: string | null;
+  material_count: number;
+  evidence_count: number;
+  pending_count: number;
+  steps: ExtractionWorkbenchStep[];
+  limits: { max_items_per_step: number; read_only_projection: boolean };
+};
+
 export type WritingDocument = {
   current_version_id?: string;
   id: string;
@@ -138,6 +173,7 @@ export type WritingDocument = {
   adopted_material_ids?: string[] | null;
   scenario_package_version_id?: string;
   knowledge_product_release_id?: string;
+  writing_graph_release_id?: string;
   status: string;
   current_version?: {
     id: string;
@@ -192,11 +228,13 @@ export type WritingInputChange = {
   changes: Array<{ fact_key: string; label: string; old_value: Record<string, unknown>; new_value: Record<string, unknown>; unit?: string }>;
   impact: {
     calculations?: Array<{ result_key: string; label: string; old_value: number; new_value: number; unit?: string }>;
-    report_blocks?: Array<{ block_id: string; section: string }>;
+    report_blocks?: Array<{ block_id: string; section: string; impact_type?: 'definite' | 'suspected'; dependency_reasons?: string[] }>;
     content_proposals?: Array<{
       block_id: string; section: string; kind?: string; selectable: boolean;
       old_text?: string; new_text?: string; reason?: string;
+      impact_type?: 'definite' | 'suspected'; dependency_reasons?: string[];
     }>;
+    suspected_impacts?: Array<{ block_id: string; section: string; reason: string }>;
     accepted_block_ids?: string[];
     pending_review_block_ids?: string[];
     unaffected_results?: Array<{ result_key: string; label: string; value: number; unit?: string }>;

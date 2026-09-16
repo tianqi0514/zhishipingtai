@@ -5,7 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .knowledge_processing import normalize_processing_mode, processing_targets
+from .knowledge_processing import normalize_processing_mode, normalize_processing_targets
 from .model_routing import resolve_model_for_scene
 from .models import (
     ChunkPolicy,
@@ -64,11 +64,12 @@ def build_processing_readiness(
     *,
     tenant_id: str,
     mode: str = "both",
+    requested_targets: Any = None,
     parser_policy_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve the exact parser and model chain before an upload is accepted."""
     normalized_mode = normalize_processing_mode(mode)
-    targets = processing_targets(normalized_mode)
+    targets = normalize_processing_targets(requested_targets, legacy_mode=normalized_mode)
     blocking_issues: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
 
@@ -156,11 +157,11 @@ def build_processing_readiness(
         if extraction_policy
         else None
     )
-    if "graph" in targets:
+    if targets & {"graph", "writing_graph"}:
         if extraction_policy is None:
             components.append({
                 "stage": "semantic_extract",
-                "label": "图谱语义抽取",
+                "label": "语义抽取",
                 "kind": "policy",
                 "required": True,
                 "status": "blocked",
@@ -175,7 +176,7 @@ def build_processing_readiness(
             })
         else:
             component = _model_component(
-                "semantic_extract", "图谱语义抽取", extraction_model, required=True
+                "semantic_extract", "语义抽取", extraction_model, required=True
             )
             component.update({
                 "policy_id": extraction_policy.id,

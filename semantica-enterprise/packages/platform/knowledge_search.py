@@ -469,9 +469,12 @@ def execute_hybrid_search(
     if use_keyword and releases:
         channel_started = time.perf_counter()
         try:
+            indexes = [row.opensearch_index for row in releases if row.opensearch_index]
+            if not indexes:
+                raise RuntimeError("当前知识版本未发布全文索引")
             channel_results["keyword"] = keyword_search(
                 settings.opensearch_url,
-                [row.opensearch_index for row in releases],
+                indexes,
                 query,
                 allowed_space_ids=space_ids,
                 limit=top_k * 3,
@@ -484,7 +487,10 @@ def execute_hybrid_search(
         channel_started = time.perf_counter()
         by_model: dict[str, list[IndexRelease]] = defaultdict(list)
         for release in releases:
-            by_model[release.model_config_id].append(release)
+            if release.model_config_id and release.qdrant_collection:
+                by_model[release.model_config_id].append(release)
+        if not by_model:
+            warnings.append("当前知识版本未发布向量索引")
         for model_id, model_releases in by_model.items():
             model = db.get(ModelConfig, model_id)
             if model is None or not model.enabled:
@@ -495,7 +501,7 @@ def execute_hybrid_search(
                 channel_results["vector"].extend(
                     vector_search(
                         settings.qdrant_url,
-                        [row.qdrant_collection for row in model_releases],
+                        [row.qdrant_collection for row in model_releases if row.qdrant_collection],
                         query,
                         allowed_space_ids=space_ids,
                         embedder=embedder,

@@ -40,6 +40,7 @@ from packages.platform.models import (
     WritingDocumentVersion,
     WritingProjectMember,
     WritingProjectMaterial,
+    WritingGraphRelease,
 )
 from packages.platform.security import create_access_token, hash_password
 from packages.platform.writing import content_hash
@@ -72,6 +73,42 @@ def test_export_plan_selection_keeps_one_current_plan_per_objective() -> None:
         ("safety", 3),
         ("speed", 3),
     ]
+
+
+def test_public_reference_is_project_scoped_versioned_metadata_not_a_fact() -> None:
+    with writing_client() as (client, _db, release):
+        project = _create_project(client, release.id)
+        payload = {
+            "title": "某省地震应急预案",
+            "publisher": "某省人民政府办公厅",
+            "url": "https://example.gov.cn/policy/earthquake-plan",
+            "publication_date": "2026-03-01",
+            "excerpt": "本材料仅用于测试公开制度引用，不构成本项目灾情事实。",
+            "applicable_scope": {"region": "某省", "purpose": "structure_reference"},
+            "validity_status": "current",
+            "usage_sections": ["编制说明", "组织指挥"],
+        }
+        created = client.post(
+            f"/api/v1/writing/projects/{project['id']}/public-references", json=payload,
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["url"] == payload["url"]
+        assert created.json()["validity_status"] == "current"
+        duplicate = client.post(
+            f"/api/v1/writing/projects/{project['id']}/public-references", json=payload,
+        )
+        assert duplicate.status_code == 200
+        assert duplicate.json()["unchanged"] is True
+        listed = client.get(
+            f"/api/v1/writing/projects/{project['id']}/public-references",
+        )
+        assert listed.status_code == 200
+        assert len(listed.json()) == 1
+        invalid = client.post(
+            f"/api/v1/writing/projects/{project['id']}/public-references",
+            json={**payload, "url": "file:///etc/passwd"},
+        )
+        assert invalid.status_code == 422
 
 
 @contextmanager
@@ -439,6 +476,8 @@ def test_writing_project_is_created_from_a_knowledge_space() -> None:
                 "code": "emergency",
                 "ready": True,
                 "knowledge_version": 1,
+                "writing_graph_ready": False,
+                "writing_graph_releases": [],
             }
         ]
         created = client.post(
@@ -456,6 +495,56 @@ def test_writing_project_is_created_from_a_knowledge_space() -> None:
         )
         assert context.status_code == 200, context.text
         assert [item["id"] for item in context.json()["spaces"]] == [spaces.json()[0]["id"]]
+
+
+def test_project_and_article_pin_one_immutable_writing_graph_release() -> None:
+    with writing_client() as (client, db, release):
+        seeded = _create_project(client, release.id)
+        space_id = db.scalar(select(KnowledgeProductReleaseItem.space_id).where(
+            KnowledgeProductReleaseItem.product_release_id == release.id,
+        ))
+        graph = WritingGraphRelease(
+            tenant_id=release.tenant_id,
+            space_id=space_id,
+            release_number=1,
+            graph_name="writing_acceptance_r1",
+            evidence_count=4,
+            entity_count=3,
+            claim_count=3,
+            fact_count=3,
+            relation_count=2,
+            checksum="c" * 64,
+            status="published",
+            created_by=db.scalar(select(User.id)),
+            published_at=datetime.now(timezone.utc),
+        )
+        db.add(graph); db.commit()
+        spaces = client.get("/api/v1/writing/spaces").json()
+        assert spaces[0]["writing_graph_ready"] is True
+        assert spaces[0]["writing_graph_releases"][0]["id"] == graph.id
+        project = client.post("/api/v1/writing/projects", json={
+            "code": "writing-graph-pinned",
+            "name": "锁定写作图谱的项目",
+            "scenario_package_version_id": seeded["scenario_package_version_id"],
+            "space_id": space_id,
+            "writing_graph_release_id": graph.id,
+        })
+        assert project.status_code == 200, project.text
+        assert project.json()["knowledge_space_id"] == space_id
+        assert project.json()["writing_graph_release_id"] == graph.id
+        article = client.post("/api/v1/writing/documents", json={
+            "project_id": project.json()["id"],
+            "title": "图谱约束文章",
+            "document_type": "response_plan",
+            "content": [],
+        })
+        assert article.status_code == 200, article.text
+        assert article.json()["writing_graph_release_id"] == graph.id
+        assert article.json()["current_version"]["writing_graph_release_id"] == graph.id
+        context = client.get(f"/api/v1/writing/projects/{project.json()['id']}/knowledge-context")
+        assert context.status_code == 200, context.text
+        assert context.json()["writing_graph"]["id"] == graph.id
+        assert context.json()["writing_graph"]["snapshot_locked"] is True
 
 
 def test_project_materials_pin_versions_and_removal_preserves_zhiku_document() -> None:
@@ -593,6 +682,72 @@ def test_project_materials_pin_versions_and_removal_preserves_zhiku_document() -
         assert fallback_conversation.settings["material_document_ids"] == []
         assert fallback_conversation.settings["allowed_document_ids"] == [document.id]
         assert internal_document.id not in fallback_conversation.settings["allowed_document_ids"]
+
+
+def test_extraction_workbench_projects_real_materials_facts_and_prompts() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        release_item = db.query(KnowledgeProductReleaseItem).filter_by(product_release_id=release.id).one()
+        document = Document(
+            tenant_id=release.tenant_id,
+            space_id=release_item.space_id,
+            title="地震应急工作简报",
+            status="published",
+        )
+        db.add(document)
+        db.flush()
+        version = DocumentVersion(
+            tenant_id=release.tenant_id,
+            document_id=document.id,
+            version_number=1,
+            filename="地震应急工作简报.pdf",
+            content_type="application/pdf",
+            size=2048,
+            sha256="7" * 64,
+            object_key="tests/earthquake-brief.pdf",
+            status="processed",
+        )
+        db.add(version)
+        db.flush()
+        document.current_version_id = version.id
+        db.commit()
+        linked = client.post(
+            f"/api/v1/writing/projects/{project['id']}/materials",
+            json={"document_id": document.id, "material_role": "task_data"},
+        )
+        assert linked.status_code == 200, linked.text
+        fact = ProjectFact(
+            tenant_id=release.tenant_id,
+            project_id=project["id"],
+            fact_key="available_rescuers",
+            label="可用搜救人员",
+            fact_type="manual_input",
+            value={"value": 320},
+            unit="人",
+            source_type="document",
+            source_id=version.id,
+            verification_status="verified",
+            freshness_status="current",
+            version=1,
+            active=True,
+        )
+        db.add(fact)
+        db.commit()
+
+        response = client.get(f"/api/v1/writing/projects/{project['id']}/extraction-workbench")
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["material_count"] == 1
+        assert [step["key"] for step in payload["steps"]] == [
+            "material_role", "sample_profile", "evidence", "entity",
+            "claim", "fact", "relation", "metric",
+        ]
+        assert all(step["prompt"] and "JSON" in step["prompt"] for step in payload["steps"])
+        by_key = {step["key"]: step for step in payload["steps"]}
+        assert by_key["material_role"]["items"][0]["role"] == "task_data"
+        assert by_key["fact"]["items"][0]["key"] == "available_rescuers"
+        assert by_key["metric"]["items"][0]["name"] == "可用搜救人员"
+        assert by_key["sample_profile"]["status"] == "not_required"
 
 
 def test_business_scenario_config_round_trip_creates_executable_version() -> None:
@@ -964,7 +1119,12 @@ def test_input_change_preview_is_non_mutating_and_apply_updates_only_dependent_r
         restored_impact = restored_preview.json()["impact"]
         assert restored_impact["calculations"][0]["old_value"] == 100
         assert restored_impact["calculations"][0]["new_value"] == 180
-        assert restored_impact["report_blocks"] == [{"block_id": "rescue-gap-block", "section": "报告正文"}]
+        assert restored_impact["report_blocks"] == [{
+            "block_id": "rescue-gap-block",
+            "section": "报告正文",
+            "impact_type": "definite",
+            "dependency_reasons": ["依赖重新计算结果"],
+        }]
         restored = client.post(
             f"/api/v1/writing/projects/{project['id']}/input-changes/apply",
             json={"preview_id": restored_preview.json()["id"]},
@@ -986,7 +1146,12 @@ def test_input_change_preview_is_non_mutating_and_apply_updates_only_dependent_r
         second_impact = second_preview.json()["impact"]
         assert second_impact["calculations"][0]["old_value"] == 180
         assert second_impact["calculations"][0]["new_value"] == 100
-        assert second_impact["report_blocks"] == [{"block_id": "rescue-gap-block", "section": "报告正文"}]
+        assert second_impact["report_blocks"] == [{
+            "block_id": "rescue-gap-block",
+            "section": "报告正文",
+            "impact_type": "definite",
+            "dependency_reasons": ["依赖重新计算结果"],
+        }]
         second_applied = client.post(
             f"/api/v1/writing/projects/{project['id']}/input-changes/apply",
             json={"preview_id": second_preview.json()["id"]},
@@ -1044,6 +1209,20 @@ def test_input_change_accepts_bound_paragraphs_individually_without_overwriting_
                 "verification_status": "verified", "metadata": metadata,
             })
             assert bound.status_code == 200, bound.text
+        formal_chunks = client.get(
+            f"/api/v1/writing/documents/{document['id']}/chunks"
+        )
+        assert formal_chunks.status_code == 200, formal_chunks.text
+        formal_by_id = {item["chunk_id"]: item for item in formal_chunks.json()}
+        paragraph_dependencies = {
+            (item["binding_type"], item["binding_id"])
+            for item in formal_by_id["paragraph-resource"]["dependencies"]
+        }
+        assert ("project_fact", fact_ids["rescue_available"]) in paragraph_dependencies
+        assert ("computation_run", run["id"]) in paragraph_dependencies
+        assert {
+            item["binding_type"] for item in formal_by_id["paragraph-summary"]["dependencies"]
+        } == {"computation_run"}
         preview_response = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/preview", json={
             "document_id": document["id"],
             "changes": [{"fact_key": "rescue_available", "new_value": {"number": 400}, "reason": "资源清点更新"}],
@@ -1054,6 +1233,10 @@ def test_input_change_accepts_bound_paragraphs_individually_without_overwriting_
         assert proposals["metric-gap"]["new_text"].endswith("100人。")
         assert proposals["paragraph-resource"]["new_text"] == "可用搜救人员400人，缺口100人。"
         assert proposals["paragraph-summary"]["new_text"] == "当前缺口100人，需进一步协调。"
+        assert proposals["paragraph-resource"]["impact_type"] == "definite"
+        assert proposals["paragraph-resource"]["dependency_reasons"] == [
+            "依赖重新计算结果", "直接引用变更事实",
+        ]
         assert "paragraph-unbound" not in proposals
         invalid = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/apply", json={
             "preview_id": preview["id"], "accepted_block_ids": ["paragraph-unbound"],
@@ -1071,8 +1254,26 @@ def test_input_change_accepts_bound_paragraphs_individually_without_overwriting_
         assert by_id["paragraph-summary"]["freshness_status"] == "stale"
         assert by_id["paragraph-unbound"] == unbound
         assert applied.json()["impact"]["pending_review_block_ids"] == ["paragraph-summary"]
+        current_chunks = client.get(
+            f"/api/v1/writing/documents/{document['id']}/chunks"
+        ).json()
+        current_chunk_by_id = {item["chunk_id"]: item for item in current_chunks}
+        assert current_chunk_by_id["paragraph-resource"]["freshness_status"] == "current"
+        assert current_chunk_by_id["paragraph-summary"]["freshness_status"] == "stale"
+        assert any(
+            item["binding_type"] == "project_fact"
+            and item["binding_id"] != fact_ids["rescue_available"]
+            for item in current_chunk_by_id["paragraph-resource"]["dependencies"]
+        )
         old = db.get(WritingDocumentVersion, document["current_version"]["id"])
         assert next(node for node in old.content if node["id"] == "paragraph-resource") == paragraph
+        old_chunks = client.get(
+            f"/api/v1/writing/documents/{document['id']}/chunks",
+            params={"version_id": old.id},
+        ).json()
+        assert next(item for item in old_chunks if item["chunk_id"] == "paragraph-resource")[
+            "content"
+        ] == paragraph
 
 
 def test_real_customer_sample_profile_is_article_scoped_and_never_factual_evidence(monkeypatch) -> None:

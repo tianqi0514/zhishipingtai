@@ -10,8 +10,10 @@ from packages.platform.database import get_db
 from packages.platform.audit import audit
 from packages.platform.models import (AnalysisRule, AnalysisRuleSet, AnalysisRuleVersion,
     Ontology, OntologyVersion, ScenarioPackageVersion, WritingReasoningRun,
-    WritingBlockBinding, WritingDocument, WritingDocumentVersion, ProjectFact, ComputationRun)
+    WritingBlockBinding, WritingChunk, WritingChunkDependency, WritingDocument,
+    WritingDocumentVersion, WritingGraphReleaseItem, ProjectFact, PublicReference, ComputationRun)
 from packages.platform.writing import content_hash, walk_plate_nodes
+from packages.platform.writing_chunks import sync_writing_version_chunks
 from packages.platform.writing_knowledge import (ENGINE, applied_packet, prepare_packet,
     project_fingerprint, resolve_requirement)
 
@@ -58,6 +60,16 @@ def review_paragraph(document_id: str, block_id: str, payload: ParagraphReview, 
     binding.content_hash = content_hash(node)
     binding.freshness_status = "manual_override"
     binding.verification_status = "unverified"  # Human wording review != factual certification.
+    sync_writing_version_chunks(
+        db,
+        project=project,
+        document=document,
+        version=version,
+        legacy_bindings=db.scalars(select(WritingBlockBinding).where(
+            WritingBlockBinding.document_id == document.id,
+            WritingBlockBinding.deleted_at.is_(None),
+        )),
+    )
     db.commit()
     return {"status": "reviewed", "block_id": block_id}
 
@@ -183,6 +195,54 @@ def paragraph_evidence(document_id: str, user=Depends(get_current_user), db=Depe
     _release_scope(db, project, user)
     version = db.get(WritingDocumentVersion, document.current_version_id)
     bindings = {b.block_id: b for b in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, WritingBlockBinding.deleted_at.is_(None)))}
+    chunks = {
+        row.chunk_id: row
+        for row in db.scalars(select(WritingChunk).where(
+            WritingChunk.document_version_id == document.current_version_id,
+            WritingChunk.deleted_at.is_(None),
+        ))
+    }
+    chunk_dependencies: dict[str, list[WritingChunkDependency]] = {row.id: [] for row in chunks.values()}
+    if chunk_dependencies:
+        for dependency in db.scalars(select(WritingChunkDependency).where(
+            WritingChunkDependency.writing_chunk_id.in_(list(chunk_dependencies)),
+            WritingChunkDependency.deleted_at.is_(None),
+        )):
+            chunk_dependencies[dependency.writing_chunk_id].append(dependency)
+    graph_pairs = {
+        (dependency.binding_type.removeprefix("writing_"), dependency.binding_id)
+        for values in chunk_dependencies.values()
+        for dependency in values
+        if dependency.binding_type in {"writing_fact", "writing_evidence", "writing_relation"}
+    }
+    graph_snapshots = {}
+    graph_release_id = version.writing_graph_release_id if version else None
+    if graph_release_id and graph_pairs:
+        object_ids = {object_id for _, object_id in graph_pairs}
+        for item in db.scalars(select(WritingGraphReleaseItem).where(
+            WritingGraphReleaseItem.release_id == graph_release_id,
+            WritingGraphReleaseItem.object_id.in_(object_ids),
+            WritingGraphReleaseItem.deleted_at.is_(None),
+        )):
+            graph_snapshots[(item.object_type, item.object_id)] = item.snapshot or {}
+    public_reference_ids = {
+        dependency.binding_id
+        for values in chunk_dependencies.values()
+        for dependency in values
+        if dependency.binding_type == "public_reference"
+    }
+    public_snapshots = {}
+    if public_reference_ids:
+        for item in db.scalars(select(PublicReference).where(
+            PublicReference.project_id == project.id,
+            PublicReference.id.in_(public_reference_ids),
+            PublicReference.deleted_at.is_(None),
+        )):
+            public_snapshots[item.id] = {
+                "id": item.id, "title": item.title, "publisher": item.publisher,
+                "url": item.url, "publication_date": item.publication_date,
+                "excerpt": item.excerpt, "validity_status": item.validity_status,
+            }
     result, title = [], "正文"
     for node in (version.content if version else []):
         text = "".join(str(n.get("text", "")) for n in walk_plate_nodes([node]))
@@ -201,7 +261,21 @@ def paragraph_evidence(document_id: str, user=Depends(get_current_user), db=Depe
                              "query_run_id": b.retrieval_query_run_id, "metadata": metadata,
                              "computation_run_id": b.computation_run_id})
         if text.strip() or evidence:
+            formal_chunk = chunks.get(str(node.get("id") or ""))
+            dependencies = []
+            for dependency in chunk_dependencies.get(formal_chunk.id, []) if formal_chunk else []:
+                object_type = dependency.binding_type.removeprefix("writing_")
+                dependencies.append({
+                    "type": dependency.binding_type,
+                    "id": dependency.binding_id,
+                    "version": dependency.binding_version,
+                    "verification": dependency.verification_status,
+                    "freshness": dependency.freshness_status,
+                    "snapshot": public_snapshots.get(dependency.binding_id)
+                    if dependency.binding_type == "public_reference"
+                    else graph_snapshots.get((object_type, dependency.binding_id)),
+                })
             result.append({"block_id": node.get("id"), "section": title, "text": text[:180],
                            "status": "stale" if "stale" in statuses else "current" if evidence else "unverified",
-                           "evidence": evidence})
+                           "evidence": evidence, "dependencies": dependencies})
     return {"version_id": document.current_version_id, "paragraphs": result}

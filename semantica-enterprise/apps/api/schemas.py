@@ -497,6 +497,7 @@ class DocumentUpdate(BaseModel):
 
 class KnowledgeProcessingRequest(BaseModel):
     mode: Literal["vector", "graph", "both"] = "both"
+    targets: list[Literal["fulltext", "vector", "graph", "writing_graph"]] | None = None
 
 
 class ChunkPolicyCreate(BaseModel):

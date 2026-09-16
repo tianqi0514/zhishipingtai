@@ -354,3 +354,65 @@
 }
 .active-paragraph { border-color:#76a8ef!important; background:#f7faff; }
 .assistant-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.extraction-workbench { padding: 0; overflow: hidden; }
+.extraction-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 20px 14px; }
+.extraction-head h2 { margin: 4px 0 0; color: #182239; font-size: 18px; }
+.extraction-summary { display: flex; align-items: center; gap: 7px; color: #657087; font-size: 11px; }
+.extraction-summary > span { border-radius: 999px; background: #f2f4f8; padding: 5px 9px; white-space: nowrap; }
+.extraction-summary > .pending { background: #fff3dc; color: #9a6600; }
+.extraction-stepbar { display: grid; grid-template-columns: repeat(8, minmax(72px, 1fr)); border-block: 1px solid #e8ecf2; background: #fafbfc; overflow-x: auto; }
+.extraction-stepbar button { position: relative; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 13px; align-items: center; gap: 5px; min-width: 92px; border: 0; border-right: 1px solid #edf0f4; background: transparent; padding: 10px 8px; color: #657087; text-align: left; }
+.extraction-stepbar button:last-child { border-right: 0; }
+.extraction-stepbar button:hover { background: #f1f6fe; color: #275fae; }
+.extraction-stepbar button.active { background: #eaf3ff; color: #1769e0; }
+.extraction-stepbar button > span { display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid #d7dde7; border-radius: 7px; background: #fff; color: #738097; font-size: 10px; }
+.extraction-stepbar button.active > span { border-color: #83ade7; color: #1769e0; }
+.extraction-stepbar b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.extraction-stepbar small { display: grid; min-width: 18px; height: 18px; place-items: center; border-radius: 999px; background: #eef1f5; font-size: 9px; }
+.extraction-stepbar svg { color: #b5bdca; }
+.extraction-toolbar { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; align-items: center; gap: 10px; min-height: 54px; padding: 8px 18px; border-bottom: 1px solid #edf0f4; }
+.extraction-toolbar > div:first-child { display: flex; align-items: center; gap: 8px; }
+.extraction-toolbar > div:first-child > b { color: #1e2a42; font-size: 14px; }
+.extraction-state { border-radius: 999px; padding: 3px 7px; background: #eff2f6; color: #707c90; font-size: 9px; }
+.extraction-state.ready { background: #e8f6ee; color: #187348; }
+.extraction-state.needs_confirmation { background: #fff3dc; color: #946100; }
+.extraction-view-tabs { display: flex; border: 1px solid #dfe4ec; border-radius: 9px; background: #f8f9fb; padding: 2px; }
+.extraction-view-tabs button { border: 0; border-radius: 6px; background: transparent; padding: 6px 12px; color: #6c778b; font-size: 11px; }
+.extraction-view-tabs button.active { background: #fff; color: #1769e0; box-shadow: 0 1px 4px rgba(27, 45, 74, .09); }
+.extraction-body { min-height: 270px; max-height: 520px; overflow: auto; padding: 16px 18px 18px; }
+.extraction-context-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; color: #657087; font-size: 11px; }
+.extraction-context-label b { color: #2f405d; }
+.extraction-result-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 9px; }
+.extraction-result-list article { min-width: 0; border: 1px solid #e2e7ee; border-radius: 11px; background: #fff; padding: 12px 13px; }
+.extraction-result-list article:hover { border-color: #b9cdeb; background: #fbfdff; }
+.extraction-result-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.extraction-result-title b { overflow-wrap: anywhere; color: #26344d; font-size: 12px; line-height: 1.45; }
+.extraction-result-title span { flex: none; border-radius: 999px; background: #fff2da; padding: 3px 6px; color: #976300; font-size: 9px; }
+.extraction-result-list p { display: -webkit-box; overflow: hidden; margin: 7px 0; color: #59667a; font-size: 11px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+.extraction-result-list small { display: block; margin-top: 7px; overflow: hidden; color: #8a94a6; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.extraction-prompt, .extraction-json { margin: 0; border: 1px solid #dfe5ed; border-radius: 11px; background: #f8fafc; padding: 16px; color: #34435d; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.extraction-prompt { border-color: #cddff7; background: #f7fbff; }
+.extraction-json { max-height: 430px; overflow: auto; }
+.extraction-empty, .extraction-loading { display: grid; place-items: center; min-height: 170px; color: #8590a2; font-size: 12px; }
+.extraction-loading { display: flex; min-height: 120px; justify-content: center; gap: 9px; }
+.preparation-confirmations { border: 1px solid #e1e6ee; border-radius: 14px; background: #fff; }
+.preparation-confirmations > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 17px; color: #26344d; cursor: pointer; list-style: none; }
+.preparation-confirmations > summary::-webkit-details-marker { display: none; }
+.preparation-confirmations > summary span { font-size: 13px; font-weight: 650; }
+.preparation-confirmations > summary small { border-radius: 999px; background: #f2f4f7; padding: 4px 8px; color: #6f7b8e; font-size: 10px; }
+.preparation-confirmations[open] > summary { border-bottom: 1px solid #edf0f4; }
+.preparation-confirmation-body { display: grid; gap: 14px; padding: 14px; }
+
+@media (max-width: 900px) {
+  .extraction-head { align-items: flex-start; flex-direction: column; }
+  .extraction-summary { flex-wrap: wrap; }
+  .extraction-stepbar { grid-template-columns: repeat(8, 96px); }
+  .extraction-toolbar { grid-template-columns: 1fr auto; }
+  .extraction-view-tabs { grid-row: 2; grid-column: 1 / -1; justify-content: stretch; }
+  .extraction-view-tabs button { flex: 1; }
+  .extraction-result-list { grid-template-columns: 1fr; }
+}
+.formal-dependency-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line,#e7e9ee)}
+.formal-dependency-list>small{flex-basis:100%;color:var(--muted,#667085)}
+.formal-dependency-list .status{display:inline-flex;align-items:center;gap:4px}
+.formal-dependency-list .text-button{margin-left:3px}

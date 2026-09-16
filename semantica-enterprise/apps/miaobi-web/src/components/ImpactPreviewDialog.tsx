@@ -25,7 +25,7 @@ export function ImpactPreviewDialog({ preview, submitting, onCancel, onApply }: 
     <p className="field-help">勾选控制正文是否采用新值；未勾选的段落保留原文并标记待核对。无法安全替换的表述不会被自动勾选。</p>
     <div className="impact-proposals">{(preview.impact.content_proposals || []).map((item) => <label className={item.selectable ? 'impact-proposal' : 'impact-proposal review-only'} key={item.block_id}>
       <input type="checkbox" checked={accepted.includes(item.block_id)} disabled={submitting || !item.selectable} onChange={() => toggle(item.block_id)} aria-label={`采用${item.section}中的更新`} />
-      <span><b>{item.section} · {item.kind === 'computed_metric' ? '测算值' : '正文'}</b><small>{item.reason || (item.selectable ? '可更新' : '待人工核对')}</small><em>{item.old_text || '当前内容未找到'}</em>{item.selectable && <strong>→ {item.new_text}</strong>}</span>
+      <span><b>{item.section} · {item.kind === 'computed_metric' ? '测算值' : '正文'} · {item.impact_type === 'suspected' ? '疑似影响' : '确定影响'}</b><small>{item.dependency_reasons?.length ? item.dependency_reasons.join('；') : item.reason || (item.selectable ? '可更新' : '待人工核对')}</small><em>{item.old_text || '当前内容未找到'}</em>{item.selectable && <strong>→ {item.new_text}</strong>}</span>
     </label>)}{!preview.impact.content_proposals?.length && <p className="field-help">当前文章没有登记受影响的内容；输入仍可更新，文章保持原样。</p>}</div>
     <div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={onCancel}>取消</button><button type="button" className="primary" disabled={submitting} onClick={() => onApply(accepted)}>{submitting ? '应用中…' : `应用选中的 ${accepted.length} 处`}</button></div>
   </section></div>;

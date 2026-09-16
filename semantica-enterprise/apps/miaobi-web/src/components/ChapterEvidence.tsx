@@ -42,7 +42,20 @@ export function ChapterEvidencePanel({ projectId, onChanged }: { projectId: stri
   </section>;
 }
 
-type Paragraph = { block_id: string; section: string; text: string; status: string; evidence: { type: string; status: string; chunk_id?: string; query_run_id?: string; metadata: { source_title?: string; formula?: string; input_keys?: string[]; knowledge_evidence?: Reference[] }; computation_run_id?: string }[] };
+type FormalDependency = { type: string; id: string; version?: string; verification: string; freshness: string; snapshot?: Record<string, unknown> };
+type Paragraph = { block_id: string; section: string; text: string; status: string; evidence: { type: string; status: string; chunk_id?: string; query_run_id?: string; metadata: { source_title?: string; formula?: string; input_keys?: string[]; knowledge_evidence?: Reference[] }; computation_run_id?: string }[]; dependencies?: FormalDependency[] };
+
+function dependencyLabel(item: FormalDependency): string {
+  const snapshot = item.snapshot || {};
+  if (item.type === 'writing_evidence') return `原文依据 · ${String(snapshot.filename || snapshot.title || item.id)}`;
+  if (item.type === 'writing_relation') return `业务关系 · ${String(snapshot.predicate || item.id)}`;
+  if (item.type === 'writing_fact') return `已确认事实 · ${String(snapshot.label || snapshot.fact_key || snapshot.predicate || item.id)}`;
+  if (item.type === 'public_reference') return `公开依据 · ${String(snapshot.title || item.id)}`;
+  if (item.type === 'project_fact') return '项目确认输入';
+  if (item.type === 'computation_run') return '确定性计算';
+  if (item.type === 'source_chunk') return '来源片段';
+  return item.type;
+}
 export function ParagraphEvidenceList({ documentId, versionId, projectId }: { documentId: string; versionId?: string; projectId: string }) {
   const [rows, setRows] = useState<Paragraph[]>([]);
   const [activeBlock, setActiveBlock] = useState('');
@@ -65,6 +78,15 @@ export function ParagraphEvidenceList({ documentId, versionId, projectId }: { do
       {e.metadata.knowledge_evidence?.map(ref => <article key={ref.ref}><b>{ref.text}</b>{ref.premises.map((p, j) => <p key={j}>{p.text}<button type="button" className="text-button" onClick={() => void openSource(p.source.chunk_id)}>{p.source.title}{p.source.page_number ? ` · 第 ${p.source.page_number} 页` : ''}</button></p>)}</article>)}
       {!e.metadata.knowledge_evidence?.length && e.chunk_id && e.query_run_id && <button type="button" className="text-button" onClick={() => { api<{ document_title: string; text: string }>(`/writing/projects/${projectId}/knowledge/fragments/${e.chunk_id}?query_run_id=${e.query_run_id}`).then(v => setSource({ title: v.document_title, text: v.text })).catch(x => setError(x.message)); }}>打开来源</button>}
       {!!e.metadata.input_keys?.length && <small>已绑定 {e.metadata.input_keys.length} 项业务输入；输入变化后本段需重新核对。</small>}</div>)}
+      {!!row.dependencies?.length && <div className="formal-dependency-list"><small>本段已登记依赖</small>{row.dependencies.map(item => {
+        const hasWritingEvidence = item.type === 'writing_evidence' && Boolean(item.snapshot?.text);
+        const hasPublicReference = item.type === 'public_reference' && Boolean(item.snapshot?.excerpt);
+        return <span className={item.freshness === 'stale' ? 'status stale' : 'status verified'} key={`${item.type}:${item.id}`}>
+          {dependencyLabel(item)}{item.freshness === 'stale' ? ' · 需更新' : ''}
+          {hasWritingEvidence && <button type="button" className="text-button" onClick={() => setSource({ title: String(item.snapshot?.filename || '来源依据'), text: String(item.snapshot?.text || '') })}>打开原文</button>}
+          {hasPublicReference && <button type="button" className="text-button" onClick={() => setSource({ title: `${String(item.snapshot?.publisher || '')} · ${String(item.snapshot?.title || '公开依据')}`, text: String(item.snapshot?.excerpt || '') })}>查看引用片段</button>}
+        </span>;
+      })}</div>}
       {row.evidence.some(e => e.type === 'model_extraction' && e.status === 'stale') && <button type="button" className="secondary compact" onClick={() => { setReview(row.block_id); setReason(''); }}>已修改并核对本段</button>}
       {review === row.block_id && <div><label>核对说明<textarea value={reason} onChange={e => setReason(e.target.value)} placeholder="请先保存正文修改，再说明已核对的输入和措辞" /></label><button type="button" disabled={reviewBusy || reason.trim().length < 4 || !versionId} onClick={() => void confirmReview()}>确认核对</button><button type="button" disabled={reviewBusy} onClick={() => setReview('')}>取消</button></div>}
     </details>)}

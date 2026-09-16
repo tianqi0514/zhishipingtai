@@ -13,7 +13,7 @@ from packages.semantica_adapter.indexing import SearchIndexer, search_point_id
 from .config import get_settings
 from .curation import effective_chunk_payloads
 from .media import media_type_for
-from .knowledge_processing import version_in_vector_projection
+from .knowledge_processing import version_in_fulltext_projection, version_in_vector_projection
 from .models import (
     Chunk,
     ContentElement,
@@ -34,6 +34,8 @@ def publish_index_snapshot(
     graph_release: GraphRelease | None,
     embedding_model: ModelConfig | None = None,
     include_pending_version_ids: set[str] | None = None,
+    publish_fulltext: bool = True,
+    publish_vector: bool = True,
 ) -> tuple[IndexRelease, dict]:
     """Build one immutable search snapshot from the effective curated chunks."""
     # Index and KnowledgeRelease numbers share one serialized publication
@@ -57,12 +59,13 @@ def publish_index_snapshot(
         .order_by(IndexRelease.release_number.desc())
         .limit(1)
     )
-    if embedding_model is None:
-        if previous is None:
-            raise RuntimeError("知识空间尚无向量模型发布记录")
-        embedding_model = db.get(ModelConfig, previous.model_config_id)
-    if embedding_model is None or not embedding_model.enabled:
-        raise RuntimeError("当前向量模型不可用")
+    if not publish_fulltext and not publish_vector:
+        raise ValueError("索引发布至少需要选择全文或向量通道")
+    if publish_vector:
+        if embedding_model is None and previous and previous.model_config_id:
+            embedding_model = db.get(ModelConfig, previous.model_config_id)
+        if embedding_model is None or not embedding_model.enabled:
+            raise RuntimeError("当前向量模型不可用")
 
     raw_chunks: list[Chunk] = []
     for chunk in db.scalars(
@@ -77,21 +80,19 @@ def publish_index_snapshot(
             continue
         raw_chunks.append(chunk)
     effective = effective_chunk_payloads(db, raw_chunks)
-    chunks: list[dict] = []
+    fulltext_chunks: list[dict] = []
+    vector_chunks: list[dict] = []
     for item in effective:
         row = item["row"]
         document = db.get(Document, row.document_id)
         version = db.get(DocumentVersion, row.version_id)
-        if version is None or (
-            version.id not in (include_pending_version_ids or set())
-            and not version_in_vector_projection(version.parse_summary)
-        ):
+        if version is None:
             continue
         element = db.get(ContentElement, row.element_id) if row.element_id else None
         element_metadata = dict(element.element_metadata or {}) if element else {}
         media_type = media_type_for(version.filename, version.content_type) if version else None
         point_key = row.chunk_id if item["effective_hash"] == row.content_hash else f"{row.chunk_id}:{item['effective_hash']}"
-        chunks.append({
+        payload = {
             "id": search_point_id(point_key),
             "chunk_db_id": row.id,
             "tenant_id": row.tenant_id,
@@ -118,16 +119,26 @@ def publish_index_snapshot(
                 + list((element_metadata.get("evidence") or {}).get("frame_indexes") or [])
             )),
             "scope_tokens": row.scope_tokens,
-        })
+        }
+        pending = version.id in (include_pending_version_ids or set())
+        if (pending and publish_fulltext) or version_in_fulltext_projection(version.parse_summary):
+            fulltext_chunks.append(payload)
+        if (pending and publish_vector) or version_in_vector_projection(version.parse_summary):
+            vector_chunks.append(payload)
 
     release_number = (
         db.scalar(select(func.max(IndexRelease.release_number)).where(IndexRelease.space_id == space_id)) or 0
     ) + 1
-    embedder = SemanticEmbedder(embedding_model.model_name, embedding_model.config or {})
+    embedder = (
+        SemanticEmbedder(embedding_model.model_name, embedding_model.config or {})
+        if publish_vector and embedding_model else None
+    )
     previous_collection = (
         previous.qdrant_collection
         if previous
+        and embedding_model is not None
         and previous.model_config_id == embedding_model.id
+        and embedder is not None
         and previous.embedding_dimension == embedder.dimension
         else None
     )
@@ -138,8 +149,12 @@ def publish_index_snapshot(
         tenant_id=tenant_id,
         space_id=space_id,
         release_number=release_number,
-        chunks=chunks,
+        fulltext_chunks=fulltext_chunks,
+        vector_chunks=vector_chunks,
         embedder=embedder,
+        publish_fulltext=publish_fulltext,
+        publish_vector=publish_vector,
+        previous_index=previous.opensearch_index if previous else None,
         previous_collection=previous_collection,
     )
     release = IndexRelease(
@@ -149,15 +164,20 @@ def publish_index_snapshot(
         opensearch_index=result["opensearch_index"],
         qdrant_collection=result["qdrant_collection"],
         graph_release_id=graph_release.id if graph_release else None,
-        model_config_id=embedding_model.id,
-        embedding_dimension=result["dimension"],
-        document_count=len({item["document_id"] for item in chunks}),
-        chunk_count=len(chunks),
+        model_config_id=(embedding_model.id if publish_vector and embedding_model else previous.model_config_id if previous else None),
+        embedding_dimension=(result["dimension"] or (previous.embedding_dimension if previous else None)),
+        document_count=len({item["document_id"] for item in [*fulltext_chunks, *vector_chunks]}),
+        chunk_count=result["chunk_count"],
         checksums={
             "chunks": result["checksum"],
+            "fulltext_chunk_count": result["fulltext_chunk_count"],
+            "vector_chunk_count": result["vector_chunk_count"],
             "embedded_count": result["embedded_count"],
             "reused_vector_count": result["reused_vector_count"],
-            "curated_chunks": sum(bool(item.get("curation_decision_id")) for item in chunks),
+            "curated_chunks": sum(
+                bool(item.get("curation_decision_id"))
+                for item in {item["id"]: item for item in [*fulltext_chunks, *vector_chunks]}.values()
+            ),
         },
         published_at=datetime.now(timezone.utc),
     )

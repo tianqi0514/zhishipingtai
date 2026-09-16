@@ -25,6 +25,7 @@ from apps.api.writing_schemas import (
     ComputationRequest,
     DecisionRecordCreate,
     FactConfirmation,
+    PublicReferenceCreate,
     ProjectFactCreate,
     ScenarioPackageCreate,
     ScenarioPackageUpdate,
@@ -73,6 +74,7 @@ from packages.platform.models import (
     ComputationDefinition,
     ComputationDefinitionVersion,
     ComputationRun,
+    CanonicalEntity,
     Conversation,
     ConversationMessage,
     Citation,
@@ -90,23 +92,32 @@ from packages.platform.models import (
     KnowledgeSpace,
     Document,
     DocumentVersion,
+    EntityMention,
+    ExtractionRun,
     ExportJob,
     ExportTemplateVersion,
     FactConflict,
+    Fact,
     QueryRun,
+    RelationAssertion,
     ProjectFact,
+    PublicReference,
     ScenarioPackage,
     ScenarioPackageVersion,
     User,
     WritingBlockBinding,
+    WritingChunk,
+    WritingChunkDependency,
     WritingDocument,
     WritingDocumentVersion,
+    WritingGraphRelease,
     WritingComment,
     WritingProject,
     WritingProjectMaterial,
     WritingProjectMember,
     WritingAgentSession,
     WritingGenerationRun,
+    WritingGraphReleaseItem,
     WritingInputChange,
     WritingAgentEdit,
     WritingEventProjection,
@@ -132,11 +143,15 @@ from packages.platform.writing_flow import (
     renumber_chapter_citations,
     validate_agent_edit,
     validate_and_parse_agent_report,
+    validate_public_reference_refs,
+    validate_writing_graph_refs,
 )
 from packages.platform.writing_impact import find_plate_node, propose_bound_text_change
 from packages.platform.writing_sample_profile import (
     extract_sample_profile, sample_main_body_lengths, validate_sample_profile,
 )
+from packages.platform.writing_extraction import extraction_step_definitions
+from packages.platform.writing_chunks import sync_writing_version_chunks, version_chunk_dependencies
 from packages.platform.index_release import activate_knowledge_release
 from packages.platform.writing_export import CONTENT_TYPES, build_export_artifact
 from packages.platform.writing_configuration import (
@@ -255,6 +270,36 @@ def _release_for_user(db: Session, release_id: str, user: User) -> KnowledgeProd
     if any(not has_space_permission(db, user, item.space_id, "read") for item in items):
         raise HTTPException(status_code=403, detail="无权读取项目使用的知识空间")
     return release
+
+
+def _writing_graph_release_for_user(
+    db: Session,
+    release_id: str,
+    user: User,
+    *,
+    expected_space_id: str | None = None,
+) -> WritingGraphRelease:
+    release = _tenant_row(db, WritingGraphRelease, release_id, user.tenant_id, "写作图谱版本")
+    if release.status not in {"published", "superseded"}:
+        raise HTTPException(status_code=409, detail="只能使用已发布的写作图谱版本")
+    if expected_space_id and release.space_id != expected_space_id:
+        raise HTTPException(status_code=409, detail="写作图谱版本不属于当前知识空间")
+    if not has_space_permission(db, user, release.space_id, "read"):
+        raise HTTPException(status_code=403, detail="无权读取该写作图谱")
+    return release
+
+
+def _latest_writing_graph_release(
+    db: Session, space_id: str, user: User,
+) -> WritingGraphRelease | None:
+    if not has_space_permission(db, user, space_id, "read"):
+        raise HTTPException(status_code=403, detail="无权读取该知识空间")
+    return db.scalar(select(WritingGraphRelease).where(
+        WritingGraphRelease.tenant_id == user.tenant_id,
+        WritingGraphRelease.space_id == space_id,
+        WritingGraphRelease.status == "published",
+        _active(WritingGraphRelease),
+    ).order_by(WritingGraphRelease.release_number.desc()).limit(1))
 
 
 def _release_scope(
@@ -1425,12 +1470,31 @@ def list_writing_spaces(user: User = Depends(get_current_user), db: Session = De
             IndexRelease.status == "published",
             _active(IndexRelease),
         ).order_by(IndexRelease.release_number.desc()))
+        graph_releases = list(db.scalars(select(WritingGraphRelease).where(
+            WritingGraphRelease.tenant_id == user.tenant_id,
+            WritingGraphRelease.space_id == space.id,
+            WritingGraphRelease.status.in_(["published", "superseded"]),
+            _active(WritingGraphRelease),
+        ).order_by(WritingGraphRelease.release_number.desc())))
         result.append({
             "id": space.id,
             "name": space.name,
             "code": space.code,
             "ready": index is not None,
             "knowledge_version": release.release_number if release else (index.release_number if index else None),
+            "writing_graph_ready": bool(graph_releases),
+            "writing_graph_releases": [
+                {
+                    "id": item.id,
+                    "release_number": item.release_number,
+                    "status": item.status,
+                    "published_at": item.published_at,
+                    "fact_count": item.fact_count,
+                    "relation_count": item.relation_count,
+                    "checksum": item.checksum,
+                }
+                for item in graph_releases
+            ],
         })
     return result
 
@@ -1522,18 +1586,31 @@ def create_project(
     if version.status != "active":
         raise HTTPException(status_code=409, detail="方案任务只能使用已激活的场景包版本")
     release = None
+    writing_graph_release = None
+    selected_space_id = payload.space_id
+    if payload.writing_graph_release_id:
+        writing_graph_release = _writing_graph_release_for_user(
+            db, payload.writing_graph_release_id, user,
+            expected_space_id=payload.space_id,
+        )
+        selected_space_id = writing_graph_release.space_id
     if payload.space_id:
         release = _release_for_space(db, payload.space_id, user)
+        writing_graph_release = writing_graph_release or _latest_writing_graph_release(db, payload.space_id, user)
+    elif selected_space_id:
+        release = _release_for_space(db, selected_space_id, user)
     elif payload.knowledge_product_release_id:
         release = _release_for_user(db, payload.knowledge_product_release_id, user)
     if payload.application_id:
         application = _tenant_row(db, Application, payload.application_id, user.tenant_id, "应用")
         if not user.is_admin and application.owner_id != user.id:
             raise HTTPException(status_code=403, detail="无权将任务绑定到该应用")
-    values = payload.model_dump(exclude={"space_id"})
+    values = payload.model_dump(exclude={"space_id", "writing_graph_release_id"})
     values["code"] = payload.code or f"writing-{uuid.uuid4().hex[:12]}"
     values["scenario_package_version_id"] = version.id
     values["knowledge_product_release_id"] = release.id if release else None
+    values["knowledge_space_id"] = selected_space_id
+    values["writing_graph_release_id"] = writing_graph_release.id if writing_graph_release else None
     row = WritingProject(tenant_id=user.tenant_id, owner_id=user.id, status="draft", **values)
     db.add(row)
     db.flush()
@@ -1681,6 +1758,268 @@ def list_project_materials(
             )
         result.append(material)
     return result
+
+
+@router.get("/projects/{project_id}/extraction-workbench")
+def get_project_extraction_workbench(
+    project_id: str,
+    document_id: str | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Project the real Zhiku extraction outputs into Miaobi's writing workflow.
+
+    This endpoint deliberately does not invent an independent Claim store. Raw
+    relation assertions are exposed as source Claim candidates; only published
+    normalized facts are presented as graph Relations.
+    """
+    project = _project(db, project_id, user)
+    writing_document = None
+    if document_id:
+        writing_document, _ = _document(db, document_id, user)
+        if writing_document.project_id != project.id:
+            raise HTTPException(status_code=404, detail="文章不属于当前项目")
+
+    material_rows = _project_material_rows(db, project.id, writing_document)
+    materials: list[dict[str, Any]] = []
+    version_ids: list[str] = []
+    version_sources: dict[str, dict[str, Any]] = {}
+    for row in material_rows:
+        source = _tenant_row(db, Document, row.document_id, user.tenant_id, "材料")
+        version = _tenant_row(db, DocumentVersion, row.version_id, user.tenant_id, "材料版本")
+        if not has_space_permission(db, user, source.space_id, "read"):
+            continue
+        version_ids.append(version.id)
+        version_sources[version.id] = {
+            "document_id": source.id,
+            "title": source.title,
+            "filename": version.filename,
+            "version": version.version_number,
+        }
+        materials.append({
+            "id": row.id,
+            "document_id": source.id,
+            "version_id": version.id,
+            "title": source.title,
+            "filename": version.filename,
+            "role": row.material_role,
+            "version": version.version_number,
+            "status": version.status,
+            "needs_confirmation": False,
+        })
+
+    chunks = list(db.scalars(
+        select(Chunk).where(
+            Chunk.tenant_id == user.tenant_id,
+            Chunk.version_id.in_(version_ids),
+            _active(Chunk),
+        ).order_by(Chunk.version_id, Chunk.ordinal).limit(200)
+    )) if version_ids else []
+    chunk_map = {row.id: row for row in chunks}
+    evidence: list[dict[str, Any]] = []
+    for row in chunks:
+        try:
+            text, _ = effective_chunk_text(db, row)
+        except ValueError:
+            continue
+        source = version_sources.get(row.version_id, {})
+        evidence.append({
+            "id": row.chunk_id,
+            "record_id": row.id,
+            "title": source.get("title") or source.get("filename") or "项目材料",
+            "text": text[:1200],
+            "page": row.page_number,
+            "path": row.structural_path,
+            "status": row.status,
+            "source_version": source.get("version"),
+            "needs_confirmation": False,
+        })
+
+    run_ids = list(db.scalars(
+        select(ExtractionRun.id).where(
+            ExtractionRun.tenant_id == user.tenant_id,
+            ExtractionRun.version_id.in_(version_ids),
+            _active(ExtractionRun),
+        )
+    )) if version_ids else []
+    entity_rows = list(db.scalars(
+        select(EntityMention).where(
+            EntityMention.tenant_id == user.tenant_id,
+            EntityMention.run_id.in_(run_ids),
+            _active(EntityMention),
+        ).order_by(EntityMention.entity_type, EntityMention.normalized_name).limit(200)
+    )) if run_ids else []
+    entities = [{
+        "id": row.mention_id,
+        "record_id": row.id,
+        "name": row.normalized_name or row.text,
+        "original_text": row.text,
+        "type": row.entity_type,
+        "confidence": row.confidence,
+        "evidence_id": chunk_map[row.chunk_id].chunk_id if row.chunk_id in chunk_map else None,
+        "status": row.status,
+        "needs_confirmation": row.confidence < 0.8,
+    } for row in entity_rows]
+
+    assertion_rows = list(db.scalars(
+        select(RelationAssertion).where(
+            RelationAssertion.tenant_id == user.tenant_id,
+            RelationAssertion.run_id.in_(run_ids),
+            _active(RelationAssertion),
+        ).order_by(RelationAssertion.created_at).limit(200)
+    )) if run_ids else []
+    claims = [{
+        "id": f"claim-{row.id}",
+        "record_id": row.id,
+        "subject": row.subject_name,
+        "predicate": row.predicate,
+        "object": row.object_name,
+        "confidence": row.confidence,
+        "evidence": row.evidence,
+        "evidence_id": chunk_map[row.chunk_id].chunk_id if row.chunk_id in chunk_map else None,
+        "status": "待核验" if row.status != "rejected" else "已驳回",
+        "needs_confirmation": row.status not in {"published", "accepted"},
+    } for row in assertion_rows]
+
+    project_fact_rows = list(db.scalars(
+        select(ProjectFact).where(
+            ProjectFact.project_id == project.id,
+            ProjectFact.active.is_(True),
+            _active(ProjectFact),
+        ).order_by(ProjectFact.fact_key, ProjectFact.version.desc()).limit(200)
+    ))
+    project_facts = [{
+        "id": row.id,
+        "key": row.fact_key,
+        "label": row.label,
+        "value": row.value,
+        "unit": row.unit,
+        "fact_type": row.fact_type,
+        "source_type": row.source_type,
+        "source_id": row.source_id,
+        "source_locator": row.source_locator or {},
+        "confidence": row.confidence,
+        "status": row.verification_status,
+        "freshness": row.freshness_status,
+        "needs_confirmation": row.verification_status not in {"verified", "accepted"},
+    } for row in project_fact_rows]
+
+    graph_fact_rows = list(db.scalars(
+        select(Fact).where(
+            Fact.tenant_id == user.tenant_id,
+            Fact.source_chunk_id.in_(list(chunk_map)),
+            _active(Fact),
+        ).order_by(Fact.created_at).limit(200)
+    )) if chunk_map else []
+    entity_ids = {
+        entity_id for row in graph_fact_rows
+        for entity_id in (row.subject_entity_id, row.object_entity_id) if entity_id
+    }
+    canonical_rows = list(db.scalars(
+        select(CanonicalEntity).where(
+            CanonicalEntity.tenant_id == user.tenant_id,
+            CanonicalEntity.id.in_(entity_ids),
+            _active(CanonicalEntity),
+        )
+    )) if entity_ids else []
+    canonical = {row.id: row for row in canonical_rows}
+    relations = [{
+        "id": row.id,
+        "subject": canonical.get(row.subject_entity_id).canonical_name if row.subject_entity_id in canonical else row.subject_entity_id,
+        "predicate": row.predicate,
+        "object": (
+            canonical.get(row.object_entity_id).canonical_name
+            if row.object_entity_id and row.object_entity_id in canonical
+            else row.object_value
+        ),
+        "confidence": row.confidence,
+        "evidence_id": chunk_map[row.source_chunk_id].chunk_id if row.source_chunk_id in chunk_map else None,
+        "status": row.status,
+        "needs_confirmation": row.status not in {"published", "accepted"},
+    } for row in graph_fact_rows]
+
+    computation_rows = list(db.scalars(
+        select(ComputationRun).where(
+            ComputationRun.project_id == project.id,
+            _active(ComputationRun),
+        ).order_by(ComputationRun.created_at.desc()).limit(100)
+    ))
+    metrics = [{
+        "id": row.id,
+        "kind": "computed",
+        "name": (row.result or {}).get("output_fact", {}).get("label") or (row.result or {}).get("operation") or "计算结果",
+        "value": (row.result or {}).get("value"),
+        "unit": (row.result or {}).get("output_fact", {}).get("unit"),
+        "inputs": row.inputs or {},
+        "dependencies": (row.result or {}).get("dependencies") or {},
+        "status": row.status,
+        "needs_confirmation": row.status != "succeeded",
+    } for row in computation_rows]
+    metrics.extend({
+        "id": row.id,
+        "kind": "atomic",
+        "name": row.label,
+        "value": row.value,
+        "unit": row.unit,
+        "fact_key": row.fact_key,
+        "status": row.verification_status,
+        "needs_confirmation": row.verification_status not in {"verified", "accepted"},
+    } for row in project_fact_rows if row.unit or row.fact_type in {"metric", "manual_input", "deterministic_computation"})
+
+    sample_profiles: list[dict[str, Any]] = []
+    document_rows = list(db.scalars(select(WritingDocument).where(
+        WritingDocument.project_id == project.id,
+        _active(WritingDocument),
+    )))
+    for row in document_rows:
+        profile = dict((row.applicability or {}).get("sample_profile") or {})
+        if profile:
+            sample_profiles.append({
+                "id": row.id,
+                "article": row.title,
+                "genre": profile.get("genre"),
+                "status": profile.get("status", "draft"),
+                "chapters": profile.get("chapters") or [],
+                "attachments": profile.get("attachments") or [],
+                "warnings": profile.get("warnings") or [],
+                "needs_confirmation": profile.get("status") != "confirmed",
+            })
+
+    step_items = {
+        "material_role": materials,
+        "sample_profile": sample_profiles,
+        "evidence": evidence,
+        "entity": entities,
+        "claim": claims,
+        "fact": project_facts,
+        "relation": relations,
+        "metric": metrics,
+    }
+    sample_material_count = sum(1 for row in materials if row["role"] == "sample_style")
+    steps = extraction_step_definitions()
+    for step in steps:
+        items = step_items[step["key"]]
+        step["items"] = items
+        step["count"] = len(items)
+        step["pending_count"] = sum(1 for item in items if item.get("needs_confirmation"))
+        if step["key"] == "sample_profile" and not sample_material_count:
+            step["status"] = "not_required"
+        elif items:
+            step["status"] = "needs_confirmation" if step["pending_count"] else "ready"
+        elif not materials:
+            step["status"] = "waiting_material"
+        else:
+            step["status"] = "waiting_result"
+
+    return {
+        "project_id": project.id,
+        "document_id": writing_document.id if writing_document else None,
+        "material_count": len(materials),
+        "evidence_count": len(evidence),
+        "pending_count": sum(step["pending_count"] for step in steps),
+        "steps": steps,
+        "limits": {"max_items_per_step": 200, "read_only_projection": True},
+    }
 
 
 @router.put("/documents/{document_id}/materials")
@@ -1882,6 +2221,22 @@ def get_project_knowledge_context(
     material_roles: dict[str, int] = {}
     for material in materials:
         material_roles[material.material_role] = material_roles.get(material.material_role, 0) + 1
+    writing_graph = None
+    if project.writing_graph_release_id:
+        graph = _writing_graph_release_for_user(
+            db, project.writing_graph_release_id, user,
+            expected_space_id=project.knowledge_space_id,
+        )
+        writing_graph = {
+            "id": graph.id,
+            "release_number": graph.release_number,
+            "checksum": graph.checksum,
+            "status": graph.status,
+            "published_at": graph.published_at,
+            "fact_count": graph.fact_count,
+            "relation_count": graph.relation_count,
+            "snapshot_locked": True,
+        }
     return {
         "product": {"id": product.id, "name": product.name, "code": product.code},
         "release": {
@@ -1901,6 +2256,7 @@ def get_project_knowledge_context(
         "task_material_count": len(materials),
         "task_material_roles": material_roles,
         "retrieval_scope": "task_materials" if materials else "knowledge_product_release",
+        "writing_graph": writing_graph,
     }
 
 
@@ -2551,6 +2907,7 @@ def start_report_generation(
             document_type="response_plan",
             scenario_package_version_id=scenario.id,
             knowledge_product_release_id=release_id,
+            writing_graph_release_id=project.writing_graph_release_id,
             status="draft",
             created_by=user.id,
         )
@@ -2568,12 +2925,16 @@ def start_report_generation(
             content_hash=content_hash(initial_content),
             scenario_package_version_id=scenario.id,
             knowledge_product_release_id=release_id,
+            writing_graph_release_id=document.writing_graph_release_id or project.writing_graph_release_id,
             status="draft",
             change_summary="创建报告草稿",
             created_by=user.id,
         )
         db.add(version)
         db.flush()
+        sync_writing_version_chunks(
+            db, project=project, document=document, version=version, legacy_bindings=[],
+        )
         document.current_version_id = version.id
         db.commit()
 
@@ -2583,6 +2944,7 @@ def start_report_generation(
         "chapter_evidence": knowledge_packet,
         "scenario_package_version_id": scenario.id,
         "knowledge_product_release_id": release_id,
+        "writing_graph_release_id": document.writing_graph_release_id or project.writing_graph_release_id,
         "facts": [
             {
                 "id": by_key[key].id,
@@ -3229,6 +3591,39 @@ def finalize_report_generation(
             **(run.toolbox_result or {}),
             "normalized_heading_refs": corrected_heading_refs,
         }
+    release_id = document.writing_graph_release_id or project.writing_graph_release_id
+    allowed_graph_ids: dict[str, set[str]] = {
+        "fact": set(), "evidence": set(), "relation": set(),
+    }
+    if release_id:
+        for item in db.scalars(select(WritingGraphReleaseItem).where(
+            WritingGraphReleaseItem.release_id == release_id,
+            WritingGraphReleaseItem.object_type.in_(sorted(allowed_graph_ids)),
+            _active(WritingGraphReleaseItem),
+        )):
+            allowed_graph_ids[item.object_type].add(str(item.object_id))
+    try:
+        validate_writing_graph_refs(sections, allowed_ids=allowed_graph_ids)
+        validate_public_reference_refs(
+            sections,
+            allowed_ids=set(db.scalars(select(PublicReference.id).where(
+                PublicReference.project_id == project.id,
+                PublicReference.validity_status == "current",
+                _active(PublicReference),
+            ))),
+        )
+    except ValueError as exc:
+        run.status = "quality_failed"
+        run.stage = "writing_graph_reference_validation"
+        run.progress = 100
+        run.error_code = "INVALID_WRITING_GRAPH_REFS"
+        run.error_message = str(exc)
+        run.quality_report = {"ok": False, "issues": [{
+            "code": "invalid_writing_graph_refs", "severity": "error", "message": str(exc),
+        }]}
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(status_code=422, detail=run.quality_report) from exc
     citations = []
     for citation_row in db.scalars(
         select(Citation).where(Citation.message_id.in_(citation_message_ids)).order_by(Citation.citation_number)
@@ -3354,12 +3749,23 @@ def finalize_report_generation(
         content_hash=content_hash(content),
         scenario_package_version_id=document.scenario_package_version_id or project.scenario_package_version_id,
         knowledge_product_release_id=document.knowledge_product_release_id or project.knowledge_product_release_id,
+        writing_graph_release_id=document.writing_graph_release_id or project.writing_graph_release_id,
         status="draft",
         change_summary="输入确认、分析计算与知识约束的一键生成",
         created_by=user.id,
     )
     db.add(version)
     db.flush()
+    sync_writing_version_chunks(
+        db,
+        project=project,
+        document=document,
+        version=version,
+        legacy_bindings=db.scalars(select(WritingBlockBinding).where(
+            WritingBlockBinding.document_id == document.id,
+            _active(WritingBlockBinding),
+        )),
+    )
     document.current_version_id = version.id
     document.status = "draft"
     run.status = "completed"
@@ -3432,11 +3838,19 @@ def _rebase_project_to_release(
     release: KnowledgeProductRelease,
     user: User,
     reason: str,
+    space_id: str | None = None,
+    writing_graph_release: WritingGraphRelease | None = None,
 ) -> dict[str, Any]:
     if row.status == "published":
         raise HTTPException(status_code=409, detail="已发布方案任务不能变更知识基线，请创建后续任务版本")
     old_release_id = row.knowledge_product_release_id
-    if old_release_id == release.id:
+    previous_graph_release_id = row.writing_graph_release_id
+    selected_space_id = space_id or row.knowledge_space_id
+    next_graph_release_id = (
+        writing_graph_release.id if writing_graph_release is not None
+        else row.writing_graph_release_id
+    )
+    if old_release_id == release.id and row.knowledge_space_id == selected_space_id and previous_graph_release_id == next_graph_release_id:
         return {**serialize_row(row), "unchanged": True}
     inherited_documents = list(
         db.scalars(
@@ -3448,8 +3862,12 @@ def _rebase_project_to_release(
         )
     )
     row.knowledge_product_release_id = release.id
+    row.knowledge_space_id = selected_space_id
+    row.writing_graph_release_id = next_graph_release_id
     for document in inherited_documents:
         document.knowledge_product_release_id = release.id
+        if document.writing_graph_release_id == previous_graph_release_id:
+            document.writing_graph_release_id = next_graph_release_id
     stale_bindings = list(
         db.scalars(
             select(WritingBlockBinding).where(
@@ -3476,6 +3894,9 @@ def _rebase_project_to_release(
         {
             "previous_release_id": old_release_id,
             "knowledge_product_release_id": release.id,
+            "knowledge_space_id": selected_space_id,
+            "previous_writing_graph_release_id": previous_graph_release_id,
+            "writing_graph_release_id": next_graph_release_id,
             "stale_bindings": len(stale_bindings),
             "inherited_documents": len(inherited_documents),
             "reason": reason,
@@ -3500,7 +3921,16 @@ def rebase_project_knowledge_release(
     """Explicitly rebase a non-published writing project onto an immutable knowledge release."""
     row = _project(db, project_id, user, "owner")
     release = _release_for_user(db, payload.knowledge_product_release_id, user)
-    return _rebase_project_to_release(db, row=row, release=release, user=user, reason=payload.reason)
+    release_items = list(db.scalars(select(KnowledgeProductReleaseItem).where(
+        KnowledgeProductReleaseItem.product_release_id == release.id,
+        _active(KnowledgeProductReleaseItem),
+    )))
+    space_id = release_items[0].space_id if len(release_items) == 1 else None
+    graph_release = _latest_writing_graph_release(db, space_id, user) if space_id else None
+    return _rebase_project_to_release(
+        db, row=row, release=release, user=user, reason=payload.reason,
+        space_id=space_id, writing_graph_release=graph_release,
+    )
 
 
 @router.post("/projects/{project_id}/knowledge-space")
@@ -3513,7 +3943,11 @@ def attach_project_knowledge_space(
     """Attach a business-facing knowledge space to a blank writing project."""
     row = _project(db, project_id, user, "owner")
     release = _release_for_space(db, payload.space_id, user)
-    return _rebase_project_to_release(db, row=row, release=release, user=user, reason=payload.reason)
+    graph_release = _latest_writing_graph_release(db, payload.space_id, user)
+    return _rebase_project_to_release(
+        db, row=row, release=release, user=user, reason=payload.reason,
+        space_id=payload.space_id, writing_graph_release=graph_release,
+    )
 
 
 @router.post("/projects/{project_id}/knowledge-release/refresh")
@@ -3547,6 +3981,8 @@ def refresh_project_knowledge_release(
         release=release,
         user=user,
         reason="妙笔上传新资料后刷新知识版本",
+        space_id=item.space_id,
+        writing_graph_release=_latest_writing_graph_release(db, item.space_id, user),
     )
 
 
@@ -3559,6 +3995,71 @@ def delete_project(project_id: str, user: User = Depends(get_current_user), db: 
     audit(db, user.tenant_id, user.id, "writing.project.delete", "writing_project", row.id)
     db.commit()
     return {"deleted": True}
+
+
+@router.get("/projects/{project_id}/public-references")
+def list_public_references(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _project(db, project_id, user)
+    return [
+        serialize_row(row)
+        for row in db.scalars(select(PublicReference).where(
+            PublicReference.project_id == project_id,
+            _active(PublicReference),
+        ).order_by(PublicReference.created_at.desc()))
+    ]
+
+
+@router.post("/projects/{project_id}/public-references")
+def create_public_reference(
+    project_id: str,
+    payload: PublicReferenceCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Register reviewed public material; this endpoint never fetches a URL."""
+    project = _project(db, project_id, user, "editor")
+    checksum = content_hash({
+        "title": payload.title.strip(),
+        "publisher": payload.publisher.strip(),
+        "url": payload.url,
+        "publication_date": payload.publication_date,
+        "excerpt": payload.excerpt.strip(),
+        "applicable_scope": payload.applicable_scope,
+    })
+    existing = db.scalar(select(PublicReference).where(
+        PublicReference.project_id == project.id,
+        PublicReference.url == payload.url,
+        PublicReference.checksum == checksum,
+        _active(PublicReference),
+    ))
+    if existing is not None:
+        return {**serialize_row(existing), "unchanged": True}
+    row = PublicReference(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        title=payload.title.strip(),
+        publisher=payload.publisher.strip(),
+        url=payload.url,
+        publication_date=payload.publication_date,
+        retrieved_at=datetime.now(timezone.utc),
+        excerpt=payload.excerpt.strip(),
+        applicable_scope=payload.applicable_scope,
+        validity_status=payload.validity_status,
+        usage_sections=list(dict.fromkeys(payload.usage_sections)),
+        checksum=checksum,
+        created_by=user.id,
+    )
+    db.add(row)
+    audit(db, user.tenant_id, user.id, "writing.public_reference.create", "writing_public_reference", row.id, {
+        "project_id": project.id, "publisher": row.publisher, "validity_status": row.validity_status,
+    })
+    _commit(db, "该公开材料已经登记")
+    db.refresh(row)
+    return serialize_row(row)
 
 
 @router.get("/projects/{project_id}/members")
@@ -3847,6 +4348,20 @@ def preview_input_changes(
         )
     ]
     current_version = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+    dependency_reasons: dict[str, set[str]] = {}
+    if current_version is not None:
+        for chunk, dependency in version_chunk_dependencies(
+            db, document_version_id=current_version.id,
+        ):
+            reason = None
+            if dependency.binding_type == "project_fact" and dependency.binding_id in changed_fact_ids:
+                reason = "直接引用变更事实"
+            elif dependency.binding_type == "computation_run" and dependency.binding_id in affected_run_ids:
+                reason = "依赖重新计算结果"
+            if reason:
+                dependency_reasons.setdefault(chunk.chunk_id, set()).add(reason)
+                if chunk.chunk_id not in affected_blocks:
+                    affected_blocks.append(chunk.chunk_id)
     block_sections: dict[str, str] = {}
     current_section = "报告正文"
     for node in (current_version.content if current_version else []) or []:
@@ -3865,7 +4380,11 @@ def preview_input_changes(
         node = find_plate_node((current_version.content if current_version else []) or [], block_id)
         section = block_sections.get(block_id, "报告正文")
         if node is None:
-            content_proposals.append({"block_id": block_id, "section": section, "selectable": False, "reason": "正文块已移除，请人工核对"})
+            content_proposals.append({
+                "block_id": block_id, "section": section, "selectable": False,
+                "reason": "正文块已移除，请人工核对", "impact_type": "definite",
+                "dependency_reasons": sorted(dependency_reasons.get(block_id) or []),
+            })
             continue
         if str(node.get("type") or "") == "computed_metric":
             old_run_id = str(node.get("computation_run_id") or binding.computation_run_id or "")
@@ -3880,6 +4399,8 @@ def preview_input_changes(
                     "block_id": block_id, "section": section, "kind": "computed_metric", "selectable": True,
                     "old_text": old_text, "new_text": f"经核验与测算，{label}为{calculation['new_value']}{unit}。",
                     "reason": "确定性公式已重新预览；选择是否更新正文中的测算结果",
+                    "impact_type": "definite",
+                    "dependency_reasons": sorted(dependency_reasons.get(block_id) or []),
                 })
                 continue
         metadata = binding.metadata_json or {}
@@ -3903,7 +4424,14 @@ def preview_input_changes(
             for calculation in metric_changes
         ]
         proposal = propose_bound_text_change(node, changes)
-        content_proposals.append({"block_id": block_id, "section": section, "kind": str(node.get("type") or ""), **proposal})
+        content_proposals.append({
+            "block_id": block_id,
+            "section": section,
+            "kind": str(node.get("type") or ""),
+            "dependency_reasons": sorted(dependency_reasons.get(block_id) or []),
+            "impact_type": "definite",
+            **proposal,
+        })
     unchanged = []
     affected_keys = {str(item.get("result_key") or "") for item in affected_calculations}
     for run in all_latest:
@@ -3924,10 +4452,16 @@ def preview_input_changes(
         "input_changes": requested,
         "calculations": affected_calculations,
         "report_blocks": [
-            {"block_id": block_id, "section": block_sections.get(block_id, "报告正文")}
+            {
+                "block_id": block_id,
+                "section": block_sections.get(block_id, "报告正文"),
+                "impact_type": "definite",
+                "dependency_reasons": sorted(dependency_reasons.get(block_id) or []),
+            }
             for block_id in affected_blocks
         ],
         "content_proposals": content_proposals,
+        "suspected_impacts": [],
         "unaffected_results": unchanged,
         "automatic_overwrite": False,
     }
@@ -4189,12 +4723,23 @@ def apply_input_changes(
         content_hash=content_hash(content),
         scenario_package_version_id=document.scenario_package_version_id or project.scenario_package_version_id,
         knowledge_product_release_id=document.knowledge_product_release_id or project.knowledge_product_release_id,
+        writing_graph_release_id=document.writing_graph_release_id or project.writing_graph_release_id,
         status="draft",
         change_summary="确认输入变化并逐项更新正文",
         created_by=user.id,
     )
     db.add(version)
     db.flush()
+    sync_writing_version_chunks(
+        db,
+        project=project,
+        document=document,
+        version=version,
+        legacy_bindings=db.scalars(select(WritingBlockBinding).where(
+            WritingBlockBinding.document_id == document.id,
+            _active(WritingBlockBinding),
+        )),
+    )
     document.current_version_id = version.id
     document.status = "draft"
     preview.status = "applied"
@@ -4641,12 +5186,17 @@ def create_document(
     project = _project(db, payload.project_id, user, "editor")
     scenario_id = payload.scenario_package_version_id or project.scenario_package_version_id
     release_id = payload.knowledge_product_release_id or project.knowledge_product_release_id
+    writing_graph_release_id = payload.writing_graph_release_id or project.writing_graph_release_id
     if payload.scenario_package_version_id:
         scenario = _tenant_row(db, ScenarioPackageVersion, payload.scenario_package_version_id, user.tenant_id, "写作模板版本")
         if scenario.status != "active":
             raise HTTPException(status_code=409, detail="只能使用已启用的写作模板")
     if payload.knowledge_product_release_id:
         _release_for_user(db, payload.knowledge_product_release_id, user)
+    if writing_graph_release_id:
+        graph_release = _writing_graph_release_for_user(db, writing_graph_release_id, user)
+        if project.knowledge_space_id and graph_release.space_id != project.knowledge_space_id:
+            raise HTTPException(status_code=409, detail="文章写作图谱与项目知识空间不一致")
     row = WritingDocument(
         tenant_id=user.tenant_id,
         project_id=project.id,
@@ -4658,6 +5208,7 @@ def create_document(
         writing_requirements=payload.writing_requirements,
         scenario_package_version_id=scenario_id,
         knowledge_product_release_id=release_id,
+        writing_graph_release_id=writing_graph_release_id,
         status="draft",
         created_by=user.id,
     )
@@ -4671,12 +5222,16 @@ def create_document(
         content_hash=content_hash(payload.content),
         scenario_package_version_id=scenario_id,
         knowledge_product_release_id=release_id,
+        writing_graph_release_id=writing_graph_release_id,
         status="draft",
         change_summary="创建文稿",
         created_by=user.id,
     )
     db.add(version)
     db.flush()
+    sync_writing_version_chunks(
+        db, project=project, document=row, version=version, legacy_bindings=[],
+    )
     row.current_version_id = version.id
     audit(db, user.tenant_id, user.id, "writing.document.create", "writing_document", row.id)
     _commit(db, "同一方案任务中已存在同名文稿")
@@ -4948,10 +5503,14 @@ def update_document(
     row, _ = _document(db, document_id, user, "editor")
     if row.status == "published" and payload.status not in {None, "archived"}:
         raise HTTPException(status_code=409, detail="已发布文稿不可直接恢复为草稿，请创建新版本")
+    if payload.writing_graph_release_id:
+        graph_release = _writing_graph_release_for_user(db, payload.writing_graph_release_id, user)
+        if row.writing_graph_release_id and row.writing_graph_release_id != graph_release.id:
+            raise HTTPException(status_code=409, detail="已建立正文版本的文章不能静默切换写作图谱")
     apply_patch(
         row,
         payload.model_dump(exclude_none=True),
-        {"title", "document_type", "purpose", "audience", "applicability", "writing_requirements", "status"},
+        {"title", "document_type", "purpose", "audience", "applicability", "writing_requirements", "writing_graph_release_id", "status"},
     )
     audit(db, user.tenant_id, user.id, "writing.document.update", "writing_document", row.id)
     _commit(db, "同一方案任务中已存在同名文稿")
@@ -5036,6 +5595,7 @@ def create_document_version(
         and current.content_hash == next_hash
         and current.scenario_package_version_id == (document.scenario_package_version_id or project.scenario_package_version_id)
         and current.knowledge_product_release_id == (document.knowledge_product_release_id or project.knowledge_product_release_id)
+        and current.writing_graph_release_id == (document.writing_graph_release_id or project.writing_graph_release_id)
         and not payload.publish
     ):
         return {**serialize_row(current), "issues": issues, "unchanged": True}
@@ -5048,6 +5608,7 @@ def create_document_version(
         content_hash=next_hash,
         scenario_package_version_id=document.scenario_package_version_id or project.scenario_package_version_id,
         knowledge_product_release_id=document.knowledge_product_release_id or project.knowledge_product_release_id,
+        writing_graph_release_id=document.writing_graph_release_id or project.writing_graph_release_id,
         status="published" if payload.publish else "draft",
         change_summary=payload.change_summary,
         created_by=user.id,
@@ -5055,6 +5616,16 @@ def create_document_version(
     )
     db.add(row)
     db.flush()
+    sync_writing_version_chunks(
+        db,
+        project=project,
+        document=document,
+        version=row,
+        legacy_bindings=db.scalars(select(WritingBlockBinding).where(
+            WritingBlockBinding.document_id == document.id,
+            _active(WritingBlockBinding),
+        )),
+    )
     document.current_version_id = row.id
     document.status = "published" if payload.publish else "draft"
     audit(db, user.tenant_id, user.id, "writing.document.version.create", "writing_document_version", row.id, {"version": number, "published": payload.publish, "content_hash": row.content_hash})
@@ -5066,6 +5637,39 @@ def create_document_version(
 def list_bindings(document_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     _document(db, document_id, user)
     return [serialize_row(row) for row in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document_id, _active(WritingBlockBinding)).order_by(WritingBlockBinding.block_id))]
+
+
+@router.get("/documents/{document_id}/chunks")
+def list_document_chunks(
+    document_id: str,
+    version_id: str | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the immutable block/dependency projection used by the editor."""
+    document, _ = _document(db, document_id, user)
+    selected_version_id = version_id or document.current_version_id
+    if not selected_version_id:
+        return []
+    version = _tenant_row(db, WritingDocumentVersion, selected_version_id, user.tenant_id, "文稿版本")
+    if version.document_id != document.id:
+        raise HTTPException(status_code=404, detail="文稿版本不存在")
+    chunks = list(db.scalars(select(WritingChunk).where(
+        WritingChunk.document_version_id == version.id,
+        _active(WritingChunk),
+    ).order_by(WritingChunk.created_at, WritingChunk.chunk_id)))
+    if not chunks:
+        return []
+    dependencies: dict[str, list[dict[str, Any]]] = {row.id: [] for row in chunks}
+    for dependency in db.scalars(select(WritingChunkDependency).where(
+        WritingChunkDependency.writing_chunk_id.in_(list(dependencies)),
+        _active(WritingChunkDependency),
+    ).order_by(WritingChunkDependency.binding_type, WritingChunkDependency.binding_id)):
+        dependencies[dependency.writing_chunk_id].append(serialize_row(dependency))
+    return [
+        {**serialize_row(row), "dependencies": dependencies.get(row.id, [])}
+        for row in chunks
+    ]
 
 
 @router.post("/documents/{document_id}/bindings")
@@ -5090,6 +5694,26 @@ def upsert_binding(
             linked = _tenant_row(db, ComputationRun, str(run_id), user.tenant_id, "关联计算")
             if linked.project_id != project.id:
                 raise HTTPException(status_code=403, detail="正文依据不能关联其他项目的计算")
+        graph_release_id = document.writing_graph_release_id or project.writing_graph_release_id
+        graph_fields = {
+            "writing_fact_ids": "fact",
+            "writing_evidence_ids": "evidence",
+            "writing_relation_ids": "relation",
+        }
+        for field, object_type in graph_fields.items():
+            requested_ids = {str(item) for item in metadata.get(field) or []}
+            if not requested_ids:
+                continue
+            if not graph_release_id:
+                raise HTTPException(status_code=409, detail="本文尚未绑定写作图谱版本")
+            existing = set(db.scalars(select(WritingGraphReleaseItem.object_id).where(
+                WritingGraphReleaseItem.release_id == graph_release_id,
+                WritingGraphReleaseItem.object_type == object_type,
+                WritingGraphReleaseItem.object_id.in_(requested_ids),
+                _active(WritingGraphReleaseItem),
+            )))
+            if existing != requested_ids:
+                raise HTTPException(status_code=422, detail=f"{field} 包含不属于本文写作图谱版本的对象")
     effective_release_id = document.knowledge_product_release_id or project.knowledge_product_release_id
     if payload.knowledge_product_release_id and payload.knowledge_product_release_id != effective_release_id:
         raise HTTPException(status_code=409, detail="引用必须属于项目选择的知识空间")
@@ -5142,6 +5766,19 @@ def upsert_binding(
     else:
         row = WritingBlockBinding(tenant_id=user.tenant_id, project_id=project.id, document_id=document.id, **values)
         db.add(row)
+    db.flush()
+    current_version = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+    if current_version is not None:
+        sync_writing_version_chunks(
+            db,
+            project=project,
+            document=document,
+            version=current_version,
+            legacy_bindings=db.scalars(select(WritingBlockBinding).where(
+                WritingBlockBinding.document_id == document.id,
+                _active(WritingBlockBinding),
+            )),
+        )
     audit(db, user.tenant_id, user.id, "writing.document.binding.upsert", "writing_document", document.id, {"block_id": payload.block_id, "block_type": payload.block_type, "source_type": payload.source_type})
     _commit(db)
     return serialize_row(row)

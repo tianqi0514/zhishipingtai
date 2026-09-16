@@ -4,7 +4,8 @@ import pytest
 
 from packages.platform.writing_flow import (
     build_generation_prompt, normalize_agent_heading_refs, renumber_chapter_citations,
-    report_quality_review, validate_and_parse_agent_report,
+    report_quality_review, validate_and_parse_agent_report, validate_public_reference_refs,
+    validate_writing_graph_refs,
 )
 
 
@@ -20,6 +21,8 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     example = json.loads(prompt.split("输出结构示例：", 1)[1])
     assert example["sections"][0]["content_nodes"][0]["input_refs"] == []
     assert example["sections"][0]["content_nodes"][0]["metric_refs"] == []
+    assert example["sections"][0]["content_nodes"][0]["writing_fact_refs"] == []
+    assert "只能填写这些工具从本文固定 WritingGraphRelease 返回的真实对象 ID" in prompt
 
 
 def test_generation_keeps_optional_citations_optional():
@@ -120,3 +123,38 @@ def test_confirmed_subheading_is_not_a_business_fact_binding():
             [{**sections[0], "content_nodes": [{"type": "h3", "text": "海域地震事件应急"}]}],
             plan, input_keys=set(), metric_keys=set(),
         )
+
+
+def test_writing_graph_refs_are_strict_and_release_scoped():
+    plan = [{"key": "resources", "title": "资源保障"}]
+    output = json.dumps({
+        "sections": [{
+            "section_key": "resources",
+            "title": "资源保障",
+            "content_nodes": [{
+                "type": "p",
+                "text": "现有力量可以支撑首轮处置。",
+                "writing_fact_refs": ["fact-1"],
+                "writing_evidence_refs": ["evidence-1"],
+                "writing_relation_refs": ["relation-1"],
+                "public_reference_refs": ["public-1"],
+            }],
+            "citation_refs": [],
+        }],
+        "warnings": [],
+    }, ensure_ascii=False)
+    sections = validate_and_parse_agent_report(output, plan)
+    validate_writing_graph_refs(sections, allowed_ids={
+        "fact": {"fact-1"}, "evidence": {"evidence-1"}, "relation": {"relation-1"},
+    })
+    validate_public_reference_refs(sections, allowed_ids={"public-1"})
+    with pytest.raises(ValueError, match="公开材料"):
+        validate_public_reference_refs(sections, allowed_ids=set())
+    with pytest.raises(ValueError, match="不属于本文写作图谱版本"):
+        validate_writing_graph_refs(sections, allowed_ids={
+            "fact": set(), "evidence": {"evidence-1"}, "relation": {"relation-1"},
+        })
+    invented_field = json.loads(output)
+    invented_field["sections"][0]["content_nodes"][0]["physical_table"] = "writing_facts"
+    with pytest.raises(ValueError, match="结构不受支持"):
+        validate_and_parse_agent_report(json.dumps(invented_field, ensure_ascii=False), plan)
