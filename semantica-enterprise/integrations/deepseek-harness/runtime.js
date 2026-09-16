@@ -64,7 +64,8 @@ async function modelConfig(sessionId) {
 function safeModelFingerprint(model) {
   return JSON.stringify([
     model.provider, model.model_name, model.base_url, model.max_tokens,
-    model.max_retries, model.temperature, model.session_kind, modelContextWindow(model),
+    model.max_retries, model.temperature, model.session_kind, model.thinking_format,
+    model.enable_thinking, modelContextWindow(model),
   ])
 }
 
@@ -96,6 +97,8 @@ async function harnessFor(sessionId) {
     DSH_MODEL_TEMPERATURE: String(model.temperature ?? 0.2),
     DSH_MODEL_CONTEXT_WINDOW: String(modelContextWindow(model)),
     DSH_SESSION_KIND: String(model.session_kind || 'chat'),
+    DSH_MODEL_THINKING_FORMAT: String(model.thinking_format || 'openai'),
+    DSH_MODEL_ENABLE_THINKING: String(model.enable_thinking !== false),
     DSH_TELEMETRY_DISABLED: '1',
   }
   const harness = new DeepSeekHarness({

@@ -463,6 +463,14 @@ def get_agent_model(
         "provider": model.provider,
         "model_name": model.model_name,
         "session_kind": (conversation.settings or {}).get("kind") or "chat",
+        "thinking_format": (
+            "qwen-chat-template"
+            if "enable_thinking" in dict(parameters.get("chat_template_kwargs") or {})
+            else "openai"
+        ),
+        "enable_thinking": bool(
+            dict(parameters.get("chat_template_kwargs") or {}).get("enable_thinking", True)
+        ),
         "base_url": model.base_url,
         "api_key": api_key,
         "timeout": int(config.get("timeout", 120)),
