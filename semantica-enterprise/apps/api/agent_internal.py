@@ -402,10 +402,11 @@ def _writing_model_capacity(
     section_output_cap = max(
         512,
         # A 1,600-token cap truncates a valid Chinese chapter once the strict
-        # JSON node/binding fields are included.  2,600 leaves a measured
-        # 200-token reserve for a revision draft while still allowing the
-        # longest accepted evidence-rich chapter to close its JSON.
-        int(config.get("writing_section_max_tokens", 2600)),
+        # JSON node/binding fields are included.  The tested private 16K model
+        # can return the accepted 1,200-character chapter well below 2,400
+        # tokens, while that cap still leaves provider-side tokenizer headroom
+        # when a failed compaction falls back to the original evidence surface.
+        int(config.get("writing_section_max_tokens", 2400)),
     )
     max_tokens = min(max_tokens, section_output_cap)
     context_window = int(
@@ -478,7 +479,11 @@ def get_agent_model(
         # because input + requested output exceeds the real model window.
         max_tokens, parameters = _writing_model_capacity(config, max_tokens)
         context_window = int(parameters.get("context_window") or 0)
-        configured_compaction = int(config.get("writing_compaction_max_tokens", 3072))
+        # A 3,072-token checkpoint was still truncated by the private model on
+        # evidence-rich revision turns.  Give the upstream checkpoint format
+        # its full bounded quarter-window budget; this is independent from the
+        # final chapter output cap above.
+        configured_compaction = int(config.get("writing_compaction_max_tokens", 4096))
         context_cap = max(1024, context_window // 4) if context_window else 4096
         compaction_max_tokens = min(4096, context_cap, max(1024, configured_compaction))
     return {
