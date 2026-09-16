@@ -110,6 +110,13 @@ def test_writing_model_capacity_preserves_provider_parameters_without_context() 
     assert parameters == {"enable_thinking": False}
 
 
+def test_writing_compaction_budget_is_independent_from_chapter_output_source() -> None:
+    source = Path("apps/api/agent_internal.py").read_text(encoding="utf-8")
+    assert 'config.get("writing_compaction_max_tokens", 3072)' in source
+    assert '"compaction_max_tokens": compaction_max_tokens' in source
+    assert "context_window // 4" in source
+
+
 def test_public_reference_is_project_scoped_versioned_metadata_not_a_fact() -> None:
     with writing_client() as (client, _db, release):
         project = _create_project(client, release.id)

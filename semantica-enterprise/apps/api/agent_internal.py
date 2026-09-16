@@ -460,6 +460,7 @@ def get_agent_model(
     config = model.config or {}
     parameters = dict(config.get("parameters") or {})
     max_tokens = int(config.get("max_tokens", 4096))
+    compaction_max_tokens = 2048
     if (conversation.settings or {}).get("kind") == "writing_generation":
         article = db.get(WritingDocument, (conversation.settings or {}).get("writing_document_id"))
         profile = dict((article.applicability or {}).get("sample_profile") or {}) if article else {}
@@ -476,6 +477,10 @@ def get_agent_model(
         # formally valid writing task from failing before its first tool call
         # because input + requested output exceeds the real model window.
         max_tokens, parameters = _writing_model_capacity(config, max_tokens)
+        context_window = int(parameters.get("context_window") or 0)
+        configured_compaction = int(config.get("writing_compaction_max_tokens", 3072))
+        context_cap = max(1024, context_window // 4) if context_window else 4096
+        compaction_max_tokens = min(4096, context_cap, max(1024, configured_compaction))
     return {
         "provider": model.provider,
         "model_name": model.model_name,
@@ -496,6 +501,7 @@ def get_agent_model(
             model.model_name, float(config.get("temperature", 0.2))
         ),
         "max_tokens": max_tokens,
+        "compaction_max_tokens": compaction_max_tokens,
         "parameters": parameters,
     }
 

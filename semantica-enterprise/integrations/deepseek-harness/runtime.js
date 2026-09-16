@@ -65,7 +65,7 @@ function safeModelFingerprint(model) {
   return JSON.stringify([
     model.provider, model.model_name, model.base_url, model.max_tokens,
     model.max_retries, model.temperature, model.session_kind, model.thinking_format,
-    model.enable_thinking, modelContextWindow(model),
+    model.enable_thinking, modelContextWindow(model), compactionMaxTokens(model),
   ])
 }
 
@@ -80,14 +80,12 @@ function modelContextWindow(model) {
 }
 
 function compactionMaxTokens(model) {
-  const configured = Number(model?.max_tokens || 4096)
+  const configured = Number(model?.compaction_max_tokens || 2048)
   if (!Number.isInteger(configured) || configured <= 0) return 2048
-  // A formal-writing turn carries several typed tool results.  The upstream
-  // 2K default can truncate the checkpoint itself, after which Harness must
-  // send the uncompacted surface to the provider.  Give the checkpoint the
-  // same bounded output budget as the writing request without allowing an
-  // unexpectedly large general-chat model limit to inflate compaction.
-  return Math.min(3072, Math.max(2048, configured))
+  // The checkpoint budget is intentionally independent from the final
+  // chapter budget: a detailed evidence checkpoint can need more tokens than
+  // the final prose, while both stay bounded by the platform model policy.
+  return configured
 }
 
 async function harnessFor(sessionId) {
