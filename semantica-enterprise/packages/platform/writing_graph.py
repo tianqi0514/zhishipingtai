@@ -35,8 +35,8 @@ from .models import (
 )
 
 
-WRITING_GRAPH_STRATEGY_VERSION = "writing-graph-v2"
-WRITING_GRAPH_SCHEMA_VERSION = "joint-v2"
+WRITING_GRAPH_STRATEGY_VERSION = "writing-graph-v3"
+WRITING_GRAPH_SCHEMA_VERSION = "joint-v3"
 WRITING_GRAPH_STATUSES = {
     "candidate", "verified", "rejected", "conflicted", "superseded", "stale",
 }

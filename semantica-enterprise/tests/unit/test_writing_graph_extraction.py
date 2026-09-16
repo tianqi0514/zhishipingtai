@@ -122,6 +122,9 @@ def test_prompt_describes_single_joint_request_and_candidate_keys_are_stable() -
     )
     assert "一次联合识别" in prompt
     assert "evidence-0001" in prompt
+    assert '"mention_text"' in prompt
+    assert '"canonical_name"' in prompt
+    assert "字段名必须逐字一致" in prompt
     assert candidate_key("a", 1, {"x": True}) == candidate_key("a", 1, {"x": True})
 
 
