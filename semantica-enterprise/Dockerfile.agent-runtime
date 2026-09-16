@@ -23,7 +23,7 @@ RUN test "$(cat packages/integration/chuanshen-knowledge/HARNESS_COMMIT)" = "cd5
 RUN node packages/integration/chuanshen-knowledge/patch-sdk-server.mjs \
     packages/sdk/server/src/server.ts
 RUN --mount=type=cache,id=chuanshen-dsh-filtered-pnpm,target=/root/.local/share/pnpm/store \
-    pnpm install --filter chuanshen-knowledge-harness... --filter @deepseek-ai/dsh-root --no-frozen-lockfile --ignore-scripts \
+    pnpm install --no-frozen-lockfile --ignore-scripts \
     && pnpm rebuild esbuild koffi node-pty \
     && pnpm --filter @deepseek-ai/dsh-subprocess-local run postinstall
 # A production server builds from a clean pinned checkout; package lib/
