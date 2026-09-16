@@ -200,11 +200,34 @@ def validate_and_parse_agent_report(
             if node_type not in PUBLIC_SECTION_TYPES:
                 raise ValueError(f"章节“{title}”包含不允许的正文类型：{node_type}")
             if node_type == "table":
+                if "text" in node:
+                    raise ValueError(f"章节“{title}”的表格不得包含 text")
                 items = node.get("items")
                 if not isinstance(items, list) or not items:
                     raise ValueError(f"章节“{title}”的表格没有数据")
                 clean_nodes.append({"type": "table", "items": items, **dependencies})
                 continue
+            if node_type in {"ul", "ol"}:
+                if "text" in node:
+                    raise ValueError(f"章节“{title}”的列表不得包含 text")
+                items = node.get("items")
+                if (
+                    not isinstance(items, list)
+                    or not items
+                    or len(items) > 80
+                    or any(not isinstance(item, str) or not item.strip() or len(item) > 4000 for item in items)
+                ):
+                    raise ValueError(f"章节“{title}”的列表必须包含有效的文本项")
+                clean_items = [item.strip() for item in items]
+                for item in clean_items:
+                    if any(re.search(pattern, item, re.IGNORECASE) for pattern in WORK_NOTE_PATTERNS):
+                        raise ValueError(f"章节“{title}”包含 Agent 工作过程，已阻止写入正文")
+                    if any(phrase.casefold() in item.casefold() for phrase in PLATFORM_PROCESS_PHRASES):
+                        raise ValueError(f"章节“{title}”包含平台执行说明，已阻止写入正文")
+                clean_nodes.append({"type": node_type, "items": clean_items, **dependencies})
+                continue
+            if "items" in node:
+                raise ValueError(f"章节“{title}”的正文段落不得包含 items")
             text = str(node.get("text") or "").strip()
             if not text:
                 raise ValueError(f"章节“{title}”包含空正文")
@@ -479,6 +502,7 @@ def build_generation_prompt(
         "JSON 字段名是机器协议，必须逐字使用下方英文名称，严禁翻译、改名、重复或新增字段。"
         "content_nodes 中每个对象只允许 type、text、items、input_refs、metric_refs、writing_fact_refs、"
         "writing_evidence_refs、writing_relation_refs、public_reference_refs；段落不得出现 items，表格不得出现 text。"
+        "ul 和 ol 必须使用 items 字符串数组逐项返回，不得填写 text；p、blockquote 和 h3 必须使用 text，不得填写 items。"
         "type 只允许 p、ul、ol、blockquote、table、h3；普通段落必须逐字填写 p，禁止使用 paragraph、text 或 prose。"
         "即使某类依赖为空，也要使用对应的英文 key 返回空数组，不能把多个字段合并成‘写作工具’等自定义字段。"
         "请为下列报告生成一次且仅一次的全部章节。只输出一个 JSON 对象，不要 Markdown 代码围栏之外的文字。"
@@ -741,7 +765,7 @@ def assemble_report_content(
             run_ids = {metrics_by_key[k]["id"] for k in metric_refs}
             for k in metric_refs:
                 fact_ids.update(metrics_by_key[k].get("input_fact_ids") or [])
-            bindings.append({"block_id": node_id, "block_type": raw["type"], "source_type": "model_extraction",
+            base_binding = {"block_id": node_id, "block_type": raw["type"], "source_type": "model_extraction",
                 "source_id": run_id, "evidence_ids": sorted(fact_ids), "content_hash": "",
                 "verification_status": "unverified", "freshness_status": "current",
                 "metadata": {"section_key": key, "section_title": planned_section["title"],
@@ -752,7 +776,83 @@ def assemble_report_content(
                              "writing_relation_ids": sorted(writing_relation_refs),
                              "public_reference_ids": sorted(public_reference_refs),
                              "knowledge_refs": sorted(knowledge_refs),
-                             "knowledge_evidence": [semantic_refs[k] for k in sorted(knowledge_refs)]}})
+                             "knowledge_evidence": [semantic_refs[k] for k in sorted(knowledge_refs)]}}
+
+            def append_text_node(
+                source_text: str,
+                *,
+                target_node_id: str,
+                target_type: str,
+                binding: dict[str, Any],
+                list_style_type: str | None = None,
+            ) -> None:
+                text = source_text
+                for ref in knowledge_refs:
+                    text = text.replace(f"[{ref}]", f"[{semantic_numbers[ref]}]")
+                children: list[dict[str, Any]] = []
+                cursor = 0
+                for match in re.finditer(r"\[(\d{1,3})\]", text):
+                    number = int(match.group(1))
+                    citation = citations_by_number.get(number)
+                    if citation is None:
+                        raise ValueError("正文包含不存在的文档引用")
+                    if match.start() > cursor:
+                        children.append({"text": text[cursor:match.start()]})
+                    snapshot = dict(citation.get("snapshot") or {})
+                    citation_id = f"citation-{target_node_id}-{number}-{match.start()}"
+                    reference = {
+                        "id": citation_id,
+                        "type": "knowledge_citation",
+                        "citation_label": f"[{number}]",
+                        "source_title": snapshot.get("title"),
+                        "chunk_id": citation.get("chunk_id"),
+                        "query_run_id": citation.get("query_run_id"),
+                        "source_id": snapshot.get("document_id"),
+                        "source_version": snapshot.get("version_number"),
+                        "source_locator": {
+                            "page_number": snapshot.get("page_number"),
+                            "structural_path": snapshot.get("structural_path"),
+                        },
+                        "freshness_status": "current",
+                        "children": [{"text": ""}],
+                    }
+                    children.append(reference)
+                    bindings.append(
+                        {
+                            "block_id": citation_id,
+                            "block_type": "knowledge_citation",
+                            "source_type": "policy_document",
+                            "source_id": snapshot.get("document_id"),
+                            "source_version": snapshot.get("version_number"),
+                            "chunk_id": citation.get("chunk_id"),
+                            "retrieval_query_run_id": citation.get("query_run_id"),
+                            "evidence_ids": [],
+                            "content_hash": content_hash(reference),
+                            "verification_status": "verified",
+                            "freshness_status": "current",
+                            "metadata": {
+                                "citation_number": number,
+                                "rank": citation.get("rank"),
+                                "source_title": snapshot.get("title"),
+                                "document_version": snapshot.get("version_number"),
+                                "page_number": snapshot.get("page_number"),
+                                "structural_path": snapshot.get("structural_path"),
+                                "section_key": key,
+                                "knowledge_refs": [snapshot["semantic_reference"]["ref"]] if snapshot.get("semantic_reference") else [],
+                                "knowledge_evidence": [snapshot["semantic_reference"]] if snapshot.get("semantic_reference") else [],
+                                "content_hash_algorithm": "canonical-json-v1",
+                            },
+                        }
+                    )
+                    cursor = match.end()
+                if cursor < len(text):
+                    children.append({"text": text[cursor:]})
+                plate_node = {"id": target_node_id, "type": target_type, "children": children or [{"text": text}]}
+                if list_style_type:
+                    plate_node.update({"indent": 1, "listStyleType": list_style_type})
+                content.append(plate_node)
+                bindings.append(binding)
+
             if raw["type"] == "table":
                 def table_citations(value):
                     if isinstance(value, str):
@@ -767,69 +867,31 @@ def assemble_report_content(
                         return {k: table_citations(v) for k, v in value.items()}
                     return value
                 content.append(_table_node(table_citations(raw["items"]), node_id))
+                bindings.append(base_binding)
                 continue
-            text = str(raw["text"])
-            for ref in knowledge_refs:
-                text = text.replace(f"[{ref}]", f"[{semantic_numbers[ref]}]")
-            children: list[dict[str, Any]] = []
-            cursor = 0
-            for match in re.finditer(r"\[(\d{1,3})\]", text):
-                number = int(match.group(1))
-                citation = citations_by_number.get(number)
-                if citation is None:
-                    raise ValueError("正文包含不存在的文档引用")
-                if match.start() > cursor:
-                    children.append({"text": text[cursor:match.start()]})
-                snapshot = dict(citation.get("snapshot") or {})
-                citation_id = f"citation-{run_id}-{sequence}-{node_index}-{number}-{match.start()}"
-                reference = {
-                    "id": citation_id,
-                    "type": "knowledge_citation",
-                    "citation_label": f"[{number}]",
-                    "source_title": snapshot.get("title"),
-                    "chunk_id": citation.get("chunk_id"),
-                    "query_run_id": citation.get("query_run_id"),
-                    "source_id": snapshot.get("document_id"),
-                    "source_version": snapshot.get("version_number"),
-                    "source_locator": {
-                        "page_number": snapshot.get("page_number"),
-                        "structural_path": snapshot.get("structural_path"),
-                    },
-                    "freshness_status": "current",
-                    "children": [{"text": ""}],
-                }
-                children.append(reference)
-                bindings.append(
-                    {
-                        "block_id": citation_id,
-                        "block_type": "knowledge_citation",
-                        "source_type": "policy_document",
-                        "source_id": snapshot.get("document_id"),
-                        "source_version": snapshot.get("version_number"),
-                        "chunk_id": citation.get("chunk_id"),
-                        "retrieval_query_run_id": citation.get("query_run_id"),
-                        "evidence_ids": [],
-                        "content_hash": content_hash(reference),
-                        "verification_status": "verified",
-                        "freshness_status": "current",
+            if raw["type"] in {"ul", "ol"}:
+                list_style_type = "disc" if raw["type"] == "ul" else "decimal"
+                for item_index, item in enumerate(raw["items"], 1):
+                    item_node_id = f"{node_id}-item-{item_index}"
+                    item_binding = {
+                        **base_binding,
+                        "block_id": item_node_id,
+                        "block_type": "p",
                         "metadata": {
-                            "citation_number": number,
-                            "rank": citation.get("rank"),
-                            "source_title": snapshot.get("title"),
-                            "document_version": snapshot.get("version_number"),
-                            "page_number": snapshot.get("page_number"),
-                            "structural_path": snapshot.get("structural_path"),
-                            "section_key": key,
-                            "knowledge_refs": [snapshot["semantic_reference"]["ref"]] if snapshot.get("semantic_reference") else [],
-                            "knowledge_evidence": [snapshot["semantic_reference"]] if snapshot.get("semantic_reference") else [],
-                            "content_hash_algorithm": "canonical-json-v1",
+                            **base_binding["metadata"],
+                            "list_group_id": node_id,
+                            "list_index": item_index,
+                            "list_style_type": list_style_type,
                         },
                     }
-                )
-                cursor = match.end()
-            if cursor < len(text):
-                children.append({"text": text[cursor:]})
-            content.append({"id": node_id, "type": raw["type"], "children": children or [{"text": text}]})
+                    append_text_node(
+                        str(item), target_node_id=item_node_id, target_type="p",
+                        binding=item_binding, list_style_type=list_style_type,
+                    )
+                continue
+            append_text_node(
+                str(raw["text"]), target_node_id=node_id, target_type=raw["type"], binding=base_binding,
+            )
         if chapter_refs and not used_chapter_refs:
             raise ValueError(f"章节“{planned_section['title']}”未引用已确认的关系依据，请重新生成")
         for trusted_node, binding in by_section.get(key, []):

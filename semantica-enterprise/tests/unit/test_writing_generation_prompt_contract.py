@@ -3,7 +3,7 @@ import json
 import pytest
 
 from packages.platform.writing_flow import (
-    build_generation_prompt, normalize_agent_heading_refs, renumber_chapter_citations,
+    assemble_report_content, build_generation_prompt, normalize_agent_heading_refs, renumber_chapter_citations,
     report_quality_review, retryable_agent_report_protocol_failure,
     validate_and_parse_agent_report, validate_public_reference_refs,
     validate_writing_graph_refs,
@@ -29,6 +29,65 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     assert "不能把多个字段合并成‘写作工具’" in prompt
     assert "普通段落必须逐字填写 p" in prompt
     assert "subheadings 为空时严禁输出 h3" in prompt
+    assert "ul 和 ol 必须使用 items 字符串数组" in prompt
+
+
+def test_agent_list_protocol_becomes_native_plate_list_paragraphs():
+    plan = [{"key": "resources", "title": "资源保障", "subheadings": []}]
+    output = json.dumps({
+        "sections": [{
+            "section_key": "resources",
+            "title": "资源保障",
+            "content_nodes": [{
+                "type": "ul",
+                "items": ["核对救援队伍到位情况。", "按需调拨应急物资。"],
+                "input_refs": [],
+                "metric_refs": [],
+                "writing_fact_refs": [],
+                "writing_evidence_refs": [],
+                "writing_relation_refs": [],
+                "public_reference_refs": [],
+            }],
+            "citation_refs": [],
+        }],
+        "warnings": [],
+    }, ensure_ascii=False)
+    sections = validate_and_parse_agent_report(output, plan)
+    assert sections[0]["content_nodes"][0]["items"] == [
+        "核对救援队伍到位情况。", "按需调拨应急物资。",
+    ]
+    content, bindings = assemble_report_content(
+        run_id="list-run", title="测试报告", section_plan=plan, agent_sections=sections,
+        citations=[], computations=[], inference_facts=[], selected_plan=None,
+    )
+    list_nodes = [node for node in content if node.get("listStyleType") == "disc"]
+    assert [node["children"][0]["text"] for node in list_nodes] == [
+        "核对救援队伍到位情况。", "按需调拨应急物资。",
+    ]
+    assert all(node["type"] == "p" and node["indent"] == 1 for node in list_nodes)
+    assert {binding["block_id"] for binding in bindings} == {node["id"] for node in list_nodes}
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"type": "ul", "items": []},
+        {"type": "ol", "items": [""]},
+        {"type": "ul", "items": ["有效项"], "text": "冲突正文"},
+        {"type": "p", "text": "普通段落", "items": ["歧义项"]},
+    ],
+)
+def test_agent_list_protocol_rejects_empty_or_ambiguous_nodes(node):
+    plan = [{"key": "resources", "title": "资源保障", "subheadings": []}]
+    output = json.dumps({
+        "sections": [{
+            "section_key": "resources", "title": "资源保障",
+            "content_nodes": [node], "citation_refs": [],
+        }],
+        "warnings": [],
+    }, ensure_ascii=False)
+    with pytest.raises(ValueError):
+        validate_and_parse_agent_report(output, plan)
 
 
 def test_only_structured_agent_protocol_failures_can_retry_the_same_chapter():

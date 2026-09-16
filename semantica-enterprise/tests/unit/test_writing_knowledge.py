@@ -215,6 +215,20 @@ def test_formal_export_does_not_invent_subtitle_or_platform_opening(tmp_path):
     assert [p.text for p in Document(target).paragraphs if p.text] == ["供水保障报告", "先核实库存。"]
 
 
+def test_formal_export_preserves_native_plate_list_paragraphs(tmp_path):
+    from docx import Document
+    from packages.platform.writing_export import build_docx
+    target = tmp_path / "list.docx"
+    build_docx(target, title="资源保障", content=[
+        {"id": "bullet-1", "type": "p", "indent": 1, "listStyleType": "disc", "children": [{"text": "核对队伍。"}]},
+        {"id": "number-1", "type": "p", "indent": 1, "listStyleType": "decimal", "children": [{"text": "调拨物资。"}]},
+    ], audit_summary={})
+    exported = Document(target)
+    body = [paragraph for paragraph in exported.paragraphs if paragraph.text not in {"", "资源保障"}]
+    assert [paragraph.text for paragraph in body] == ["核对队伍。", "调拨物资。"]
+    assert [paragraph.style.name for paragraph in body] == ["List Bullet", "List Number"]
+
+
 def test_confirmed_multilevel_sample_numbers_real_docx_headings_without_duplicate_header(tmp_path):
     from docx import Document
     from packages.platform.writing_export import build_docx

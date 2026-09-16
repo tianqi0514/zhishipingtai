@@ -268,6 +268,7 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
     subsection_index = 0
     for index, node in enumerate(content):
         node_type = str(node.get("type") or "p")
+        list_style_type = str(node.get("listStyleType") or "")
         text = _node_text(node).strip()
         if index == 0 and node_type in {"h1", "heading1"} and text in {title, formal_title}:
             continue
@@ -287,9 +288,11 @@ def build_docx(path: Path, *, title: str, content: list[dict[str, Any]], audit_s
         elif node_type in {"h3", "heading3"}:
             paragraph = document.add_paragraph(style="Heading 3")
             subsection_index += 1
-        elif node_type in {"ul", "bulleted-list"}:
+        elif node_type in {"ul", "bulleted-list"} or list_style_type in {"disc", "circle", "square"}:
             paragraph = document.add_paragraph(style="List Bullet")
-        elif node_type in {"ol", "numbered-list"}:
+        elif node_type in {"ol", "numbered-list"} or list_style_type in {
+            "decimal", "decimal-leading-zero", "lower-alpha", "upper-alpha", "lower-roman", "upper-roman",
+        }:
             paragraph = document.add_paragraph(style="List Number")
         else:
             paragraph = document.add_paragraph()
