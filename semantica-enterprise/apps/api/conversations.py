@@ -889,6 +889,14 @@ def _repair_internal_answer_details(
     assistant = db.get(ConversationMessage, assistant_id)
     if assistant is None:
         return None
+    conversation = db.get(Conversation, assistant.conversation_id)
+    if conversation is not None and (conversation.settings or {}).get("kind") == "writing_generation":
+        # Report-generation Turns return a machine-validated JSON contract.
+        # Public-answer localization (for example writing_* -> 写作工具 or
+        # UUID -> 内部记录) is appropriate for chat prose but corrupts JSON
+        # keys and release-scoped object identifiers.  The report finalizer
+        # owns strict field, reference and UUID validation instead.
+        return None
     sanitized, removed = _sanitize_public_answer_text(assistant.content)
     if not removed or sanitized == assistant.content:
         return None

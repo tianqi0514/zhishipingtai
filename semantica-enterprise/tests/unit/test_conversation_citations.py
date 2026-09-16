@@ -238,6 +238,36 @@ def test_public_answer_guard_removes_model_work_scratch_before_final_business_an
         ]
 
 
+def test_formal_writing_json_bypasses_public_prose_localization() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        conversation = Conversation(
+            id="10000000-0000-0000-0000-000000000093",
+            harness_session_id="session-formal-writing-json",
+            tenant_id="tenant",
+            user_id="user",
+            title="formal writing json",
+            settings={"kind": "writing_generation"},
+        )
+        raw = '{"writing_fact_refs":["371c2afc-1234-4123-8123-123456789abc"]}'
+        assistant = ConversationMessage(
+            id="20000000-0000-0000-0000-000000000093",
+            conversation_id=conversation.id,
+            tenant_id="tenant",
+            user_id="user",
+            sequence=2,
+            role="assistant",
+            status="completed",
+            content=raw,
+        )
+        db.add_all([conversation, assistant])
+        db.flush()
+
+        assert _repair_internal_answer_details(db, assistant.id) is None
+        assert assistant.content == raw
+
+
 def test_public_answer_guard_uses_last_markdown_business_draft() -> None:
     raw = (
         "I have the project context. Let me draft it.\n"
