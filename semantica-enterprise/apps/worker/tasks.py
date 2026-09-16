@@ -2210,6 +2210,10 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
             )
             extraction_timeout = float(model_config.get("timeout", 60))
             extraction_retries = int(model_config.get("max_retries", model_config.get("retry", 2)))
+            extraction_max_tokens = max(
+                256,
+                min(int(model_config.get("semantic_extract_max_tokens", 2048)), 4096),
+            )
             extraction_temperature = float(extraction_config.get("temperature", 0.1))
             completed_source_chunks = reused_chunk_count
 
@@ -2302,6 +2306,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                             temperature=extraction_temperature,
                             timeout=extraction_timeout,
                             max_retries=extraction_retries,
+                            max_tokens=extraction_max_tokens,
                             request_parameters=model_config.get("parameters"),
                         )
                         futures[future] = batch
@@ -2343,6 +2348,7 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                 "successful_model_requests": successful_model_requests,
                 "request_timeout_seconds": extraction_timeout,
                 "transport_max_retries": extraction_retries,
+                "output_max_tokens": extraction_max_tokens,
                 "timeout_failed_chunks": sum(
                     item.get("error_category") == "timeout" for item in extraction_errors
                 ),
@@ -2405,6 +2411,19 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         base_url=llm_model.base_url,
                         material_role=material_role,
                         request_parameters=(llm_model.config or {}).get("parameters"),
+                        timeout=float((llm_model.config or {}).get("timeout", 120)),
+                        max_retries=int(
+                            (llm_model.config or {}).get(
+                                "max_retries", (llm_model.config or {}).get("retry", 2)
+                            )
+                        ),
+                        max_tokens=max(
+                            768,
+                            min(
+                                int((llm_model.config or {}).get("writing_graph_max_tokens", 4096)),
+                                4096,
+                            ),
+                        ),
                     )
                     db.commit()
                 except Exception as exc:

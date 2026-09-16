@@ -397,6 +397,9 @@ def process_writing_graph_version(
     material_role: str = "task_data",
     generator: Callable[[str], dict[str, Any]] | None = None,
     request_parameters: dict[str, Any] | None = None,
+    timeout: float = 120,
+    max_retries: int = 2,
+    max_tokens: int = 4096,
 ) -> dict[str, Any]:
     evidence = ensure_writing_evidence(
         db, document=document, version=version, actor_id=actor_id,
@@ -461,6 +464,9 @@ def process_writing_graph_version(
                     api_key=api_key,
                     model=model,
                     base_url=base_url,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    max_tokens=max_tokens,
                     request_parameters=request_parameters,
                     generator=generator,
                 )

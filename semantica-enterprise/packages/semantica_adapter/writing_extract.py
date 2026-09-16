@@ -138,6 +138,15 @@ def _validate_evidence_ids(result: JointWritingExtraction, allowed_ids: set[str]
         raise ValueError(f"模型返回了未签发的 Evidence ID：{', '.join(invalid[:5])}")
 
 
+def writing_output_token_budget(
+    evidence: list[WritingEvidenceInput], configured_max_tokens: int,
+) -> int:
+    """Return a bounded response budget proportional to signed source text."""
+
+    source_chars = sum(len(item.text) for item in evidence)
+    return max(768, min(int(configured_max_tokens), 4096, source_chars * 2 + 512))
+
+
 def extract_writing_knowledge(
     evidence: list[WritingEvidenceInput | dict[str, Any]],
     *,
@@ -148,6 +157,7 @@ def extract_writing_knowledge(
     temperature: float = 0.0,
     timeout: float = 90,
     max_retries: int = 2,
+    max_tokens: int = 4096,
     request_parameters: dict[str, Any] | None = None,
     generator: Callable[[str], dict[str, Any]] | None = None,
 ) -> JointWritingExtraction:
@@ -169,9 +179,17 @@ def extract_writing_knowledge(
             max_retries=max_retries,
             request_parameters=request_parameters,
         )
+        # A locally hosted OpenAI-compatible model may otherwise keep
+        # producing JSON until its server-side default (often 8k+ tokens).
+        # Bound the response by both operator configuration and source size:
+        # extraction output may be larger than the source, but never needs an
+        # unbounded answer.  This is a transport guard, not a truncation of
+        # persisted evidence.
+        output_budget = writing_output_token_budget(normalized, max_tokens)
         generator = lambda value: provider.generate_structured(
             value,
             temperature=_effective_temperature(model, temperature),
+            max_tokens=output_budget,
         )
     raw = generator(prompt)
     result = JointWritingExtraction.model_validate(raw)

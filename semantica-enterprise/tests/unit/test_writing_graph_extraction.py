@@ -8,6 +8,7 @@ from packages.semantica_adapter.writing_extract import (
     candidate_key,
     extract_writing_knowledge,
     writing_extraction_prompt,
+    writing_output_token_budget,
 )
 
 
@@ -122,3 +123,15 @@ def test_prompt_describes_single_joint_request_and_candidate_keys_are_stable() -
     assert "一次联合识别" in prompt
     assert "evidence-0001" in prompt
     assert candidate_key("a", 1, {"x": True}) == candidate_key("a", 1, {"x": True})
+
+
+def test_output_budget_is_bounded_by_source_size_and_operator_ceiling() -> None:
+    evidence_type = __import__(
+        "packages.semantica_adapter.writing_extract", fromlist=["WritingEvidenceInput"]
+    ).WritingEvidenceInput
+    short = [evidence_type.model_validate(EVIDENCE[0])]
+    assert writing_output_token_budget(short, 8192) == 768
+
+    long = [evidence_type(evidence_id="evidence-0002", text="事实" * 5000)]
+    assert writing_output_token_budget(long, 8192) == 4096
+    assert writing_output_token_budget(long, 1024) == 1024

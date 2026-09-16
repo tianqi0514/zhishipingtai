@@ -133,6 +133,7 @@ def extract_semantics(
     temperature: float = 0.1,
     timeout: float = 60,
     max_retries: int = 2,
+    max_tokens: int = 2048,
     request_parameters: dict[str, Any] | None = None,
     generator: Callable[[str], dict[str, Any]] | None = None,
 ) -> ExtractionOutput:
@@ -157,6 +158,7 @@ def extract_semantics(
         generator = lambda value: provider.generate_structured(
             value,
             temperature=_effective_temperature(model, temperature),
+            max_tokens=max(256, min(int(max_tokens), 4096)),
         )
     raw = generator(prompt)
     if not isinstance(raw, dict):
