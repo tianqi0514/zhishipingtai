@@ -46,6 +46,13 @@ class DemoClient:
             return
         response = self.client.post("/auth/login", json={"username": username, "password": password})
         self._raise(response)
+        token = str(response.json().get("access_token") or "").strip()
+        if not token:
+            raise RuntimeError("登录成功响应缺少访问令牌")
+        # Production cookies are intentionally Secure.  The intranet
+        # acceptance endpoint may still be plain HTTP, so command-line tools
+        # must use the returned bearer token instead of weakening the cookie.
+        self.client.headers["Authorization"] = f"Bearer {token}"
 
     @staticmethod
     def _raise(response: httpx.Response) -> None:
