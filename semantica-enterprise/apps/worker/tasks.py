@@ -2429,6 +2429,18 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                                 2048,
                             ),
                         ),
+                        concurrency=max(
+                            1,
+                            min(
+                                int(
+                                    (llm_model.config or {}).get(
+                                        "writing_graph_concurrency",
+                                        (llm_model.config or {}).get("concurrency", 1),
+                                    )
+                                ),
+                                4,
+                            ),
+                        ),
                     )
                     db.commit()
                 except Exception as exc:

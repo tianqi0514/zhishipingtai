@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+import threading
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -201,6 +204,42 @@ def test_real_evidence_joint_extraction_governance_and_release() -> None:
         WritingGraphReleaseItem.release_id == release.id,
         WritingGraphReleaseItem.object_type == "evidence",
     )).snapshot["id"] == first_evidence_id[0]
+
+
+def test_independent_evidence_batches_extract_concurrently_and_persist_serially() -> None:
+    db, _tenant, user, _space, document, version = graph_fixture()
+    chunk = db.scalar(select(Chunk).where(Chunk.version_id == version.id))
+    chunk.text = "第一段明确事实。\n\n第二段另一项明确事实。"
+    chunk.content_hash = "c" * 64
+    db.commit()
+    barrier = threading.Barrier(2)
+    thread_names: set[str] = set()
+
+    def generator(prompt: str) -> dict:
+        thread_names.add(threading.current_thread().name)
+        barrier.wait(timeout=3)
+        assert re.search(r'"evidence_id":\s*"[^"]+"', prompt)
+        return {
+            "entities": [], "claims": [], "relations": [], "metrics": [],
+            "sample_profile": None, "ambiguities": [],
+        }
+
+    metrics = process_writing_graph_version(
+        db,
+        document=document,
+        version=version,
+        model_config_id="model",
+        api_key="unused",
+        model="test",
+        base_url=None,
+        actor_id=user.id,
+        generator=generator,
+        concurrency=2,
+    )
+    db.commit()
+    assert metrics["model_requests"] == 2
+    assert metrics["concurrency"] == 2
+    assert len(thread_names) == 2
 
 
 def test_fact_without_evidence_cannot_be_verified() -> None:

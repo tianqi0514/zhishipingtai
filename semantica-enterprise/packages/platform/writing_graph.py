@@ -5,6 +5,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
 
@@ -475,6 +476,7 @@ def process_writing_graph_version(
     timeout: float = 180,
     max_retries: int = 1,
     max_tokens: int = 2048,
+    concurrency: int = 1,
 ) -> dict[str, Any]:
     evidence = ensure_writing_evidence(
         db, document=document, version=version, actor_id=actor_id,
@@ -505,6 +507,7 @@ def process_writing_graph_version(
         for key in totals:
             totals[key] += int((run.metrics or {}).get(key) or 0)
     pending_evidence = [item for item in evidence if item.id not in covered_evidence_ids]
+    prepared: list[tuple[WritingExtractionRun, list[WritingEvidence]]] = []
     for batch in evidence_batches(pending_evidence):
         batch_key = content_hash({
             "strategy": WRITING_GRAPH_STRATEGY_VERSION,
@@ -538,29 +541,69 @@ def process_writing_graph_version(
             db.flush()
         run.status = "running"
         run.started_at = utcnow()
+        run.finished_at = None
+        run.error_code = None
+        run.error_message = None
         requests += 1
+        prepared.append((run, batch))
+
+    db.flush()
+
+    def extract_batch(batch: list[WritingEvidence]) -> JointWritingExtraction:
+        return extract_writing_knowledge(
+            [WritingEvidenceInput(
+                evidence_id=item.id,
+                text=item.text,
+                locator=item.locator,
+            ) for item in batch],
+            material_role=material_role,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+            max_tokens=max_tokens,
+            request_parameters=request_parameters,
+            generator=generator,
+        )
+
+    extracted_by_run: dict[str, JointWritingExtraction] = {}
+    errors_by_run: dict[str, Exception] = {}
+    workers = max(1, min(int(concurrency), 4, max(1, len(prepared))))
+    if workers == 1:
+        for run, batch in prepared:
+            try:
+                extracted_by_run[run.id] = extract_batch(batch)
+            except Exception as exc:
+                errors_by_run[run.id] = exc
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="writing-graph") as executor:
+            futures = {executor.submit(extract_batch, batch): run for run, batch in prepared}
+            for future in as_completed(futures):
+                run = futures[future]
+                try:
+                    extracted_by_run[run.id] = future.result()
+                except Exception as exc:
+                    errors_by_run[run.id] = exc
+
+    first_error: Exception | None = None
+    for run, _batch in prepared:
+        extraction_error = errors_by_run.get(run.id)
+        if extraction_error is not None:
+            run.status = "failed"
+            run.error_code = "WRITING_EXTRACTION_FAILED"
+            run.error_message = str(extraction_error)[:2000]
+            run.finished_at = utcnow()
+            first_error = first_error or extraction_error
+            continue
         try:
             # Candidate rows from one model response are atomic.  A schema,
             # constraint or persistence failure rolls the batch back while the
             # extraction run itself remains available for diagnostics/retry.
             with db.begin_nested():
-                extracted = extract_writing_knowledge(
-                    [WritingEvidenceInput(
-                        evidence_id=item.id,
-                        text=item.text,
-                        locator=item.locator,
-                    ) for item in batch],
-                    material_role=material_role,
-                    api_key=api_key,
-                    model=model,
-                    base_url=base_url,
-                    timeout=timeout,
-                    max_retries=max_retries,
-                    max_tokens=max_tokens,
-                    request_parameters=request_parameters,
-                    generator=generator,
+                metrics = persist_joint_extraction(
+                    db, run=run, result=extracted_by_run[run.id],
                 )
-                metrics = persist_joint_extraction(db, run=run, result=extracted)
             run.status = "succeeded"
             run.metrics = metrics
             run.finished_at = utcnow()
@@ -571,12 +614,15 @@ def process_writing_graph_version(
             run.error_code = "WRITING_EXTRACTION_FAILED"
             run.error_message = str(exc)[:2000]
             run.finished_at = utcnow()
-            raise
+            first_error = first_error or exc
+    if first_error is not None:
+        raise first_error
     return {
         "evidence": len(evidence),
         **totals,
         "model_requests": requests,
         "reused_batches": reused,
+        "concurrency": workers,
         "material_role": material_role,
         "strategy_version": WRITING_GRAPH_STRATEGY_VERSION,
     }
