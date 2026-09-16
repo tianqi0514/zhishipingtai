@@ -71,3 +71,9 @@ test('runtime gives formal-writing compaction a bounded non-truncating budget', 
   assert.match(runtime, /DSH_COMPACTION_MAX_TOKENS: String\(compactionMaxTokens\(model\)\)/)
   assert.match(patch, /maxTokens: !!js Number\(process\.env\.DSH_COMPACTION_MAX_TOKENS \|\| 2048\)/)
 })
+
+test('formal report final render keeps the section envelope strict', () => {
+  const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  assert.match(source, /章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings/)
+  assert.match(source, /禁止 status、state、progress/)
+})

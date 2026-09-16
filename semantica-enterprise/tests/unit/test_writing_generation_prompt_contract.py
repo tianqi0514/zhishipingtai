@@ -26,6 +26,8 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     assert "只能填写资料包从本文固定 WritingGraphRelease 返回的真实对象 ID" in prompt
     assert "不要再逐条调用图谱对象工具" in prompt
     assert "JSON 字段名是机器协议" in prompt
+    assert "每个章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings" in prompt
+    assert "禁止输出 status、state、progress" in prompt
     assert "不能把多个字段合并成‘写作工具’" in prompt
     assert "普通段落必须逐字填写 p" in prompt
     assert "subheadings 为空时严禁输出 h3" in prompt
