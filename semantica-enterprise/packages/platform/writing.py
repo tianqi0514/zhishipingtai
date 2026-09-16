@@ -30,6 +30,7 @@ SOURCE_TYPES = {
     "semantica_inference",
     "mcp_tool",
     "model_extraction",
+    "writing_graph_fact",
     "manual_input",
     "manual_override",
     "historical",

@@ -58,6 +58,7 @@ from apps.api.writing_schemas import (
     WritingProjectReleaseRebase,
     WritingProjectSpaceAttach,
     WritingProjectUpdate,
+    WritingGraphFactAdopt,
     WritingRecomputeRequest,
     WritingReasoningRequest,
     WritingExportCreate,
@@ -4145,6 +4146,103 @@ def create_fact(
     _commit(db)
     db.refresh(row)
     return serialize_row(row)
+
+
+@router.post("/projects/{project_id}/facts/adopt-writing-graph")
+def adopt_writing_graph_facts(
+    project_id: str,
+    payload: WritingGraphFactAdopt,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Copy reviewed release facts into the project's mutable input ledger.
+
+    The WritingGraphRelease remains immutable.  Subsequent project overrides
+    create ProjectFact versions, which is what lets impact preview show a
+    candidate change without rewriting the source graph or older articles.
+    """
+
+    project = _project(db, project_id, user, "editor")
+    if not project.writing_graph_release_id:
+        raise HTTPException(status_code=409, detail="项目尚未锁定写作图谱版本")
+    release = _writing_graph_release_for_user(
+        db,
+        project.writing_graph_release_id,
+        user,
+        expected_space_id=project.knowledge_space_id,
+    )
+    requested = {item.fact_id: item for item in payload.items}
+    rows = list(db.scalars(select(WritingGraphReleaseItem).where(
+        WritingGraphReleaseItem.release_id == release.id,
+        WritingGraphReleaseItem.object_type == "fact",
+        WritingGraphReleaseItem.object_id.in_(requested),
+        _active(WritingGraphReleaseItem),
+    )))
+    if len(rows) != len(requested):
+        raise HTTPException(status_code=422, detail="部分事实不属于项目锁定的写作图谱版本")
+    adopted: list[ProjectFact] = []
+    reused: list[ProjectFact] = []
+    for item in rows:
+        snapshot = dict(item.snapshot or {})
+        if snapshot.get("verification_status") != "verified":
+            raise HTTPException(status_code=422, detail="只能采用已确认的写作图谱事实")
+        requested_item = requested[item.object_id]
+        existing = db.scalar(select(ProjectFact).where(
+            ProjectFact.project_id == project.id,
+            ProjectFact.fact_key == requested_item.fact_key,
+            ProjectFact.active.is_(True),
+            _active(ProjectFact),
+        ).order_by(ProjectFact.version.desc()))
+        if existing is not None:
+            if existing.source_type == "writing_graph_fact" and existing.source_id == item.object_id:
+                reused.append(existing)
+                continue
+            raise HTTPException(
+                status_code=409,
+                detail=f"项目事实编码 {requested_item.fact_key} 已被其他来源使用，请先处理冲突",
+            )
+        row = ProjectFact(
+            tenant_id=user.tenant_id,
+            project_id=project.id,
+            fact_key=requested_item.fact_key,
+            label=requested_item.label or str(snapshot.get("predicate") or requested_item.fact_key),
+            fact_type="writing_graph_fact",
+            value=dict(snapshot.get("object_value") or {}),
+            unit=snapshot.get("unit"),
+            source_type="writing_graph_fact",
+            source_id=item.object_id,
+            source_version=str(release.release_number),
+            source_locator={
+                "writing_graph_release_id": release.id,
+                "writing_graph_release_number": release.release_number,
+                "release_item_id": item.id,
+                "evidence_ids": list(snapshot.get("evidence_ids") or []),
+                "claim_ids": list(snapshot.get("claim_ids") or []),
+                "time_scope": dict(snapshot.get("time_scope") or {}),
+                "applicable_scope": dict(snapshot.get("applicable_scope") or {}),
+            },
+            confidence=1.0,
+            verification_status="verified",
+            freshness_status="current",
+            version=1,
+            active=True,
+            created_by=user.id,
+            confirmed_by=user.id,
+            confirmed_at=datetime.now(timezone.utc),
+        )
+        db.add(row)
+        adopted.append(row)
+    db.flush()
+    audit(
+        db, user.tenant_id, user.id, "writing.fact.adopt_graph", "writing_project", project.id,
+        {"release_id": release.id, "fact_ids": sorted(requested), "adopted": len(adopted), "reused": len(reused)},
+    )
+    db.commit()
+    return {
+        "release_id": release.id,
+        "adopted": [serialize_row(row) for row in adopted],
+        "reused": [serialize_row(row) for row in reused],
+    }
 
 
 @router.post("/projects/{project_id}/facts/{fact_id}/confirm")

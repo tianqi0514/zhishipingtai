@@ -1,0 +1,41 @@
+{
+  "disclaimer": "测试数据，不代表真实灾情或正式行政决定。",
+  "article": {
+    "title": "测试地区6.2级地震应急处置方案（测试稿）",
+    "document_type": "response_plan",
+    "audience": "测试地区应急指挥部审阅",
+    "purpose": "形成可供演练讨论的应急处置方案，并验证事实、计算、来源和正文联动",
+    "applicability": {
+      "region": "测试地区",
+      "organization": "测试地区应急指挥部",
+      "subject": "6.2级地震应急处置演练",
+      "time_range": "2026年9月16日至2026年9月18日"
+    }
+  },
+  "facts": {
+    "earthquake_magnitude": {"value": 6.2, "unit": "级"},
+    "rescue_required": {"value": 500, "unit": "人"},
+    "rescue_available": {"value": 320, "unit": "人"},
+    "rescue_gap": {"value": 180, "unit": "人", "formula": "rescue_required - rescue_available"},
+    "trauma_beds_required": {"value": 330, "unit": "张"},
+    "county_trauma_beds": {"value": 110, "unit": "张"},
+    "callable_trauma_beds": {"value": 250, "unit": "张"},
+    "county_bed_gap": {"value": 220, "unit": "张", "formula": "trauma_beds_required - county_trauma_beds"},
+    "tents_required": {"value": 7000, "unit": "顶"},
+    "tents_available": {"value": 5200, "unit": "顶"},
+    "tents_gap": {"value": 1800, "unit": "顶", "formula": "tents_required - tents_available"}
+  },
+  "deliberate_conflict": {
+    "fact": "全域床位缺口",
+    "brief_value": {"value": 80, "unit": "张"},
+    "ledger_formula_value": {"value": 0, "unit": "张"},
+    "expected": "必须进入冲突或人工确认，不得静默选择"
+  },
+  "change_case": {
+    "fact_key": "rescue_available",
+    "before": 320,
+    "after": 400,
+    "expected_rescue_gap_before": 180,
+    "expected_rescue_gap_after": 100
+  }
+}

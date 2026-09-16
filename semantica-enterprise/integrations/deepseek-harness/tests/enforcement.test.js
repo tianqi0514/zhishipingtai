@@ -41,6 +41,12 @@ test('registers typed knowledge tools and turn enforcement', () => {
     'structured_execute_query',
     'knowledge_list_spaces',
     'writing_get_project_context',
+    'writing_get_release',
+    'writing_graph_search',
+    'writing_get_fact',
+    'writing_get_evidence',
+    'writing_get_relation_path',
+    'writing_search_public_standard',
     'writing_get_document_outline',
     'writing_create_outline_draft',
     'writing_generate_section_draft',
@@ -90,6 +96,12 @@ test('structured execute schema is aligned with the strict platform Plan and IR 
   assert.match(sections[1].text, /文档引用只能紧跟/)
   assert.match(sections[1].text, /writing_compare_alternative_plans/)
   assert.match(tools.find(item => item.name === 'writing_get_project_context').description, /方案摘要/)
+  assert.match(tools.find(item => item.name === 'writing_get_release').description, /不可变/)
+  assert.ok(tools.find(item => item.name === 'writing_graph_search').parameters.required.includes('query'))
+  assert.ok(tools.find(item => item.name === 'writing_get_fact').parameters.required.includes('fact_id'))
+  assert.ok(tools.find(item => item.name === 'writing_get_evidence').parameters.required.includes('evidence_id'))
+  assert.ok(tools.find(item => item.name === 'writing_get_relation_path').parameters.required.includes('subject_entity_id'))
+  assert.ok(tools.find(item => item.name === 'writing_search_public_standard').parameters.required.includes('query'))
   assert.match(tools.find(item => item.name === 'writing_compare_alternative_plans').description, /仅当用户明确请求/)
   assert.ok(tools.find(item => item.name === 'writing_bind_evidence').parameters.required.includes('query_run_id'))
 })
@@ -316,7 +328,7 @@ test('does not force retrieval for a direct identity question', () => {
 
 test('unloads every tool, prompt section and event listener', () => {
   const installed = fixture()
-  assert.equal(installed.tools.length, 22)
+  assert.equal(installed.tools.length, 28)
   assert.equal(installed.sections.length, 2)
   assert.equal(installed.listeners.size, 2)
   installed.dispose()

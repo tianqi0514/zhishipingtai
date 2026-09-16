@@ -20,6 +20,7 @@ from packages.platform.models import (
     WritingRelation,
 )
 from packages.platform.writing_graph import (
+    detect_writing_fact_conflicts,
     govern_writing_object,
     process_writing_graph_version,
     publish_writing_graph,
@@ -207,3 +208,38 @@ def test_fact_without_evidence_cannot_be_verified() -> None:
         assert "缺少来源依据" in str(exc)
     else:
         raise AssertionError("unsupported fact must be rejected")
+
+
+def test_conflicting_candidate_never_silently_replaces_verified_fact() -> None:
+    db, tenant, user, space, _document, _version = graph_fixture()
+    evidence = db.scalar(select(WritingEvidence))
+    if evidence is None:
+        # Evidence projection normally happens before extraction.  The
+        # conflict detector itself needs only stable source ids.
+        evidence = WritingEvidence(
+            tenant_id=tenant.id, space_id=space.id, document_id=_document.id,
+            document_version_id=_version.id, evidence_key="c" * 64,
+            filename=_version.filename, file_version=1, locator={}, text="原始值",
+            content_hash="d" * 64,
+        )
+        db.add(evidence); db.flush()
+    current = WritingFact(
+        tenant_id=tenant.id, space_id=space.id, fact_key="all-area-bed-gap",
+        subject={"name": "测试地区"}, predicate="全域床位缺口",
+        object_value={"value": 80}, value_type="number", unit="张",
+        evidence_ids=[evidence.id], verification_status="verified",
+        verified_by=user.id, version=1,
+    )
+    candidate = WritingFact(
+        tenant_id=tenant.id, space_id=space.id, fact_key="all-area-bed-gap",
+        subject={"name": "测试地区"}, predicate="全域床位缺口",
+        object_value={"value": 0}, value_type="number", unit="张",
+        evidence_ids=[evidence.id], verification_status="candidate", version=2,
+    )
+    db.add_all([current, candidate]); db.flush()
+
+    assert detect_writing_fact_conflicts(
+        db, space_id=space.id, fact_keys=["all-area-bed-gap"],
+    ) == 1
+    assert current.verification_status == "verified"
+    assert candidate.verification_status == "conflicted"

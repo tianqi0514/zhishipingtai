@@ -41,6 +41,7 @@ from packages.platform.models import (
     WritingProjectMember,
     WritingProjectMaterial,
     WritingGraphRelease,
+    WritingGraphReleaseItem,
 )
 from packages.platform.security import create_access_token, hash_password
 from packages.platform.writing import content_hash
@@ -545,6 +546,89 @@ def test_project_and_article_pin_one_immutable_writing_graph_release() -> None:
         assert context.status_code == 200, context.text
         assert context.json()["writing_graph"]["id"] == graph.id
         assert context.json()["writing_graph"]["snapshot_locked"] is True
+
+
+def test_project_adopts_only_verified_facts_from_its_pinned_writing_graph() -> None:
+    with writing_client() as (client, db, release):
+        seeded = _create_project(client, release.id)
+        space_id = db.scalar(select(KnowledgeProductReleaseItem.space_id).where(
+            KnowledgeProductReleaseItem.product_release_id == release.id,
+        ))
+        graph = WritingGraphRelease(
+            tenant_id=release.tenant_id,
+            space_id=space_id,
+            release_number=1,
+            graph_name="writing_fact_adoption_r1",
+            evidence_count=1,
+            entity_count=1,
+            claim_count=1,
+            fact_count=1,
+            relation_count=0,
+            checksum="f" * 64,
+            status="published",
+            created_by=db.scalar(select(User.id)),
+            published_at=datetime.now(timezone.utc),
+        )
+        db.add(graph)
+        db.flush()
+        graph_fact_id = "11111111-1111-4111-8111-111111111111"
+        db.add(WritingGraphReleaseItem(
+            tenant_id=release.tenant_id,
+            release_id=graph.id,
+            object_type="fact",
+            object_id=graph_fact_id,
+            object_version=1,
+            content_hash="1" * 64,
+            snapshot={
+                "id": graph_fact_id,
+                "predicate": "可用搜救人员",
+                "object_value": {"value": 320},
+                "value_type": "number",
+                "unit": "人",
+                "evidence_ids": ["evidence-1"],
+                "claim_ids": ["claim-1"],
+                "time_scope": {"as_of": "2026-09-16"},
+                "applicable_scope": {"region": "测试地区"},
+                "verification_status": "verified",
+            },
+        ))
+        db.commit()
+
+        project = client.post("/api/v1/writing/projects", json={
+            "code": "writing-graph-fact-adoption",
+            "name": "采用治理事实的项目",
+            "scenario_package_version_id": seeded["scenario_package_version_id"],
+            "space_id": space_id,
+            "writing_graph_release_id": graph.id,
+        })
+        assert project.status_code == 200, project.text
+        endpoint = f"/api/v1/writing/projects/{project.json()['id']}/facts/adopt-writing-graph"
+        payload = {"items": [{
+            "fact_id": graph_fact_id,
+            "fact_key": "rescue_available",
+            "label": "可用搜救人员",
+        }]}
+        adopted = client.post(endpoint, json=payload)
+        assert adopted.status_code == 200, adopted.text
+        assert len(adopted.json()["adopted"]) == 1
+        project_fact = adopted.json()["adopted"][0]
+        assert project_fact["source_type"] == "writing_graph_fact"
+        assert project_fact["fact_type"] == "writing_graph_fact"
+        assert project_fact["value"] == {"value": 320}
+        assert project_fact["verification_status"] == "verified"
+        assert project_fact["source_locator"]["writing_graph_release_id"] == graph.id
+        assert project_fact["source_locator"]["evidence_ids"] == ["evidence-1"]
+
+        repeated = client.post(endpoint, json=payload)
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json()["adopted"] == []
+        assert len(repeated.json()["reused"]) == 1
+
+        unknown = client.post(endpoint, json={"items": [{
+            "fact_id": "22222222-2222-4222-8222-222222222222",
+            "fact_key": "unknown_fact",
+        }]})
+        assert unknown.status_code == 422
 
 
 def test_project_materials_pin_versions_and_removal_preserves_zhiku_document() -> None:

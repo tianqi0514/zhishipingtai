@@ -245,6 +245,7 @@ class ProjectFactCreate(StrictModel):
         "database_query",
         "deterministic_computation",
         "model_extraction",
+        "writing_graph_fact",
         "semantica_inference",
         "mcp_tool",
         "manual_input",
@@ -279,6 +280,26 @@ class FactConfirmation(StrictModel):
             raise ValueError("人工覆盖必须提供新值")
         return self
 
+
+class WritingGraphFactAdoptionItem(StrictModel):
+    fact_id: str
+    fact_key: str = Field(min_length=1, max_length=160)
+    label: str | None = Field(default=None, max_length=300)
+
+
+class WritingGraphFactAdopt(StrictModel):
+    items: list[WritingGraphFactAdoptionItem] = Field(min_length=1, max_length=200)
+
+    @field_validator("items")
+    @classmethod
+    def unique_graph_facts_and_keys(
+        cls, value: list[WritingGraphFactAdoptionItem],
+    ) -> list[WritingGraphFactAdoptionItem]:
+        if len({item.fact_id for item in value}) != len(value):
+            raise ValueError("写作图谱事实不能重复")
+        if len({item.fact_key for item in value}) != len(value):
+            raise ValueError("项目事实编码不能重复")
+        return value
 
 class ComputationRequest(StrictModel):
     definition_version_id: str | None = None

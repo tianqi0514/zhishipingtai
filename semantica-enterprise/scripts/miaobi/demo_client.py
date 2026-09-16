@@ -109,11 +109,26 @@ class DemoClient:
             time.sleep(1)
         raise TimeoutError(f"文档版本 {version_id} 未创建知识加工任务")
 
-    def upload_file(self, space_id: str, path: Path, *, mode: str = "vector") -> dict[str, Any]:
+    def upload_file(
+        self,
+        space_id: str,
+        path: Path,
+        *,
+        mode: str = "vector",
+        targets: list[str] | None = None,
+        material_role: str = "task_data",
+    ) -> dict[str, Any]:
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        form = {
+            "space_id": space_id,
+            "knowledge_processing_mode": mode,
+            "material_role": material_role,
+        }
+        if targets is not None:
+            form["knowledge_processing_targets"] = json.dumps(targets, ensure_ascii=False)
         response = self.client.post(
             "/documents/upload",
-            data={"space_id": space_id, "knowledge_processing_mode": mode},
+            data=form,
             files={"file": (path.name, path.read_bytes(), content_type)},
         )
         self._raise(response)

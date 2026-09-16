@@ -158,6 +158,57 @@ def _fact_value(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {"value": value}
 
 
+def detect_writing_fact_conflicts(
+    db: Session,
+    *,
+    space_id: str,
+    fact_keys: Iterable[str],
+) -> int:
+    """Mark contradictory candidates without invalidating an accepted fact.
+
+    Facts with the same business key share subject, predicate, time and scope.
+    A different value/unit therefore needs a human decision.  A previously
+    verified value remains the current authority; only new, unverified rows are
+    moved to ``conflicted`` so background extraction cannot silently revoke an
+    accepted fact.
+    """
+
+    conflicted = 0
+    for fact_key in sorted({str(value) for value in fact_keys if value}):
+        rows = list(db.scalars(select(WritingFact).where(
+            WritingFact.space_id == space_id,
+            WritingFact.fact_key == fact_key,
+            WritingFact.verification_status.notin_({"rejected", "superseded", "stale"}),
+            WritingFact.deleted_at.is_(None),
+        )))
+        signatures = {
+            canonical_json({
+                "value": row.object_value,
+                "value_type": row.value_type,
+                "unit": row.unit,
+            })
+            for row in rows
+        }
+        if len(signatures) < 2:
+            continue
+        for row in rows:
+            if row.verification_status == "verified":
+                continue
+            if row.verification_status != "conflicted":
+                row.verification_status = "conflicted"
+                conflicted += 1
+            if row.claim_ids:
+                claims = list(db.scalars(select(WritingClaim).where(
+                    WritingClaim.id.in_(row.claim_ids),
+                    WritingClaim.deleted_at.is_(None),
+                )))
+                for claim in claims:
+                    claim.conflict_status = "conflicted"
+                    if claim.verification_status == "candidate":
+                        claim.verification_status = "conflicted"
+    return conflicted
+
+
 def persist_joint_extraction(
     db: Session,
     *,
@@ -317,6 +368,11 @@ def persist_joint_extraction(
         )
         db.add(relation)
         relations.append(relation)
+    conflicts = detect_writing_fact_conflicts(
+        db,
+        space_id=run.space_id,
+        fact_keys=[item.fact_key for item in facts],
+    )
     return {
         "entities": len(entities),
         "claims": len(claims),
@@ -324,6 +380,7 @@ def persist_joint_extraction(
         "relations": len(relations),
         "metrics": len(result.metrics),
         "ambiguities": len(result.ambiguities),
+        "conflicts": conflicts,
     }
 
 
@@ -344,7 +401,15 @@ def process_writing_graph_version(
     evidence = ensure_writing_evidence(
         db, document=document, version=version, actor_id=actor_id,
     )
-    totals = {"entities": 0, "claims": 0, "facts": 0, "relations": 0, "metrics": 0, "ambiguities": 0}
+    totals = {
+        "entities": 0,
+        "claims": 0,
+        "facts": 0,
+        "relations": 0,
+        "metrics": 0,
+        "ambiguities": 0,
+        "conflicts": 0,
+    }
     requests = 0
     reused = 0
     for batch in evidence_batches(evidence):
@@ -382,20 +447,24 @@ def process_writing_graph_version(
         run.started_at = utcnow()
         requests += 1
         try:
-            extracted = extract_writing_knowledge(
-                [WritingEvidenceInput(
-                    evidence_id=item.id,
-                    text=item.text,
-                    locator=item.locator,
-                ) for item in batch],
-                material_role=material_role,
-                api_key=api_key,
-                model=model,
-                base_url=base_url,
-                request_parameters=request_parameters,
-                generator=generator,
-            )
-            metrics = persist_joint_extraction(db, run=run, result=extracted)
+            # Candidate rows from one model response are atomic.  A schema,
+            # constraint or persistence failure rolls the batch back while the
+            # extraction run itself remains available for diagnostics/retry.
+            with db.begin_nested():
+                extracted = extract_writing_knowledge(
+                    [WritingEvidenceInput(
+                        evidence_id=item.id,
+                        text=item.text,
+                        locator=item.locator,
+                    ) for item in batch],
+                    material_role=material_role,
+                    api_key=api_key,
+                    model=model,
+                    base_url=base_url,
+                    request_parameters=request_parameters,
+                    generator=generator,
+                )
+                metrics = persist_joint_extraction(db, run=run, result=extracted)
             run.status = "succeeded"
             run.metrics = metrics
             run.finished_at = utcnow()
