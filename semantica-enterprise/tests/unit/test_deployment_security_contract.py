@@ -100,6 +100,7 @@ def test_local_development_image_contains_demo_preflight_assets() -> None:
 def test_overlay_image_rebuilds_the_plate_frontend() -> None:
     dockerfile = (ROOT / "Dockerfile.overlay").read_text(encoding="utf-8")
 
+    assert dockerfile.startswith("ARG BASE_IMAGE=")
     assert "FROM node:24-alpine AS miaobi-web-builder" in dockerfile
     assert "pnpm install --frozen-lockfile" in dockerfile
     assert "RUN pnpm build" in dockerfile

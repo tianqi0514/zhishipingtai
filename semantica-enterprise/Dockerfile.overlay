@@ -1,3 +1,5 @@
+ARG BASE_IMAGE=semantica-enterprise:0.10.0
+
 FROM node:24-alpine AS miaobi-web-builder
 
 WORKDIR /frontend
@@ -8,7 +10,6 @@ COPY apps/miaobi-web/index.html apps/miaobi-web/tsconfig.json apps/miaobi-web/vi
 COPY apps/miaobi-web/src ./src
 RUN pnpm build
 
-ARG BASE_IMAGE=semantica-enterprise:0.10.0
 FROM ${BASE_IMAGE}
 
 USER root
