@@ -79,6 +79,7 @@ def test_generation_carries_per_chapter_evidence_and_computation_contract():
     assert "普通段落必须逐字填写 p" in prompt
     assert "subheadings 为空时严禁输出 h3" in prompt
     assert "ul 和 ol 必须使用 items 字符串数组" in prompt
+    assert "table.items 必须是二维数组" in prompt
     assert "根层只能有 sections 和 warnings" in prompt
     assert "禁止把 section_key、title、content_nodes" in prompt
 
@@ -117,6 +118,66 @@ def test_agent_list_protocol_becomes_native_plate_list_paragraphs():
     ]
     assert all(node["type"] == "p" and node["indent"] == 1 for node in list_nodes)
     assert {binding["block_id"] for binding in bindings} == {node["id"] for node in list_nodes}
+
+
+def test_agent_table_protocol_normalizes_columns_rows_into_native_plate_cells():
+    plan = [{"key": "tasks", "title": "任务清单", "subheadings": []}]
+    output = json.dumps({
+        "sections": [{
+            "section_key": "tasks",
+            "title": "任务清单",
+            "content_nodes": [{
+                "type": "table",
+                "items": [{
+                    "columns": ["序号", "任务"],
+                    "rows": [["1", "核对人员"], ["2", "复核物资"]],
+                }],
+                "input_refs": [],
+                "metric_refs": [],
+                "writing_fact_refs": [],
+                "writing_evidence_refs": [],
+                "writing_relation_refs": [],
+                "public_reference_refs": [],
+            }],
+            "citation_refs": [],
+        }],
+        "warnings": [],
+    }, ensure_ascii=False)
+    sections = validate_and_parse_agent_report(output, plan)
+    assert sections[0]["content_nodes"][0]["items"] == [
+        ["序号", "任务"], ["1", "核对人员"], ["2", "复核物资"],
+    ]
+    content, _ = assemble_report_content(
+        run_id="table-run", title="测试报告", section_plan=plan, agent_sections=sections,
+        citations=[], computations=[], inference_facts=[], selected_plan=None,
+    )
+    table = next(node for node in content if node.get("type") == "table")
+    assert [
+        [cell["children"][0]["text"] for cell in row["children"]]
+        for row in table["children"]
+    ] == [["序号", "任务"], ["1", "核对人员"], ["2", "复核物资"]]
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [{"columns": ["序号"], "rows": "not-a-list"}],
+        [["序号"], {"任务": "核对人员"}],
+        [["序号", {"nested": "bad"}]],
+    ],
+)
+def test_agent_table_protocol_rejects_ambiguous_or_nested_cells(items):
+    plan = [{"key": "tasks", "title": "任务清单", "subheadings": []}]
+    output = json.dumps({
+        "sections": [{
+            "section_key": "tasks", "title": "任务清单",
+            "content_nodes": [{"type": "table", "items": items}],
+            "citation_refs": [],
+        }],
+        "warnings": [],
+    }, ensure_ascii=False)
+    with pytest.raises(ValueError, match="表格结构不受支持"):
+        validate_and_parse_agent_report(output, plan)
 
 
 @pytest.mark.parametrize(

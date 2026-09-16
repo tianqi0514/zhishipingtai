@@ -36,6 +36,35 @@ PLATFORM_PROCESS_PHRASES = (
 )
 
 
+def _normalize_table_matrix(items: Any) -> list[list[str]]:
+    """Normalize supported Agent table shapes into a real cell matrix."""
+    if isinstance(items, list) and len(items) == 1 and isinstance(items[0], dict):
+        wrapper = items[0]
+        if set(wrapper) - {"columns", "rows"} or not isinstance(wrapper.get("columns"), list) or not isinstance(wrapper.get("rows"), list):
+            raise ValueError("表格对象只允许 columns 和 rows")
+        items = [wrapper["columns"], *wrapper["rows"]]
+    if not isinstance(items, list) or not items or len(items) > 100:
+        raise ValueError("表格没有有效数据")
+    matrix: list[list[str]] = []
+    width = 0
+    for row in items:
+        if not isinstance(row, list) or not row or len(row) > 20:
+            raise ValueError("表格必须使用二维单元格数组")
+        values = []
+        for value in row:
+            if isinstance(value, (dict, list)) or value is None:
+                raise ValueError("表格单元格必须是文本或数值")
+            text = str(value).strip()
+            if len(text) > 4000:
+                raise ValueError("表格单元格内容过长")
+            values.append(text)
+        width = max(width, len(values))
+        matrix.append(values)
+    if width == 0:
+        raise ValueError("表格没有有效列")
+    return [row + [""] * (width - len(row)) for row in matrix]
+
+
 def retryable_agent_report_protocol_failure(status: str, stage: str, error_code: str | None) -> bool:
     """Allow a fresh isolated Turn only for a rejected chapter protocol.
 
@@ -202,9 +231,10 @@ def validate_and_parse_agent_report(
             if node_type == "table":
                 if "text" in node:
                     raise ValueError(f"章节“{title}”的表格不得包含 text")
-                items = node.get("items")
-                if not isinstance(items, list) or not items:
-                    raise ValueError(f"章节“{title}”的表格没有数据")
+                try:
+                    items = _normalize_table_matrix(node.get("items"))
+                except ValueError as exc:
+                    raise ValueError(f"章节“{title}”的表格结构不受支持：{exc}") from exc
                 clean_nodes.append({"type": "table", "items": items, **dependencies})
                 continue
             if node_type in {"ul", "ol"}:
@@ -593,6 +623,7 @@ def build_generation_prompt(
         "content_nodes 中每个对象只允许 type、text、items、input_refs、metric_refs、writing_fact_refs、"
         "writing_evidence_refs、writing_relation_refs、public_reference_refs；段落不得出现 items，表格不得出现 text。"
         "ul 和 ol 必须使用 items 字符串数组逐项返回，不得填写 text；p、blockquote 和 h3 必须使用 text，不得填写 items。"
+        "table.items 必须是二维数组，第一行是表头，后续每一行是数据；禁止返回 columns/rows 对象或字符串化表格。"
         "type 只允许 p、ul、ol、blockquote、table、h3；普通段落必须逐字填写 p，禁止使用 paragraph、text 或 prose。"
         "即使某类依赖为空，也要使用对应的英文 key 返回空数组，不能把多个字段合并成‘写作工具’等自定义字段。"
         "请为下列报告生成一次且仅一次的全部章节。只输出一个 JSON 对象，不要 Markdown 代码围栏之外的文字。"
@@ -660,8 +691,7 @@ def _browser_json_value(value: Any) -> Any:
 
 def _table_node(items: list[Any], node_id: str) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    for row_index, raw_row in enumerate(items):
-        values = raw_row if isinstance(raw_row, list) else [raw_row]
+    for row_index, values in enumerate(_normalize_table_matrix(items)):
         rows.append(
             {
                 "id": f"{node_id}-r{row_index + 1}",
