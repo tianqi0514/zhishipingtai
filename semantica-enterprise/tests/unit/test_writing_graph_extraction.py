@@ -158,6 +158,18 @@ def test_sample_profile_normalizes_style_shorthand_and_keeps_signed_evidence() -
     assert result.sample_profile.evidence_ids == ["evidence-0001"]
 
 
+def test_sample_prompt_keeps_signed_text_but_omits_repeated_locator_metadata() -> None:
+    evidence_type = __import__(
+        "packages.semantica_adapter.writing_extract", fromlist=["WritingEvidenceInput"]
+    ).WritingEvidenceInput
+    prompt = writing_extraction_prompt(
+        [evidence_type.model_validate(EVIDENCE[0])], material_role="sample_style",
+    )
+    assert '"evidence_id": "evidence-0001"' in prompt
+    assert "截至测试时点" in prompt
+    assert '"locator"' not in prompt
+
+
 def test_prompt_describes_single_joint_request_and_candidate_keys_are_stable() -> None:
     prompt = writing_extraction_prompt(
         [

@@ -136,8 +136,15 @@ def writing_extraction_prompt(
     *,
     material_role: str,
 ) -> str:
-    signed_evidence = [item.model_dump() for item in evidence]
     sample_only = material_role == "sample_style"
+    # A sample profile needs whole-document structure, but page/locator JSON
+    # repeated for every paragraph can consume the model's context window.
+    # Evidence ids still preserve provenance; the platform resolves their
+    # locators after extraction.
+    signed_evidence = [
+        ({"evidence_id": item.evidence_id, "text": item.text} if sample_only else item.model_dump())
+        for item in evidence
+    ]
     boundary = (
         "本批次是样稿。只提取 sample_profile；entities、claims、relations、metrics 必须为空。"
         if sample_only
@@ -245,6 +252,10 @@ def extract_writing_knowledge(
         # unbounded answer.  This is a transport guard, not a truncation of
         # persisted evidence.
         output_budget = writing_output_token_budget(normalized, max_tokens)
+        if material_role == "sample_style":
+            # Leave a safety margin for 16k-context local models. A concise
+            # structure/style profile does not require the full 2k ceiling.
+            output_budget = min(output_budget, 1792)
         generator = lambda value: provider.generate_structured(
             value,
             temperature=_effective_temperature(model, temperature),
