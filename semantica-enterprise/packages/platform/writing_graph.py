@@ -36,8 +36,8 @@ from .models import (
 )
 
 
-WRITING_GRAPH_STRATEGY_VERSION = "writing-graph-v3"
-WRITING_GRAPH_SCHEMA_VERSION = "joint-v3"
+WRITING_GRAPH_STRATEGY_VERSION = "writing-graph-v4"
+WRITING_GRAPH_SCHEMA_VERSION = "joint-v4"
 WRITING_GRAPH_STATUSES = {
     "candidate", "verified", "rejected", "conflicted", "superseded", "stale",
 }
@@ -404,7 +404,7 @@ def persist_joint_extraction(
     *,
     run: WritingExtractionRun,
     result: JointWritingExtraction,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Persist only candidate knowledge; this function never verifies it."""
 
     entities: list[WritingEntityCandidate] = []
@@ -616,8 +616,10 @@ def persist_joint_extraction(
         "facts": len(facts),
         "relations": len(relations),
         "metrics": len(result.metrics),
+        "sample_profiles": int(result.sample_profile is not None),
         "ambiguities": len(result.ambiguities),
         "conflicts": conflicts,
+        **({"sample_profile": result.sample_profile.model_dump()} if result.sample_profile else {}),
     }
 
 
@@ -648,9 +650,11 @@ def process_writing_graph_version(
         "facts": 0,
         "relations": 0,
         "metrics": 0,
+        "sample_profiles": 0,
         "ambiguities": 0,
         "conflicts": 0,
     }
+    sample_profile: dict[str, Any] | None = None
     requests = 0
     successful_runs = list(db.scalars(select(WritingExtractionRun).where(
         WritingExtractionRun.document_version_id == version.id,
@@ -667,9 +671,20 @@ def process_writing_graph_version(
     for run in successful_runs:
         for key in totals:
             totals[key] += int((run.metrics or {}).get(key) or 0)
+        if (run.metrics or {}).get("sample_profile"):
+            sample_profile = dict(run.metrics["sample_profile"])
     pending_evidence = [item for item in evidence if item.id not in covered_evidence_ids]
     prepared: list[tuple[WritingExtractionRun, list[WritingEvidence]]] = []
-    for batch in evidence_batches(pending_evidence):
+    # A sample profile is document-level: its headings, audience and style can
+    # only be understood together. Sending one paragraph per request both
+    # loses that context and turns a short sample into hundreds of model calls.
+    # Business materials stay atomically batched for precise Fact provenance.
+    pending_batches = (
+        [pending_evidence]
+        if material_role == "sample_style" and pending_evidence
+        else evidence_batches(pending_evidence)
+    )
+    for batch in pending_batches:
         batch_key = content_hash({
             "strategy": WRITING_GRAPH_STRATEGY_VERSION,
             "schema": WRITING_GRAPH_SCHEMA_VERSION,
@@ -770,6 +785,8 @@ def process_writing_graph_version(
             run.finished_at = utcnow()
             for key in totals:
                 totals[key] += int(metrics.get(key) or 0)
+            if metrics.get("sample_profile"):
+                sample_profile = dict(metrics["sample_profile"])
         except Exception as exc:
             run.status = "failed"
             run.error_code = "WRITING_EXTRACTION_FAILED"
@@ -781,6 +798,7 @@ def process_writing_graph_version(
     return {
         "evidence": len(evidence),
         **totals,
+        **({"sample_profile": sample_profile} if sample_profile else {}),
         "model_requests": requests,
         "reused_batches": reused,
         "concurrency": workers,

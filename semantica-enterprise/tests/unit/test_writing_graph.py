@@ -272,6 +272,55 @@ def test_independent_evidence_batches_extract_concurrently_and_persist_serially(
     assert len(thread_names) == 2
 
 
+def test_sample_style_is_extracted_once_with_document_level_context() -> None:
+    db, _tenant, user, _space, document, version = graph_fixture()
+    chunk = db.scalar(select(Chunk).where(Chunk.version_id == version.id))
+    chunk.text = (
+        "1 总则\n\n" + "本方案用于测试正式应急写作结构。" * 25
+        + "\n\n2 事件基本情况\n\n" + "本章说明事件范围、时间和影响。" * 25
+    )
+    chunk.content_hash = "f" * 64
+    db.commit()
+    calls: list[str] = []
+
+    def generator(prompt: str) -> dict:
+        calls.append(prompt)
+        evidence_ids = re.findall(r'"evidence_id":\s*"([^"]+)"', prompt)
+        assert len(evidence_ids) >= 2
+        return {
+            "entities": [], "claims": [], "relations": [], "metrics": [],
+            "sample_profile": {
+                "document_type": "应急方案", "target_audience": "业务管理人员",
+                "chapters": [
+                    {"title": "总则", "responsibility": "说明目的", "level": 1},
+                    {"title": "事件基本情况", "responsibility": "说明事件", "level": 1},
+                ],
+                "style": {"register": "正式"}, "table_patterns": [],
+                "attachment_patterns": [], "evidence_ids": evidence_ids[:2],
+            },
+            "ambiguities": [],
+        }
+
+    metrics = process_writing_graph_version(
+        db,
+        document=document,
+        version=version,
+        model_config_id="model",
+        api_key="unused",
+        model="test",
+        base_url=None,
+        actor_id=user.id,
+        generator=generator,
+        material_role="sample_style",
+    )
+    db.commit()
+    assert len(calls) == 1
+    assert metrics["model_requests"] == 1
+    assert metrics["sample_profiles"] == 1
+    assert metrics["sample_profile"]["document_type"] == "应急方案"
+    assert db.scalar(select(WritingFact)) is None
+
+
 def test_repeated_metric_merges_evidence_without_duplicate_fact_version() -> None:
     db, _tenant, user, _space, document, version = graph_fixture()
     chunk = db.scalar(select(Chunk).where(Chunk.version_id == version.id))

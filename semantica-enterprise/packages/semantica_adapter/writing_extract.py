@@ -104,6 +104,18 @@ class SampleProfileCandidate(StrictModel):
     style: dict[str, Any] = Field(default_factory=dict)
     table_patterns: list[str] = Field(default_factory=list, max_length=30)
     attachment_patterns: list[str] = Field(default_factory=list, max_length=30)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("style", mode="before")
+    @classmethod
+    def normalize_style(cls, value: Any) -> dict[str, Any]:
+        if value is None or value == "":
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            return {"description": value.strip()}
+        raise ValueError("样稿文风必须是对象或简短文本")
 
 
 class JointWritingExtraction(StrictModel):
@@ -131,6 +143,14 @@ def writing_extraction_prompt(
         if sample_only
         else "本批次是业务材料。sample_profile 必须为 null。"
     )
+    sample_profile_contract = (
+        '{"document_type":"文档类型","target_audience":"目标读者",'
+        '"chapters":[{"title":"一级标题","responsibility":"本章写什么","level":1,"citation_required":true}],'
+        '"style":{"register":"正式程度","heading_numbering":"标题编号方式"},'
+        '"table_patterns":["表格用途"],"attachment_patterns":["附件用途"],'
+        '"evidence_ids":["已签发ID"]}'
+        if sample_only else "null"
+    )
     return f"""你是组织专业写作知识抽取器。只输出一个 JSON 对象，不要 Markdown，不要解释。
 
 目标：一次联合识别实体提及、材料主张、数值指标和关系线索；不能把模型推断当作材料主张。
@@ -155,7 +175,7 @@ def writing_extraction_prompt(
   "claims":[{{"subject":"主体","predicate":"谓词","object_value":"字符串或数值或布尔值或null","claim_type":"assertion|requirement|prediction|recommendation|opinion","evidence_ids":["已签发ID"],"confidence":0.95}}],
   "relations":[{{"subject":"主体实体名","predicate":"关系","object":"客体实体名","evidence_ids":["已签发ID"],"confidence":0.95}}],
   "metrics":[{{"name":"指标名","value":320,"value_type":"integer|number|string","unit":"人","evidence_ids":["已签发ID"],"confidence":0.95}}],
-  "sample_profile":null,
+  "sample_profile":{sample_profile_contract},
   "ambiguities":[]
 }}
 除第11条列出的默认字段外，不得省略字段。
@@ -169,6 +189,8 @@ def _validate_evidence_ids(result: JointWritingExtraction, allowed_ids: set[str]
     referenced: list[str] = []
     for item in [*result.entities, *result.claims, *result.relations, *result.metrics]:
         referenced.extend(item.evidence_ids)
+    if result.sample_profile is not None:
+        referenced.extend(result.sample_profile.evidence_ids)
     invalid = sorted(set(referenced) - allowed_ids)
     if invalid:
         raise ValueError(f"模型返回了未签发的 Evidence ID：{', '.join(invalid[:5])}")
@@ -236,6 +258,8 @@ def extract_writing_knowledge(
             raise ValueError("样稿抽取不得产生本次业务实体、主张、事实或关系")
         if result.sample_profile is None:
             raise ValueError("样稿抽取缺少结构与文体画像")
+        if not result.sample_profile.evidence_ids:
+            raise ValueError("样稿结构与文体画像缺少来源依据")
     elif result.sample_profile is not None:
         raise ValueError("业务材料抽取不得混入样稿画像")
     return result

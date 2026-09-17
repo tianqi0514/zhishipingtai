@@ -126,10 +126,36 @@ def test_sample_profile_cannot_emit_business_facts() -> None:
                     "needs_confirmation": False,
                 }],
                 "relations": [], "metrics": [],
-                "sample_profile": {"document_type": "预案", "target_audience": "政府部门", "chapters": [], "style": {}, "table_patterns": [], "attachment_patterns": []},
+                "sample_profile": {"document_type": "预案", "target_audience": "政府部门", "chapters": [], "style": {}, "table_patterns": [], "attachment_patterns": [], "evidence_ids": ["evidence-0001"]},
                 "ambiguities": [],
             },
         )
+
+
+def test_sample_profile_normalizes_style_shorthand_and_keeps_signed_evidence() -> None:
+    result = extract_writing_knowledge(
+        EVIDENCE,
+        material_role="sample_style",
+        api_key="unused",
+        model="test",
+        base_url=None,
+        generator=lambda _prompt: {
+            "entities": [], "claims": [], "relations": [], "metrics": [],
+            "sample_profile": {
+                "document_type": "应急方案", "target_audience": "应急管理部门",
+                "chapters": [{
+                    "title": "事件基本情况", "responsibility": "说明灾情和范围",
+                    "level": 1, "citation_required": True,
+                }],
+                "style": "正式、审慎", "table_patterns": ["任务清单"],
+                "attachment_patterns": ["资源表"], "evidence_ids": ["evidence-0001"],
+            },
+            "ambiguities": [],
+        },
+    )
+    assert result.sample_profile is not None
+    assert result.sample_profile.style == {"description": "正式、审慎"}
+    assert result.sample_profile.evidence_ids == ["evidence-0001"]
 
 
 def test_prompt_describes_single_joint_request_and_candidate_keys_are_stable() -> None:
