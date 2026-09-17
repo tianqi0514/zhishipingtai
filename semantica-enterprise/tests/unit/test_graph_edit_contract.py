@@ -53,6 +53,7 @@ def test_graph_workspace_uses_local_3d_renderer_and_real_crud() -> None:
 
 
 def test_writing_graph_canvas_fills_stage_and_explains_layers() -> None:
+    html = (ROOT / "apps/api/static/index.html").read_text(encoding="utf-8")
     javascript = (ROOT / "apps/api/static/app.js").read_text(encoding="utf-8")
     stylesheet = (ROOT / "apps/api/static/style.css").read_text(encoding="utf-8")
     graph_renderer = (ROOT / "apps/api/static/graph3d.js").read_text(encoding="utf-8")
@@ -66,3 +67,4 @@ def test_writing_graph_canvas_fills_stage_and_explains_layers() -> None:
     assert "color:item.color" in javascript
     assert "color: item.color || colorForType(item.type)" in graph_renderer
     assert "const edgeColor = edge.color" in graph_renderer
+    assert html.count("20260917-writing-graph-layout") == 3
