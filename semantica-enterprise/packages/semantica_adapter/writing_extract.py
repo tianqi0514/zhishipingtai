@@ -126,6 +126,34 @@ class JointWritingExtraction(StrictModel):
     sample_profile: SampleProfileCandidate | None = None
     ambiguities: list[str] = Field(default_factory=list, max_length=100)
 
+    @field_validator("ambiguities", mode="before")
+    @classmethod
+    def normalize_ambiguities(cls, value: Any) -> list[str]:
+        """Preserve explanatory ambiguity objects without weakening facts.
+
+        Some OpenAI-compatible models consistently express an ambiguity as a
+        small JSON object (field/reason/evidence_ids) despite the requested
+        string contract.  Ambiguities are advisory text and are not promoted
+        to facts or relations, so serialize only that display field while the
+        authoritative extraction models remain strict and ``extra=forbid``.
+        """
+
+        if value is None or value == "":
+            return []
+        if not isinstance(value, list):
+            raise ValueError("ambiguities 必须是数组")
+        normalized: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, dict):
+                text = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            else:
+                raise ValueError("ambiguities 仅支持文本或说明对象")
+            if text:
+                normalized.append(text)
+        return normalized
+
     @model_validator(mode="after")
     def sample_does_not_mix_business_facts(self) -> "JointWritingExtraction":
         return self

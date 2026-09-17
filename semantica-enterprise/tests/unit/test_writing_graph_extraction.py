@@ -93,6 +93,22 @@ def test_joint_extraction_rejects_extra_fields() -> None:
         })
 
 
+def test_joint_extraction_preserves_structured_ambiguities_as_advisory_text() -> None:
+    result = JointWritingExtraction.model_validate({
+        "entities": [], "claims": [], "relations": [], "metrics": [],
+        "sample_profile": None,
+        "ambiguities": [{
+            "field": "metrics[0].unit",
+            "reason": "原表使用合并表头，单位需人工确认",
+            "evidence_ids": ["evidence-0001"],
+        }],
+    })
+    assert result.ambiguities == [
+        '{"evidence_ids": ["evidence-0001"], "field": "metrics[0].unit", '
+        '"reason": "原表使用合并表头，单位需人工确认"}'
+    ]
+
+
 def test_scope_text_is_deterministically_normalized_but_other_types_are_rejected() -> None:
     result = JointWritingExtraction.model_validate({
         "entities": [], "claims": [], "relations": [],
