@@ -856,8 +856,71 @@ function renderGraphInspector(selection,spaceId,entities,facts){
   }
 }
 function graphModeTabs(mode='knowledge'){return `<nav class="curation-tabs graph-mode-tabs"><button data-graph-mode="knowledge" class="${mode==='knowledge'?'active':''}">知识图谱</button><button data-graph-mode="writing" class="${mode==='writing'?'active':''}">写作图谱</button></nav>`}
+const WRITING_GRAPH_NODE_LEGEND={entity:['实体 Entity','#2878d0'],evidence:['依据 Evidence','#7a55c7'],claim:['陈述 Claim','#df7a23'],fact:['事实 Fact','#239b69'],relation:['关系断言 Relation','#1199a6'],metric:['指标 / 计算','#c58b00'],inferred_fact:['推演事实','#9a3fc1'],historical:['历史失效','#87909c']};
+const WRITING_GRAPH_EDGE_LEGEND={relation:['业务关系','#1199a6'],evidence_claim:['依据支持陈述','#8b6bd1'],claim_fact:['陈述核验成事实','#df7a23'],fact_entity:['事实关联实体','#239b69'],fact_relation:['事实投影为关系','#1199a6']};
+function writingGraphLegend(graph){const nodes=graph.nodes||[],edges=graph.edges||[],nodeTypes=[...new Set(nodes.map(item=>item.type))],edgeTypes=[...new Set(edges.map(item=>item.type||'relation'))];const rows=(types,definitions,items,sampleClass='')=>types.map(type=>{const definition=definitions[type]||[type,(sampleClass?'#66788a':'#87909c')],count=items.filter(item=>(item.type||'relation')===type).length;return `<span><i class="${sampleClass}" style="--legend-color:${esc(definition[1])}"></i>${esc(definition[0])}<em>${count}</em></span>`}).join('');return `<aside class="writing-graph-legend" aria-label="写作图谱图例"><section><strong>节点层级</strong>${rows(nodeTypes,WRITING_GRAPH_NODE_LEGEND,nodes)}</section>${edgeTypes.length?`<section><strong>关系线</strong>${rows(edgeTypes,WRITING_GRAPH_EDGE_LEGEND,edges,'edge')}</section>`:''}</aside>`}
 function writingGraphInspector(selection,graph){const panel=$('#writing-graph-inspector');if(!selection){panel.innerHTML='<div class="graph-inspector-empty"><span class="graph-orbit-icon">◎</span><b>选择节点或关系</b><small>查看类型、状态和来源链路</small></div>';return}const source=selection.kind==='node'?graph.nodes.find(item=>item.id===selection.id):graph.edges.find(item=>item.id===selection.id);if(!source)return;const snapshot=Object.values(graph.release?.items||{}).flat().find(item=>item.id===source.id);panel.innerHTML=`<div class="graph-inspector-head"><span class="graph-type-dot" style="background:${esc(source.color||'#2878d0')}"></span><div><small>${esc(source.type||'relation')}</small><h3>${esc(source.label||'—')}</h3></div></div><div class="graph-detail-grid"><span>状态</span><b>${esc(source.status||snapshot?.verification_status||'已发布')}</b><span>对象 ID</span><code>${esc(source.id)}</code>${snapshot?.filename?`<span>来源文件</span><b>${esc(snapshot.filename)}</b>`:''}${snapshot?.locator?.page?`<span>页码</span><b>第 ${snapshot.locator.page} 页</b>`:''}</div>${snapshot?.text?`<div class="writing-evidence-card"><p>${esc(snapshot.text)}</p></div>`:''}`}
-async function renderWritingGraph(spaceId){actions();const releases=await api(`/writing-graph/releases?space_id=${encodeURIComponent(spaceId)}`);if(!releases.length){page('知识图谱',`${graphModeTabs('writing')}<section class="panel journey-empty graph-empty"><span class="journey-empty-icon">写</span><h3>还没有已发布写作图谱</h3><div><button data-writing-governance>进入写作知识治理</button></div></section>`,'graph-page');$('[data-writing-governance]').onclick=()=>{state.curationTab='writing';go('curation')};$$('[data-graph-mode]').forEach(button=>button.onclick=()=>{state.knowledgeGraphMode=button.dataset.graphMode;renderKnowledge()});return}const selected=releases.find(item=>item.id===state.writingGraphReleaseId)||releases[0];state.writingGraphReleaseId=selected.id;const view=state.writingGraphView||'business',graph=await api(`/writing-graph/releases/${encodeURIComponent(selected.id)}/graph?view=${encodeURIComponent(view)}`),legend={entity:'实体',evidence:'依据',claim:'陈述',fact:'事实',relation:'关系'};page('知识图谱',`${graphModeTabs('writing')}<div class="graph-readiness"><span>当前知识空间 <b>${esc(currentSpace()?.name||'—')}</b></span>${selectField('writing_graph_release','写作图谱版本',releases.map(item=>[item.id,`R${item.release_number} · ${fmtDate(item.published_at)}`]),selected.id)}<div class="query-mode-switch"><button data-writing-graph-view="business" class="${view==='business'?'active':''}">业务关系</button><button data-writing-graph-view="evidence" class="${view==='evidence'?'active':''}">事实依据</button></div></div><section class="graph-workbench"><div class="graph-toolbar"><div class="graph-search"><input id="writing-graph-search" placeholder="搜索并定位节点"><button id="writing-graph-locate">定位</button></div><div class="graph-camera-tools"><button id="writing-graph-reset" class="secondary">适配</button></div></div><div class="graph-metrics"><span><b>${graph.nodes.length}</b> 节点</span><span><b>${graph.edges.length}</b> 连线</span><span><b>R${selected.release_number}</b> 当前版本</span></div><div class="graph-body"><div class="graph-stage"><canvas id="writing-graph-canvas" tabindex="0" aria-label="写作图谱"></canvas><div class="graph-hint">拖拽旋转 · 滚轮缩放 · 点击查看依据</div><div class="graph-legend">${[...new Set(graph.nodes.map(item=>item.type))].map(type=>`<span><i style="background:${esc(graph.nodes.find(item=>item.type===type)?.color||'#87909c')}"></i>${esc(legend[type]||type)}</span>`).join('')}</div></div><aside id="writing-graph-inspector" class="graph-inspector"></aside></div></section>`,'graph-page');const canvas=$('#writing-graph-canvas');state.graph3d=new window.KnowledgeGraph3D(canvas,{nodes:graph.nodes.map(item=>({id:item.id,label:item.label,type:item.type})),edges:graph.edges.map(item=>({id:item.id,source:item.source,target:item.target,label:item.label,inferred:item.type==='inferred_fact'}))},{onSelect:selection=>writingGraphInspector(selection,graph)});writingGraphInspector(null,graph);$('#writing-graph-locate').onclick=()=>{if(!state.graph3d.focusByQuery($('#writing-graph-search').value))toast('未找到匹配节点',true)};$('#writing-graph-reset').onclick=()=>state.graph3d.resetView();$('[name=writing_graph_release]').onchange=e=>{state.writingGraphReleaseId=e.target.value;renderKnowledge()};$$('[data-writing-graph-view]').forEach(button=>button.onclick=()=>{state.writingGraphView=button.dataset.writingGraphView;renderKnowledge()});$$('[data-graph-mode]').forEach(button=>button.onclick=()=>{state.knowledgeGraphMode=button.dataset.graphMode;renderKnowledge()})}
+async function renderWritingGraph(spaceId){
+  actions();
+  const releases=await api(`/writing-graph/releases?space_id=${encodeURIComponent(spaceId)}`);
+  if(!releases.length){
+    page('知识图谱',`${graphModeTabs('writing')}<section class="panel journey-empty graph-empty"><span class="journey-empty-icon">写</span><h3>还没有已发布写作图谱</h3><div><button data-writing-governance>进入写作知识治理</button></div></section>`,'graph-page');
+    $('[data-writing-governance]').onclick=()=>{state.curationTab='writing';go('curation')};
+    $$('[data-graph-mode]').forEach(button=>button.onclick=()=>{state.knowledgeGraphMode=button.dataset.graphMode;renderKnowledge()});
+    return;
+  }
+  const selected=releases.find(item=>item.id===state.writingGraphReleaseId)||releases[0];
+  state.writingGraphReleaseId=selected.id;
+  const view=state.writingGraphView||'business';
+  const graph=await api(`/writing-graph/releases/${encodeURIComponent(selected.id)}/graph?view=${encodeURIComponent(view)}`);
+  page('知识图谱',`${graphModeTabs('writing')}
+    <div class="graph-readiness">
+      <span>当前知识空间 <b>${esc(currentSpace()?.name||'—')}</b></span>
+      ${selectField('writing_graph_release','写作图谱版本',releases.map(item=>[item.id,`R${item.release_number} · ${fmtDate(item.published_at)}`]),selected.id)}
+      <div class="query-mode-switch">
+        <button data-writing-graph-view="business" class="${view==='business'?'active':''}">业务关系</button>
+        <button data-writing-graph-view="evidence" class="${view==='evidence'?'active':''}">事实依据</button>
+      </div>
+    </div>
+    <section class="graph-workbench writing-graph-workbench">
+      <div class="graph-toolbar">
+        <div class="graph-search"><input id="writing-graph-search" placeholder="搜索并定位节点"><button id="writing-graph-locate">定位</button></div>
+        <div class="graph-camera-tools">
+          <button id="writing-graph-zoom-out" class="secondary" title="缩小">−</button>
+          <button id="writing-graph-zoom-in" class="secondary" title="放大">＋</button>
+          <button id="writing-graph-reset" class="secondary">适配</button>
+          <button id="writing-graph-rotate" class="secondary active">旋转</button>
+        </div>
+      </div>
+      <div class="graph-metrics"><span><b>${graph.nodes.length}</b> 节点</span><span><b>${graph.edges.length}</b> 连线</span><span><b>R${selected.release_number}</b> 当前版本</span></div>
+      <div class="graph-body writing-graph-body">
+        <div class="graph-stage writing-graph-stage">
+          <canvas id="writing-graph-canvas" tabindex="0" aria-label="写作图谱，可拖拽旋转、滚轮缩放、点击查看依据"></canvas>
+          ${writingGraphLegend(graph)}
+          <div class="graph-hint">拖拽旋转 · 滚轮缩放 · 点击查看依据</div>
+        </div>
+        <aside id="writing-graph-inspector" class="graph-inspector"></aside>
+      </div>
+    </section>`,'graph-page');
+  const canvas=$('#writing-graph-canvas');
+  state.graph3d=new window.KnowledgeGraph3D(canvas,{
+    nodes:graph.nodes.map(item=>({id:item.id,label:item.label,type:item.type,color:item.color,status:item.status})),
+    edges:graph.edges.map(item=>({
+      id:item.id,source:item.source,target:item.target,label:item.label,type:item.type||'relation',
+      color:item.color,status:item.status,inferred:item.type==='inferred_fact',
+      dashed:['candidate','conflicted','stale','superseded'].includes(item.status)
+    }))
+  },{onSelect:selection=>writingGraphInspector(selection,graph)});
+  writingGraphInspector(null,graph);
+  $('#writing-graph-locate').onclick=()=>{if(!state.graph3d.focusByQuery($('#writing-graph-search').value))toast('未找到匹配节点',true)};
+  $('#writing-graph-zoom-out').onclick=()=>state.graph3d.zoomBy(.84);
+  $('#writing-graph-zoom-in').onclick=()=>state.graph3d.zoomBy(1.18);
+  $('#writing-graph-reset').onclick=()=>state.graph3d.resetView();
+  $('#writing-graph-rotate').onclick=event=>{const enabled=state.graph3d.toggleAutoRotate();event.currentTarget.classList.toggle('active',enabled)};
+  $('[name=writing_graph_release]').onchange=event=>{state.writingGraphReleaseId=event.target.value;renderKnowledge()};
+  $$('[data-writing-graph-view]').forEach(button=>button.onclick=()=>{state.writingGraphView=button.dataset.writingGraphView;renderKnowledge()});
+  $$('[data-graph-mode]').forEach(button=>button.onclick=()=>{state.knowledgeGraphMode=button.dataset.graphMode;renderKnowledge()});
+}
 async function renderKnowledge(selected){
   if(state.graph3d){state.graph3d.destroy();state.graph3d=null}
   actions();await refreshLookups();const spaceId=currentSpaceId();

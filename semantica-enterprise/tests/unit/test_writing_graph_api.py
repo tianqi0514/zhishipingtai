@@ -154,6 +154,9 @@ def test_governance_release_and_two_graph_views_are_real() -> None:
         assert {item["type"] for item in evidence.json()["nodes"]} >= {
             "evidence", "claim", "fact", "entity", "relation",
         }
+        edge_types = {item["type"] for item in evidence.json()["edges"]}
+        assert edge_types >= {"evidence_claim", "claim_fact", "fact_entity", "fact_relation"}
+        assert all(item.get("color", "").startswith("#") for item in evidence.json()["edges"])
 
 
 def test_writing_graph_endpoints_enforce_space_permission() -> None:

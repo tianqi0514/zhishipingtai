@@ -10,6 +10,14 @@
   };
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
+  function rgba(color, alpha) {
+    const value = String(color || '').trim().replace(/^#/, '');
+    const hex = value.length === 3 ? value.split('').map(char => `${char}${char}`).join('') : value;
+    if (!/^[0-9a-f]{6}$/i.test(hex)) return color;
+    const number = Number.parseInt(hex, 16);
+    return `rgba(${(number >> 16) & 255},${(number >> 8) & 255},${number & 255},${alpha})`;
+  }
+
   function colorForType(type) {
     if (TYPE_COLORS[type]) return TYPE_COLORS[type];
     const palette = ['#50d2b6', '#7fb4ff', '#ffbd66', '#d49bff', '#71df8b', '#ff7d8f', '#55c5e8'];
@@ -44,7 +52,7 @@
         const radius = 115 + 150 * seedFor(item.id);
         const z = (seedFor(`${item.id}:z`) - .5) * 300;
         return {
-          ...item, color: colorForType(item.type), degree: 0,
+          ...item, color: item.color || colorForType(item.type), degree: 0,
           x: Math.cos(angle) * radius, y: Math.sin(angle) * radius, z,
           vx: 0, vy: 0, vz: 0
         };
@@ -190,12 +198,13 @@
       const contextual = this.selected?.kind === 'node' && (edge.source === this.selected.id || edge.target === this.selected.id);
       const active = selected || hovered || contextual;
       const ctx = this.ctx;
+      const edgeColor = edge.color || (edge.inferred ? '#9a3fc1' : '#557482');
       const gradient = ctx.createLinearGradient(source.x, source.y, target.x, target.y);
-      gradient.addColorStop(0, active ? 'rgba(8,125,109,.94)' : 'rgba(72,103,116,.42)');
-      gradient.addColorStop(1, active ? 'rgba(52,118,201,.9)' : 'rgba(72,103,116,.28)');
+      gradient.addColorStop(0, rgba(edgeColor, active ? .96 : .56));
+      gradient.addColorStop(1, rgba(edgeColor, active ? .78 : .3));
       ctx.beginPath(); ctx.moveTo(source.x, source.y); ctx.lineTo(target.x, target.y);
-      ctx.setLineDash(edge.inferred ? [6, 4] : []);
-      ctx.strokeStyle = edge.inferred ? (active ? '#7a4bc2' : 'rgba(122,75,194,.58)') : gradient; ctx.lineWidth = active ? 2.2 : 1; ctx.stroke();
+      ctx.setLineDash(edge.inferred || edge.dashed ? [6, 4] : []);
+      ctx.strokeStyle = gradient; ctx.lineWidth = active ? 2.4 : 1.25; ctx.stroke();
       ctx.setLineDash([]);
       const angle = Math.atan2(target.y - source.y, target.x - source.x);
       const radius = target.radius || 8;
@@ -203,15 +212,15 @@
       ctx.beginPath(); ctx.moveTo(ax, ay);
       ctx.lineTo(ax - Math.cos(angle - .48) * (active ? 9 : 6), ay - Math.sin(angle - .48) * (active ? 9 : 6));
       ctx.lineTo(ax - Math.cos(angle + .48) * (active ? 9 : 6), ay - Math.sin(angle + .48) * (active ? 9 : 6));
-      ctx.closePath(); ctx.fillStyle = edge.inferred ? '#7a4bc2' : active ? '#087d6d' : 'rgba(72,103,116,.58)'; ctx.fill();
+      ctx.closePath(); ctx.fillStyle = rgba(edgeColor, active ? 1 : .72); ctx.fill();
       if (active || this.edges.length < 18) {
         const mx = (source.x + target.x) / 2, my = (source.y + target.y) / 2;
         ctx.font = `${active ? 12 : 10}px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif`;
         const width = ctx.measureText(edge.label).width + 12;
         ctx.fillStyle = active ? 'rgba(231,246,242,.98)' : 'rgba(255,255,255,.9)';
         ctx.beginPath(); ctx.roundRect(mx - width / 2, my - 10, width, 19, 8); ctx.fill();
-        ctx.strokeStyle = active ? 'rgba(8,125,109,.4)' : 'rgba(86,109,119,.18)'; ctx.lineWidth = 1; ctx.stroke();
-        ctx.fillStyle = active ? '#075f54' : '#526774'; ctx.textAlign = 'center'; ctx.fillText(edge.label, mx, my + 4);
+        ctx.strokeStyle = active ? rgba(edgeColor, .5) : rgba(edgeColor, .22); ctx.lineWidth = 1; ctx.stroke();
+        ctx.fillStyle = active ? edgeColor : '#526774'; ctx.textAlign = 'center'; ctx.fillText(edge.label, mx, my + 4);
       }
     }
 

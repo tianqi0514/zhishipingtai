@@ -313,18 +313,46 @@ def release_graph(
     for claim in items["claim"]:
         for evidence_id in claim.get("evidence_ids") or []:
             if evidence_id in known:
-                edges.append({"id": f"{evidence_id}:{claim['id']}", "source": evidence_id, "target": claim["id"], "label": "支持"})
+                edges.append({
+                    "id": f"{evidence_id}:{claim['id']}",
+                    "source": evidence_id,
+                    "target": claim["id"],
+                    "label": "支持",
+                    "type": "evidence_claim",
+                    "color": "#8b6bd1",
+                })
     for fact in items["fact"]:
         for claim_id in fact.get("claim_ids") or []:
             if claim_id in known:
-                edges.append({"id": f"{claim_id}:{fact['id']}", "source": claim_id, "target": fact["id"], "label": "核验形成"})
+                edges.append({
+                    "id": f"{claim_id}:{fact['id']}",
+                    "source": claim_id,
+                    "target": fact["id"],
+                    "label": "核验形成",
+                    "type": "claim_fact",
+                    "color": "#df7a23",
+                })
         for entity_id, label in (
             (fact.get("subject_candidate_id") or fact.get("subject_entity_id"), "主体"),
             (fact.get("object_candidate_id") or fact.get("object_entity_id"), "客体"),
         ):
             if entity_id in known:
-                edges.append({"id": f"{fact['id']}:{entity_id}:{label}", "source": fact["id"], "target": entity_id, "label": label})
+                edges.append({
+                    "id": f"{fact['id']}:{entity_id}:{label}",
+                    "source": fact["id"],
+                    "target": entity_id,
+                    "label": label,
+                    "type": "fact_entity",
+                    "color": "#239b69",
+                })
     for relation in items["relation"]:
         if relation.get("fact_id") in known:
-            edges.append({"id": f"{relation['fact_id']}:{relation['id']}", "source": relation["fact_id"], "target": relation["id"], "label": "投影"})
+            edges.append({
+                "id": f"{relation['fact_id']}:{relation['id']}",
+                "source": relation["fact_id"],
+                "target": relation["id"],
+                "label": "投影",
+                "type": "fact_relation",
+                "color": "#1199a6",
+            })
     return {"release": payload, "view": view, "nodes": nodes, "edges": edges}
