@@ -250,17 +250,18 @@ def test_output_budget_is_bounded_by_source_size_and_operator_ceiling() -> None:
     assert writing_output_token_budget(long, 1024) == 1024
 
 
-def test_joint_extraction_rejects_unbounded_candidate_expansion() -> None:
+def test_joint_extraction_deterministically_bounds_candidate_expansion() -> None:
     candidate = {
         "mention_text": "对象", "canonical_name": "对象", "entity_type": "其他",
         "evidence_ids": ["evidence-0001"], "confidence": 0.9,
     }
-    with pytest.raises(ValidationError, match="合计不能超过12项"):
-        JointWritingExtraction.model_validate({
-            "entities": [candidate for _ in range(13)],
-            "claims": [], "relations": [], "metrics": [],
-            "sample_profile": None, "ambiguities": [],
-        })
+    result = JointWritingExtraction.model_validate({
+        "entities": [candidate for _ in range(13)],
+        "claims": [], "relations": [], "metrics": [],
+        "sample_profile": None, "ambiguities": [],
+    })
+    assert len(result.entities) == 4
+    assert "原始 Evidence 人工补充" in result.ambiguities[0]
 
 
 def test_model_json_repairs_missing_comma_but_keeps_exact_contract() -> None:

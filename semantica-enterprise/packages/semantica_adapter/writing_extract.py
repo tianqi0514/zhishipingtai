@@ -126,6 +126,54 @@ class JointWritingExtraction(StrictModel):
     sample_profile: SampleProfileCandidate | None = None
     ambiguities: list[str] = Field(default_factory=list, max_length=100)
 
+    @model_validator(mode="before")
+    @classmethod
+    def bound_candidate_payload(cls, value: Any) -> Any:
+        """Bound complete model output without inventing or rewriting facts.
+
+        Private models may ignore the requested candidate limit. Keeping a
+        deterministic prefix is safer than repeatedly asking the model to
+        rewrite values: signed Evidence remains intact and governance receives
+        an explicit warning that more candidates can be added from the source.
+        """
+
+        if not isinstance(value, dict):
+            return value
+        bounded = dict(value)
+        limits = {"entities": 4, "claims": 4, "relations": 3, "metrics": 5}
+        original_counts: dict[str, int] = {}
+        for key, limit in limits.items():
+            items = bounded.get(key)
+            if isinstance(items, list):
+                original_counts[key] = len(items)
+                bounded[key] = list(items[:limit])
+        total = sum(len(bounded.get(key) or []) for key in limits)
+        # The prompt asks the model to order important items first. Remove
+        # remaining overflow from the least authoritative category first while
+        # retaining one candidate from each non-empty category where possible.
+        while total > 12:
+            removed = False
+            for key in ("entities", "relations", "claims", "metrics"):
+                items = bounded.get(key)
+                if isinstance(items, list) and len(items) > 1:
+                    items.pop()
+                    total -= 1
+                    removed = True
+                    if total <= 12:
+                        break
+            if not removed:
+                break
+        retained_counts = {key: len(bounded.get(key) or []) for key in limits}
+        if any(retained_counts[key] < original_counts.get(key, 0) for key in limits):
+            notes = list(bounded.get("ambiguities") or [])
+            if len(notes) < 3:
+                notes.append(
+                    "模型返回候选超过单个 Evidence 上限；已按写作优先级保留前12项，"
+                    "其余内容仍可从原始 Evidence 人工补充。"
+                )
+            bounded["ambiguities"] = notes[:3]
+        return bounded
+
     @field_validator("ambiguities", mode="before")
     @classmethod
     def normalize_ambiguities(cls, value: Any) -> list[str]:
