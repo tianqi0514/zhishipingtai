@@ -321,6 +321,57 @@ def test_sample_style_is_extracted_once_with_document_level_context() -> None:
     assert db.scalar(select(WritingFact)) is None
 
 
+def test_large_sample_profile_is_bounded_and_deterministically_merged() -> None:
+    db, _tenant, user, _space, document, version = graph_fixture()
+    chunk = db.scalar(select(Chunk).where(Chunk.version_id == version.id))
+    chunk.text = "\n\n".join(
+        f"{index} 第{index}部分\n" + (f"第{index}部分的正式写作结构说明。" * 45)
+        for index in range(1, 13)
+    )
+    chunk.content_hash = "1" * 64
+    db.commit()
+    calls: list[str] = []
+
+    def generator(prompt: str) -> dict:
+        calls.append(prompt)
+        evidence_ids = re.findall(r'"evidence_id":\s*"([^"]+)"', prompt)
+        ordinal = len(calls)
+        return {
+            "entities": [], "claims": [], "relations": [], "metrics": [],
+            "sample_profile": {
+                "document_type": "应急方案", "target_audience": "管理人员",
+                "chapters": [{
+                    "title": f"第{ordinal}批章节", "responsibility": "说明本批结构",
+                    "level": 1,
+                }],
+                "style": {f"batch_{ordinal}": "正式"},
+                "table_patterns": [f"表{ordinal}"], "attachment_patterns": [],
+                "evidence_ids": evidence_ids[:20],
+            },
+            "ambiguities": [],
+        }
+
+    metrics = process_writing_graph_version(
+        db,
+        document=document,
+        version=version,
+        model_config_id="model",
+        api_key="unused",
+        model="test",
+        base_url=None,
+        actor_id=user.id,
+        generator=generator,
+        material_role="sample_style",
+        concurrency=2,
+    )
+    db.commit()
+    assert 1 < len(calls) < 20
+    assert all(prompt.count('"evidence_id"') <= 20 for prompt in calls)
+    assert metrics["sample_profiles"] == 1
+    assert len(metrics["sample_profile"]["chapters"]) == len(calls)
+    assert len(metrics["sample_profile"]["evidence_ids"]) > 1
+
+
 def test_repeated_metric_merges_evidence_without_duplicate_fact_version() -> None:
     db, _tenant, user, _space, document, version = graph_fixture()
     chunk = db.scalar(select(Chunk).where(Chunk.version_id == version.id))

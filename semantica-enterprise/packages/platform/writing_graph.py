@@ -295,6 +295,41 @@ def evidence_batches(
     return batches
 
 
+def merge_sample_profiles(
+    current: dict[str, Any] | None,
+    incoming: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Deterministically combine bounded sample-profile responses.
+
+    Large samples cannot fit in one local-model context window.  The model
+    extracts independent source windows; the platform owns de-duplication and
+    ordering so no second model call invents a document-wide profile.
+    """
+
+    if not incoming:
+        return current
+    if not current:
+        return json.loads(json.dumps(incoming, ensure_ascii=False, default=str))
+    merged = dict(current)
+    for key in ("document_type", "target_audience"):
+        if not merged.get(key) and incoming.get(key):
+            merged[key] = incoming[key]
+    merged["style"] = {**(incoming.get("style") or {}), **(merged.get("style") or {})}
+    for key in ("chapters", "table_patterns", "attachment_patterns", "evidence_ids"):
+        values = list(merged.get(key) or [])
+        seen = {
+            canonical_json(value) if isinstance(value, dict) else str(value)
+            for value in values
+        }
+        for value in incoming.get(key) or []:
+            signature = canonical_json(value) if isinstance(value, dict) else str(value)
+            if signature not in seen:
+                values.append(value)
+                seen.add(signature)
+        merged[key] = values
+    return merged
+
+
 def _next_fact_version(db: Session, space_id: str, fact_key: str) -> int:
     return int(db.scalar(select(func.max(WritingFact.version)).where(
         WritingFact.space_id == space_id,
@@ -671,8 +706,9 @@ def process_writing_graph_version(
     for run in successful_runs:
         for key in totals:
             totals[key] += int((run.metrics or {}).get(key) or 0)
-        if (run.metrics or {}).get("sample_profile"):
-            sample_profile = dict(run.metrics["sample_profile"])
+        sample_profile = merge_sample_profiles(
+            sample_profile, (run.metrics or {}).get("sample_profile"),
+        )
     pending_evidence = [item for item in evidence if item.id not in covered_evidence_ids]
     prepared: list[tuple[WritingExtractionRun, list[WritingEvidence]]] = []
     # A sample profile is document-level: its headings, audience and style can
@@ -680,8 +716,8 @@ def process_writing_graph_version(
     # loses that context and turns a short sample into hundreds of model calls.
     # Business materials stay atomically batched for precise Fact provenance.
     pending_batches = (
-        [pending_evidence]
-        if material_role == "sample_style" and pending_evidence
+        evidence_batches(pending_evidence, target_chars=4500, max_items=20)
+        if material_role == "sample_style"
         else evidence_batches(pending_evidence)
     )
     for batch in pending_batches:
@@ -785,8 +821,9 @@ def process_writing_graph_version(
             run.finished_at = utcnow()
             for key in totals:
                 totals[key] += int(metrics.get(key) or 0)
-            if metrics.get("sample_profile"):
-                sample_profile = dict(metrics["sample_profile"])
+            sample_profile = merge_sample_profiles(
+                sample_profile, metrics.get("sample_profile"),
+            )
         except Exception as exc:
             run.status = "failed"
             run.error_code = "WRITING_EXTRACTION_FAILED"
@@ -798,6 +835,7 @@ def process_writing_graph_version(
     return {
         "evidence": len(evidence),
         **totals,
+        "sample_profiles": int(sample_profile is not None),
         **({"sample_profile": sample_profile} if sample_profile else {}),
         "model_requests": requests,
         "reused_batches": reused,
