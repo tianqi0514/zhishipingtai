@@ -55,6 +55,36 @@ def test_joint_extraction_accepts_only_signed_evidence() -> None:
     assert result.metrics[0].unit == "人"
 
 
+def test_joint_extraction_retries_one_malformed_structured_response() -> None:
+    prompts: list[str] = []
+
+    def generator(prompt: str) -> dict:
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise RuntimeError(
+                "Failed to parse JSON from OpenAI response: "
+                "Expecting ',' delimiter"
+            )
+        return {
+            "entities": [], "claims": [], "relations": [], "metrics": [],
+            "sample_profile": None, "ambiguities": [],
+        }
+
+    result = extract_writing_knowledge(
+        EVIDENCE,
+        material_role="task_data",
+        api_key="unused",
+        model="test",
+        base_url=None,
+        max_retries=1,
+        generator=generator,
+    )
+
+    assert result == JointWritingExtraction()
+    assert len(prompts) == 2
+    assert "纠错重试" in prompts[1]
+
+
 def test_joint_extraction_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError):
         JointWritingExtraction.model_validate({

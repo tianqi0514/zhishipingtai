@@ -261,19 +261,47 @@ def extract_writing_knowledge(
             temperature=_effective_temperature(model, temperature),
             max_tokens=output_budget,
         )
-    raw = generator(prompt)
-    result = JointWritingExtraction.model_validate(raw)
-    _validate_evidence_ids(result, {item.evidence_id for item in normalized})
-    if material_role == "sample_style":
-        if result.entities or result.claims or result.relations or result.metrics:
-            raise ValueError("样稿抽取不得产生本次业务实体、主张、事实或关系")
-        if result.sample_profile is None:
-            raise ValueError("样稿抽取缺少结构与文体画像")
-        if not result.sample_profile.evidence_ids:
-            raise ValueError("样稿结构与文体画像缺少来源依据")
-    elif result.sample_profile is not None:
-        raise ValueError("业务材料抽取不得混入样稿画像")
-    return result
+    # OpenAI-compatible private models do not all honour ``response_format``.
+    # A successful HTTP response can therefore still contain truncated or
+    # malformed JSON.  Transport retries cannot repair that response, so make
+    # one bounded schema-aware retry with an explicit correction instruction.
+    # The operation is side-effect free; persistence only happens after this
+    # function returns a fully validated object.
+    attempts = max(1, min(int(max_retries) + 1, 3))
+    current_prompt = prompt
+    for attempt in range(attempts):
+        try:
+            raw = generator(current_prompt)
+            result = JointWritingExtraction.model_validate(raw)
+            _validate_evidence_ids(result, {item.evidence_id for item in normalized})
+            if material_role == "sample_style":
+                if result.entities or result.claims or result.relations or result.metrics:
+                    raise ValueError("样稿抽取不得产生本次业务实体、主张、事实或关系")
+                if result.sample_profile is None:
+                    raise ValueError("样稿抽取缺少结构与文体画像")
+                if not result.sample_profile.evidence_ids:
+                    raise ValueError("样稿结构与文体画像缺少来源依据")
+            elif result.sample_profile is not None:
+                raise ValueError("业务材料抽取不得混入样稿画像")
+            return result
+        except Exception as exc:
+            message = str(exc).casefold()
+            invalid_structured_output = isinstance(exc, ValueError) or any(
+                marker in message
+                for marker in (
+                    "invalid json", "failed to parse json", "validation error",
+                    "未签发", "不得产生", "缺少结构与文体画像", "不得混入",
+                )
+            )
+            if not invalid_structured_output or attempt + 1 >= attempts:
+                raise
+            current_prompt = (
+                prompt
+                + "\n\n纠错重试：上一轮输出不是可校验的完整 JSON。"
+                + "请从原始 Evidence 重新抽取，只输出一个完整、紧凑、单行 JSON 对象；"
+                + "不得输出 Markdown、解释或未签发的 Evidence ID，且不得省略顶层键。"
+            )
+    raise AssertionError("unreachable")
 
 
 def candidate_key(*parts: Any) -> str:
