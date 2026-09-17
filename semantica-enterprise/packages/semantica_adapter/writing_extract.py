@@ -156,6 +156,13 @@ class JointWritingExtraction(StrictModel):
 
     @model_validator(mode="after")
     def sample_does_not_mix_business_facts(self) -> "JointWritingExtraction":
+        candidate_count = (
+            len(self.entities) + len(self.claims) + len(self.relations) + len(self.metrics)
+        )
+        if candidate_count > 12:
+            raise ValueError("单个 Evidence 的写作知识候选合计不能超过12项")
+        if len(self.ambiguities) > 3:
+            raise ValueError("单个 Evidence 的歧义说明不能超过3项")
         return self
 
 
@@ -200,9 +207,10 @@ def writing_extraction_prompt(
 6. aliases 只保存原文实际出现或同一批次明确说明的别名。
 7. 输出严格满足以下顶层键，不能增加字段：entities、claims、relations、metrics、sample_profile、ambiguities。
 8. 输出紧凑 JSON；空值或默认值字段可以省略，同义实体和同义陈述必须合并，禁止复述原文。
-9. 单个 Evidence 总计最多输出8个实体、8个Claim、6条关系、8个指标；只保留对专业写作有用且原文明确表达的原子知识。
+9. 单个 Evidence 的 entities、claims、relations、metrics 四个数组合计最多12项；同时 entities 最多4项、claims 最多4项、relations 最多3项、metrics 最多5项。必须优先保留数值指标、关键陈述和核心业务对象。
 10. metrics 只列原文明确出现的数值指标；数值已经进入 metrics 时不要在 claims 中重复。relations 只列实体到实体的关系，不得把数值扩写成关系。
 11. 为避免结构化响应截断，必须输出紧凑单行 JSON。以下有默认值的字段在值为空时应省略：aliases、time_scope、applicable_scope、qualifiers、needs_confirmation、unit、value_type。
+12. ambiguities 最多3项，每项不超过120个汉字，只说明会影响治理的主体、口径、单位或时间歧义。
 
 字段契约（字段名必须逐字一致；禁止使用 id、name、type、source_ids 等替代字段）：
 {{

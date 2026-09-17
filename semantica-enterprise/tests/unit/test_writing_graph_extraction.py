@@ -233,7 +233,8 @@ def test_prompt_describes_single_joint_request_and_candidate_keys_are_stable() -
     assert '"mention_text"' in prompt
     assert '"canonical_name"' in prompt
     assert "字段名必须逐字一致" in prompt
-    assert "最多输出8个实体、8个Claim、6条关系、8个指标" in prompt
+    assert "四个数组合计最多12项" in prompt
+    assert "ambiguities 最多3项" in prompt
     assert candidate_key("a", 1, {"x": True}) == candidate_key("a", 1, {"x": True})
 
 
@@ -247,6 +248,19 @@ def test_output_budget_is_bounded_by_source_size_and_operator_ceiling() -> None:
     long = [evidence_type(evidence_id="evidence-0002", text="事实" * 5000)]
     assert writing_output_token_budget(long, 8192) == 2048
     assert writing_output_token_budget(long, 1024) == 1024
+
+
+def test_joint_extraction_rejects_unbounded_candidate_expansion() -> None:
+    candidate = {
+        "mention_text": "对象", "canonical_name": "对象", "entity_type": "其他",
+        "evidence_ids": ["evidence-0001"], "confidence": 0.9,
+    }
+    with pytest.raises(ValidationError, match="合计不能超过12项"):
+        JointWritingExtraction.model_validate({
+            "entities": [candidate for _ in range(13)],
+            "claims": [], "relations": [], "metrics": [],
+            "sample_profile": None, "ambiguities": [],
+        })
 
 
 def test_model_json_repairs_missing_comma_but_keeps_exact_contract() -> None:
