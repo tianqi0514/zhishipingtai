@@ -216,6 +216,7 @@ def test_prompt_describes_single_joint_request_and_candidate_keys_are_stable() -
     assert '"mention_text"' in prompt
     assert '"canonical_name"' in prompt
     assert "字段名必须逐字一致" in prompt
+    assert "最多输出8个实体、8个Claim、6条关系、8个指标" in prompt
     assert candidate_key("a", 1, {"x": True}) == candidate_key("a", 1, {"x": True})
 
 

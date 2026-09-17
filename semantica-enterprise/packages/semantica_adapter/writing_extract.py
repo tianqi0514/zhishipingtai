@@ -172,7 +172,7 @@ def writing_extraction_prompt(
 6. aliases 只保存原文实际出现或同一批次明确说明的别名。
 7. 输出严格满足以下顶层键，不能增加字段：entities、claims、relations、metrics、sample_profile、ambiguities。
 8. 输出紧凑 JSON；空值或默认值字段可以省略，同义实体和同义陈述必须合并，禁止复述原文。
-9. 单个 Evidence 最多输出12个实体、16个Claim、12条关系、20个指标；只保留对专业写作有用且原文明确表达的原子知识。
+9. 单个 Evidence 总计最多输出8个实体、8个Claim、6条关系、8个指标；只保留对专业写作有用且原文明确表达的原子知识。
 10. metrics 只列原文明确出现的数值指标；数值已经进入 metrics 时不要在 claims 中重复。relations 只列实体到实体的关系，不得把数值扩写成关系。
 11. 为避免结构化响应截断，必须输出紧凑单行 JSON。以下有默认值的字段在值为空时应省略：aliases、time_scope、applicable_scope、qualifiers、needs_confirmation、unit、value_type。
 
@@ -256,11 +256,39 @@ def extract_writing_knowledge(
             # Leave a safety margin for 16k-context local models. A concise
             # structure/style profile does not require the full 2k ceiling.
             output_budget = min(output_budget, 1792)
-        generator = lambda value: provider.generate_structured(
-            value,
-            temperature=_effective_temperature(model, temperature),
-            max_tokens=output_budget,
-        )
+        effective_temperature = _effective_temperature(model, temperature)
+
+        def provider_generator(value: str) -> dict[str, Any]:
+            # Current vLLM/OpenAI-compatible deployments support JSON Object
+            # mode even though not every third-party gateway does.  Prefer it
+            # for the strict writing contract; fall back only when the server
+            # explicitly rejects that request option.
+            if base_url and getattr(provider, "client", None) is not None:
+                try:
+                    response = provider.client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": value}],
+                        response_format={"type": "json_object"},
+                        temperature=effective_temperature,
+                        max_tokens=output_budget,
+                    )
+                    return provider._parse_json(response.choices[0].message.content)
+                except Exception as exc:
+                    status_code = getattr(exc, "status_code", None)
+                    message = str(exc).casefold()
+                    unsupported_json_mode = status_code == 400 and any(
+                        marker in message
+                        for marker in ("response_format", "json_object", "unsupported")
+                    )
+                    if not unsupported_json_mode:
+                        raise
+            return provider.generate_structured(
+                value,
+                temperature=effective_temperature,
+                max_tokens=output_budget,
+            )
+
+        generator = provider_generator
     # OpenAI-compatible private models do not all honour ``response_format``.
     # A successful HTTP response can therefore still contain truncated or
     # malformed JSON.  Transport retries cannot repair that response, so make
