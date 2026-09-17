@@ -130,3 +130,18 @@ def test_ui_explains_graph_extraction_and_mode_on_jobs() -> None:
     assert "加工目标（可多选）" in APP
     for label in ("全文索引", "向量索引", "知识图谱", "写作图谱"):
         assert label in APP
+
+
+def test_ui_uses_explicit_targets_instead_of_legacy_mode_labels() -> None:
+    """A writing-graph-only job uses legacy mode=vector for compatibility.
+
+    The browser must display the authoritative v2 target, not mislabel that
+    compatibility field as "仅检索".
+    """
+
+    assert "const PROCESSING_TARGET_ORDER=['fulltext','vector','graph','writing_graph']" in APP
+    assert "function exactProcessingTargets(payload={})" in APP
+    assert "function jobProcessingTargets(job={})" in APP
+    assert "targets.length?processingTargetsLabel(targets)" in APP
+    assert "<span>加工目标</span>" in APP
+    assert "requestedTargets.length?processingTargetsLabel(requestedTargets)" in APP
