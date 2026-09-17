@@ -241,6 +241,34 @@ def writing_output_token_budget(
     return min(ceiling, max(768, source_chars * 5 + 1024))
 
 
+def _parse_model_json(provider: Any, content: str | None, finish_reason: str | None) -> dict[str, Any]:
+    """Parse one model response, repairing syntax only after a complete reply.
+
+    Repair is intentionally limited to JSON syntax.  A response stopped by a
+    token limit is never repaired because that could turn an incomplete
+    extraction into an apparently successful one.  The repaired object still
+    passes the exact top-level contract, Pydantic ``extra=forbid`` validation,
+    and signed Evidence checks before any candidate is persisted.
+    """
+
+    raw_content = content or ""
+    try:
+        parsed = provider._parse_json(raw_content)
+    except Exception:
+        if str(finish_reason or "").casefold() in {"length", "max_tokens"}:
+            raise ValueError("模型结构化响应因输出上限截断，不能安全修复")
+        from json_repair import loads as repair_json_loads
+
+        parsed = repair_json_loads(raw_content)
+    if not isinstance(parsed, dict):
+        raise ValueError("模型结构化响应必须是 JSON 对象")
+    expected = {"entities", "claims", "relations", "metrics", "sample_profile", "ambiguities"}
+    missing = sorted(expected - set(parsed))
+    if missing:
+        raise ValueError(f"模型结构化响应缺少顶层键：{', '.join(missing)}")
+    return parsed
+
+
 def extract_writing_knowledge(
     evidence: list[WritingEvidenceInput | dict[str, Any]],
     *,
@@ -300,7 +328,12 @@ def extract_writing_knowledge(
                         temperature=effective_temperature,
                         max_tokens=output_budget,
                     )
-                    return provider._parse_json(response.choices[0].message.content)
+                    choice = response.choices[0]
+                    return _parse_model_json(
+                        provider,
+                        choice.message.content,
+                        getattr(choice, "finish_reason", None),
+                    )
                 except Exception as exc:
                     status_code = getattr(exc, "status_code", None)
                     message = str(exc).casefold()

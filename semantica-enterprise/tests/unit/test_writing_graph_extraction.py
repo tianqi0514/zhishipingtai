@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from packages.semantica_adapter.writing_extract import (
     JointWritingExtraction,
+    _parse_model_json,
     candidate_key,
     extract_writing_knowledge,
     writing_extraction_prompt,
@@ -246,3 +247,35 @@ def test_output_budget_is_bounded_by_source_size_and_operator_ceiling() -> None:
     long = [evidence_type(evidence_id="evidence-0002", text="事实" * 5000)]
     assert writing_output_token_budget(long, 8192) == 2048
     assert writing_output_token_budget(long, 1024) == 1024
+
+
+def test_model_json_repairs_missing_comma_but_keeps_exact_contract() -> None:
+    class Provider:
+        @staticmethod
+        def _parse_json(value: str) -> dict:
+            import json
+
+            return json.loads(value)
+
+    malformed = (
+        '{"entities":[] "claims":[],"relations":[],"metrics":[],'
+        '"sample_profile":null,"ambiguities":[]}'
+    )
+    assert _parse_model_json(Provider(), malformed, "stop") == {
+        "entities": [], "claims": [], "relations": [], "metrics": [],
+        "sample_profile": None, "ambiguities": [],
+    }
+
+
+def test_model_json_never_repairs_truncated_or_incomplete_contract() -> None:
+    class Provider:
+        @staticmethod
+        def _parse_json(value: str) -> dict:
+            import json
+
+            return json.loads(value)
+
+    with pytest.raises(ValueError, match="截断"):
+        _parse_model_json(Provider(), '{"entities": [', "length")
+    with pytest.raises(ValueError, match="缺少顶层键"):
+        _parse_model_json(Provider(), '{"entities": []}', "stop")
