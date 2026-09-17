@@ -336,6 +336,38 @@ button {
 }
 .material-list small { margin-top: 3px; color: #7b879b; font-size: 11px; }
 .material-list select { min-width: 0; border: 1px solid #dce2eb; border-radius: 9px; background: #fff; padding: 8px 9px; color: #3e4b61; }
+.material-role-inline { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.material-role-inline select { min-width: 0; flex: 1; }
+.material-role-question { position: relative; display: inline-grid; flex: none; place-items: center; color: #7b879a; cursor: help; }
+.material-role-question:focus { outline: 2px solid rgba(23, 105, 224, .25); outline-offset: 2px; border-radius: 50%; }
+.material-role-question[data-tooltip]:hover:after,
+.material-role-question[data-tooltip]:focus:after,
+.material-role-picker label[data-tooltip]:hover:after,
+.material-role-picker label[data-tooltip]:focus-within:after {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: 240px;
+  border: 1px solid #dce4ef;
+  border-radius: 8px;
+  background: #26344a;
+  box-shadow: 0 8px 24px rgba(31, 46, 69, .16);
+  padding: 8px 10px;
+  color: #fff;
+  content: attr(data-tooltip);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+  pointer-events: none;
+}
+.material-role-picker { margin: 13px 0; padding: 0; border: 0; }
+.material-role-picker legend { display: flex; align-items: center; gap: 5px; margin-bottom: 8px; color: #59657a; font-size: 12px; }
+.material-role-picker > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.material-role-picker label { position: relative; display: flex; min-width: 0; align-items: center; gap: 7px; margin: 0; border: 1px solid #dfe5ee; border-radius: 9px; background: #fff; padding: 9px 10px; cursor: pointer; }
+.material-role-picker label:has(input:checked) { border-color: #8ab2eb; background: #f2f7ff; color: #175fac; }
+.material-role-picker input { width: auto; margin: 0; accent-color: #1769e0; }
+.material-role-picker p { min-height: 34px; margin: 8px 0 0; border-radius: 8px; background: #f5f7fa; padding: 8px 10px; color: #738096; font-size: 11px; line-height: 1.5; }
 .upload-button { cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
 .upload-button input { display: none; }
 .upload-button.disabled { cursor: not-allowed; opacity: .48; }

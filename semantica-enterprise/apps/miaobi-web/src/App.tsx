@@ -7,6 +7,7 @@ import {
   ChevronRight,
   FileText,
   GitCompareArrows,
+  HelpCircle,
   LayoutDashboard,
   LoaderCircle,
   PenLine,
@@ -403,12 +404,37 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
 }
 
 const MATERIAL_ROLE_LABELS: Record<ProjectMaterial['material_role'], string> = {
-  policy_basis: '政策与制度依据',
-  task_data: '本次任务数据',
-  reference: '写作参考材料',
-  sample_style: '样稿与格式',
-  attachment: '报告附件',
+  policy_basis: '政策依据',
+  task_data: '业务资料',
+  reference: '参考资料',
+  sample_style: '样稿',
+  attachment: '参考资料（历史附件）',
 };
+
+const MATERIAL_ROLE_DESCRIPTIONS: Record<ProjectMaterial['material_role'], string> = {
+  task_data: '提取本次项目的事实、指标和关系，参与正文事实核对与确定性计算。',
+  policy_basis: '引用政策、制度和标准，并核对适用范围、有效时间与发布单位。',
+  reference: '补充背景和表达参考；其中内容未经确认不会作为权威事实。',
+  sample_style: '只学习目录、文风、表格和附件结构；样稿中的地区、职责和数字不会成为本文事实。',
+  attachment: '历史兼容类型；新上传请按资料实际用途选择业务资料、政策依据、参考资料或样稿。',
+};
+
+const SELECTABLE_MATERIAL_ROLES = (['task_data', 'policy_basis', 'reference', 'sample_style'] as const);
+
+function MaterialRolePicker({ value, onChange, name }: {
+  value: ProjectMaterial['material_role'];
+  onChange: (value: ProjectMaterial['material_role']) => void;
+  name: string;
+}) {
+  return <fieldset className="material-role-picker">
+    <legend>材料用途 <span className="material-role-question" title="用途决定材料如何被抽取、核验和用于写作"><HelpCircle size={14} /></span></legend>
+    <div>{SELECTABLE_MATERIAL_ROLES.map((item) => <label key={item} title={MATERIAL_ROLE_DESCRIPTIONS[item]} data-tooltip={MATERIAL_ROLE_DESCRIPTIONS[item]}>
+      <input type="radio" name={name} value={item} checked={value === item} onChange={() => onChange(item)} />
+      <span>{MATERIAL_ROLE_LABELS[item]}</span>
+    </label>)}</div>
+    <p>{MATERIAL_ROLE_DESCRIPTIONS[value]}</p>
+  </fieldset>;
+}
 
 function MaterialsPanel({ project, document, materials, knowledgeContext, onChanged, onError }: {
   project: Project;
@@ -424,6 +450,8 @@ function MaterialsPanel({ project, document, materials, knowledgeContext, onChan
   const [role, setRole] = useState<ProjectMaterial['material_role']>('reference');
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState('');
   const [spaces, setSpaces] = useState<WritingSpace[]>([]);
   const [spaceId, setSpaceId] = useState('');
@@ -469,7 +497,9 @@ function MaterialsPanel({ project, document, materials, knowledgeContext, onChan
     try {
       const formData = new FormData();
       formData.set('space_id', uploadSpaceId);
-      formData.set('knowledge_processing_mode', 'both');
+      formData.set('knowledge_processing_mode', 'vector');
+      formData.set('knowledge_processing_targets', JSON.stringify(['fulltext', 'vector', 'writing_graph']));
+      formData.set('material_role', role);
       formData.set('file', file);
       const uploaded = await api<{ document: { id: string }; version: { id: string } }>('/documents/upload', { method: 'POST', body: formData });
       const version = await waitForKnowledge(uploaded.document.id);
@@ -480,6 +510,8 @@ function MaterialsPanel({ project, document, materials, knowledgeContext, onChan
         body: { document_id: uploaded.document.id, version_id: version?.id || uploaded.version.id, material_role: role, usage_scope: 'task_only' },
       });
       setUploadStatus('资料已就绪');
+      setUploadOpen(false);
+      setUploadFile(null);
       await onChanged();
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : '资料上传失败');
@@ -533,12 +565,13 @@ function MaterialsPanel({ project, document, materials, knowledgeContext, onChan
   };
   return <>
     <section className="content-card project-materials">
-      <div className="card-toolbar"><div><span className="eyebrow">项目资料池</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><label className={`secondary upload-button ${uploading || !uploadSpaceId ? 'disabled' : ''}`} title={uploadSpaceId ? '文件将由知识底座完成真实解析、切片和索引' : '未选择知识空间时仍可空白写作'}><Upload size={15} />{uploading ? '处理中…' : '上传资料'}<input type="file" disabled={uploading || !uploadSpaceId} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ''; void upload(file); }} /></label><button type="button" className="primary compact" disabled={!uploadSpaceId} onClick={() => void loadCandidates()}>选择已有资料</button></div></div>
+      <div className="card-toolbar"><div><span className="eyebrow">项目资料池</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><button type="button" className="secondary upload-button" disabled={uploading || !uploadSpaceId} title={uploadSpaceId ? '上传前先选择材料用途' : '未选择知识空间时仍可空白写作'} onClick={() => { setUploadFile(null); setUploadOpen(true); }}><Upload size={15} />{uploading ? '处理中…' : '上传资料'}</button><button type="button" className="primary compact" disabled={!uploadSpaceId} onClick={() => void loadCandidates()}>选择已有资料</button></div></div>
       {uploadStatus && <p className="upload-progress" role="status">{uploadStatus}</p>}
-      {materials.length ? <div className="material-list">{materials.map((material) => <article key={material.id}><label className="article-material-check" title={document ? '控制当前文章是否采用这份材料' : '先创建文章'}><input type="checkbox" checked={material.adopted_by_article !== false} disabled={!document} onChange={() => void toggleForArticle(material)} /><span>用于本文</span></label><div><b>{material.document.title}</b><small>{material.version.filename} · 固定 V{material.version.version_number}{material.current_document_version ? '' : ' · 历史版本'}</small></div><select aria-label={`设置${material.document.title}的材料角色`} value={material.material_role} onChange={(event) => void updateRole(material, event.target.value as ProjectMaterial['material_role'])}>{Object.entries(MATERIAL_ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><button type="button" className="icon-button danger-icon" title="从项目资料池移除" onClick={() => void remove(material)}><Trash2 size={16} /></button></article>)}</div> : <div className="material-empty"><FileText /><div><b>{uploadSpaceId ? '上传本次业务资料，或选择已有资料' : '可先从空白文稿开始'}</b><span>{uploadSpaceId ? '妙笔会调用知识底座完成解析和检索；样稿只学习结构与表达，不作为业务事实。' : '编辑和导出可以直接使用；需要检索依据或上传资料时，再添加一个资料来源。'}</span></div>{!uploadSpaceId && <button type="button" className="secondary" onClick={() => void loadSpaces()}>添加资料来源</button>}</div>}
+      {materials.length ? <div className="material-list">{materials.map((material) => <article key={material.id}><label className="article-material-check" title={document ? '控制当前文章是否采用这份材料' : '先创建文章'}><input type="checkbox" checked={material.adopted_by_article !== false} disabled={!document} onChange={() => void toggleForArticle(material)} /><span>用于本文</span></label><div><b>{material.document.title}</b><small>{material.version.filename} · 固定 V{material.version.version_number}{material.current_document_version ? '' : ' · 历史版本'}</small></div><div className="material-role-inline"><select aria-label={`设置${material.document.title}的材料角色`} title={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]} value={material.material_role} onChange={(event) => void updateRole(material, event.target.value as ProjectMaterial['material_role'])}>{material.material_role === 'attachment' && <option value="attachment">{MATERIAL_ROLE_LABELS.attachment}</option>}{SELECTABLE_MATERIAL_ROLES.map((value) => <option key={value} value={value} title={MATERIAL_ROLE_DESCRIPTIONS[value]}>{MATERIAL_ROLE_LABELS[value]}</option>)}</select><span className="material-role-question" tabIndex={0} aria-label={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]} data-tooltip={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]}><HelpCircle size={14} /></span></div><button type="button" className="icon-button danger-icon" title="从项目资料池移除" onClick={() => void remove(material)}><Trash2 size={16} /></button></article>)}</div> : <div className="material-empty"><FileText /><div><b>{uploadSpaceId ? '上传本次业务资料，或选择已有资料' : '可先从空白文稿开始'}</b><span>{uploadSpaceId ? '妙笔会调用知识底座完成解析和检索；样稿只学习结构与表达，不作为业务事实。' : '编辑和导出可以直接使用；需要检索依据或上传资料时，再添加一个资料来源。'}</span></div>{!uploadSpaceId && <button type="button" className="secondary" onClick={() => void loadSpaces()}>添加资料来源</button>}</div>}
       {!uploadSpaceId && spaces.length > 0 && <div className="attach-space-row"><label>选择知识空间<select value={spaceId} onChange={(event) => setSpaceId(event.target.value)}>{spaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><button type="button" className="primary compact" disabled={!spaceId || attachingSpace} onClick={() => void attachSpace()}>{attachingSpace ? '添加中…' : '确认添加'}</button></div>}
     </section>
-    {open && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="从智库选择材料"><div className="dialog-head"><div><span className="eyebrow">固定材料版本</span><h2>从智库选择</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setOpen(false)}>×</button></div><label>材料<select autoFocus value={selectedVersion} onChange={(event) => setSelectedVersion(event.target.value)}><option value="">请选择已完成加工的材料</option>{candidates.map((item) => <option key={item.version_id} value={item.version_id} disabled={item.already_linked || !['processed', 'published', 'ready'].includes(item.processing_status)}>{item.title} · V{item.version_number}{item.already_linked ? '（已加入）' : !['processed', 'published', 'ready'].includes(item.processing_status) ? '（加工中）' : ''}</option>)}</select></label><label>在报告中的用途<select value={role} onChange={(event) => setRole(event.target.value as ProjectMaterial['material_role'])}>{Object.entries(MATERIAL_ROLE_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><p className="field-help">选择的是文档固定版本。后续智库出现新版本时，系统不会静默替换本报告依据。</p>{!candidates.length && <p className="field-help warning-text">当前知识空间没有可选择的文档，请先到传神智库上传并完成知识加工。</p>}<div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setOpen(false)}>取消</button><button type="button" className="primary" disabled={submitting || !selectedVersion} onClick={() => void add()}>{submitting ? '加入中…' : '加入当前任务'}</button></div></section></div>}
+    {uploadOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !uploading) setUploadOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="上传项目材料"><div className="dialog-head"><div><span className="eyebrow">准备资料</span><h2>上传项目材料</h2></div><button type="button" className="icon-button" disabled={uploading} onClick={() => setUploadOpen(false)}>×</button></div><label>文件<input autoFocus type="file" disabled={uploading} onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label><MaterialRolePicker name="upload-material-role" value={role} onChange={setRole} /><div className="dialog-actions"><button type="button" className="secondary" disabled={uploading} onClick={() => setUploadOpen(false)}>取消</button><button type="button" className="primary" disabled={uploading || !uploadFile} onClick={() => void upload(uploadFile || undefined)}>{uploading ? '上传并加工中…' : '上传并加工'}</button></div></section></div>}
+    {open && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="从智库选择材料"><div className="dialog-head"><div><span className="eyebrow">固定材料版本</span><h2>从智库选择</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setOpen(false)}>×</button></div><label>材料<select autoFocus value={selectedVersion} onChange={(event) => setSelectedVersion(event.target.value)}><option value="">请选择已完成加工的材料</option>{candidates.map((item) => <option key={item.version_id} value={item.version_id} disabled={item.already_linked || !['processed', 'published', 'ready'].includes(item.processing_status)}>{item.title} · V{item.version_number}{item.already_linked ? '（已加入）' : !['processed', 'published', 'ready'].includes(item.processing_status) ? '（加工中）' : ''}</option>)}</select></label><MaterialRolePicker name="existing-material-role" value={role} onChange={setRole} /><p className="field-help">选择的是文档固定版本。后续智库出现新版本时，系统不会静默替换本报告依据。</p>{!candidates.length && <p className="field-help warning-text">当前知识空间没有可选择的文档，请先到传神智库上传并完成知识加工。</p>}<div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setOpen(false)}>取消</button><button type="button" className="primary" disabled={submitting || !selectedVersion} onClick={() => void add()}>{submitting ? '加入中…' : '加入当前任务'}</button></div></section></div>}
   </>;
 }
 

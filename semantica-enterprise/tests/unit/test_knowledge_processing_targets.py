@@ -45,6 +45,15 @@ def test_processing_mode_is_strict_and_defaults_to_both() -> None:
         KnowledgeProcessingRequest(mode="all")
 
 
+def test_document_upload_material_roles_are_simplified_and_explained() -> None:
+    assert "['task_data','业务资料'" in APP
+    assert "['policy_basis','政策依据'" in APP
+    assert "['reference','参考资料'" in APP
+    assert "['sample_style','样稿'" in APP
+    assert "data-material-role-help" in APP
+    assert "['attachment','报告附件']" not in APP
+
+
 def test_effective_mode_is_derived_from_completed_targets() -> None:
     assert processing_mode_for_targets({"vector"}) == "vector"
     assert processing_mode_for_targets({"graph"}) == "graph"

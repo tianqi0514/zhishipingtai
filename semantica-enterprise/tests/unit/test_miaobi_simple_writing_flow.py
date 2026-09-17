@@ -33,6 +33,14 @@ def test_upload_from_miaobi_switches_zhiku_to_the_task_space() -> None:
     assert "上传资料" in MIAOBI_APP
 
 
+def test_miaobi_upload_requires_a_meaningful_material_role_and_requests_writing_graph() -> None:
+    assert "['task_data', 'policy_basis', 'reference', 'sample_style']" in MIAOBI_APP
+    assert "formData.set('material_role', role)" in MIAOBI_APP
+    assert "JSON.stringify(['fulltext', 'vector', 'writing_graph'])" in MIAOBI_APP
+    assert "样稿中的地区、职责和数字不会成为本文事实" in MIAOBI_APP
+    assert "报告附件" not in MIAOBI_APP
+
+
 def test_legacy_earthquake_inputs_are_projected_as_business_labels() -> None:
     config = business_scenario_from_contract(
         {
