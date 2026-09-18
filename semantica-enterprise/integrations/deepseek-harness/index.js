@@ -290,14 +290,19 @@ export function apply(ctx) {
   if (sessionKind === 'writing_generation') {
     // Tool schemas belong to PromptAssembly, not LlmCallConfig.  Once the
     // chapter has loaded its signed context, consolidated source pack and real
-    // document evidence, expose no tools to the next model step.  This closes
-    // the private-model loop without modifying Harness core or discarding the
-    // durable tool/result events that support the chapter.
+    // document evidence, leave one read-only schema on the final model step.
+    // Some OpenAI-compatible gateways reject `tools: []` when the conversation
+    // history already contains tool calls.  Keeping the evidence-search schema
+    // avoids that protocol-invalid empty array; the explicit pre-step contract
+    // below still instructs the model to render the chapter without another
+    // discovery cycle.
     ctx.on('system-prompt/assemble', async (assembly, context, next) => {
       const assembled = await next()
       const completed = successfulToolNames(context.agent?.session?.events)
       if (!REPORT_GENERATION_REQUIRED_TOOLS.every(tool => completed.has(tool))) return assembled
-      return { ...assembled, tools: [] }
+      const finalTool = assembled.tools.find(tool => tool.name === 'knowledge_search')
+        || assembled.tools[0]
+      return { ...assembled, tools: finalTool ? [finalTool] : assembled.tools }
     })
 
     // Changing a request header's tool schemas must start a new request series.

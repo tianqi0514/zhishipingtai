@@ -141,7 +141,7 @@ test('applies the platform model temperature through the plugin boundary', async
 })
 
 
-test('formal report removes assembled tools after the required evidence pack is complete', async () => {
+test('formal report keeps one read-only tool after the required evidence pack is complete', async () => {
   const { listeners } = fixture('writing_generation')
   const events = [
     { type: 'tool/call', data: { turn: 4, callId: 'context', name: 'writing_get_project_context' } },
@@ -152,11 +152,11 @@ test('formal report removes assembled tools after the required evidence pack is 
     { type: 'tool/result', data: { callId: 'search', content: [] } },
   ]
   const assembly = await listeners.get('system-prompt/assemble')(
-    { sections: [], contexts: [], tools: [{ name: 'should-not-remain' }], variables: {} },
+    { sections: [], contexts: [], tools: [{ name: 'knowledge_search' }, { name: 'should-not-remain' }], variables: {} },
     { agent: { session: { events } } },
-    async () => ({ sections: [], contexts: [], tools: [{ name: 'should-not-remain' }], variables: {} }),
+    async () => ({ sections: [], contexts: [], tools: [{ name: 'knowledge_search' }, { name: 'should-not-remain' }], variables: {} }),
   )
-  assert.deepEqual(assembly.tools, [])
+  assert.deepEqual(assembly.tools, [{ name: 'knowledge_search' }])
 })
 
 
@@ -176,7 +176,7 @@ test('formal report uses the latest durable turn when resumed request coordinate
     { agent: { session: { events } } },
     async () => ({ sections: [], contexts: [], tools: [{ name: 'must-be-removed' }], variables: {} }),
   )
-  assert.deepEqual(assembly.tools, [])
+  assert.deepEqual(assembly.tools, [{ name: 'must-be-removed' }])
 })
 
 
@@ -198,7 +198,7 @@ test('formal report keeps assembled tools until real document evidence is comple
 })
 
 
-test('formal report starts a tool-free request series with a final-render instruction', async () => {
+test('formal report starts a final-render request series after evidence collection', async () => {
   const { listeners } = fixture('writing_generation')
   const events = [
     { type: 'turn/start', data: { turn: 4 } },
