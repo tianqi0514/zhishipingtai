@@ -7,9 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import uuid
+import zipfile
 from typing import Any
 
 import semantica
+import yaml
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -1935,6 +1937,7 @@ def list_project_materials(
 def get_project_extraction_workbench(
     project_id: str,
     document_id: str | None = None,
+    max_items: int = Query(default=200, ge=1, le=5000),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -1984,7 +1987,7 @@ def get_project_extraction_workbench(
             Chunk.tenant_id == user.tenant_id,
             Chunk.version_id.in_(version_ids),
             _active(Chunk),
-        ).order_by(Chunk.version_id, Chunk.ordinal).limit(200)
+        ).order_by(Chunk.version_id, Chunk.ordinal).limit(max_items)
     )) if version_ids else []
     chunk_map = {row.id: row for row in chunks}
     evidence: list[dict[str, Any]] = []
@@ -2018,7 +2021,7 @@ def get_project_extraction_workbench(
             EntityMention.tenant_id == user.tenant_id,
             EntityMention.run_id.in_(run_ids),
             _active(EntityMention),
-        ).order_by(EntityMention.entity_type, EntityMention.normalized_name).limit(200)
+        ).order_by(EntityMention.entity_type, EntityMention.normalized_name).limit(max_items)
     )) if run_ids else []
     entities = [{
         "id": row.mention_id,
@@ -2037,7 +2040,7 @@ def get_project_extraction_workbench(
             RelationAssertion.tenant_id == user.tenant_id,
             RelationAssertion.run_id.in_(run_ids),
             _active(RelationAssertion),
-        ).order_by(RelationAssertion.created_at).limit(200)
+        ).order_by(RelationAssertion.created_at).limit(max_items)
     )) if run_ids else []
     claims = [{
         "id": f"claim-{row.id}",
@@ -2057,7 +2060,7 @@ def get_project_extraction_workbench(
             ProjectFact.project_id == project.id,
             ProjectFact.active.is_(True),
             _active(ProjectFact),
-        ).order_by(ProjectFact.fact_key, ProjectFact.version.desc()).limit(200)
+        ).order_by(ProjectFact.fact_key, ProjectFact.version.desc()).limit(max_items)
     ))
     project_facts = [{
         "id": row.id,
@@ -2080,7 +2083,7 @@ def get_project_extraction_workbench(
             Fact.tenant_id == user.tenant_id,
             Fact.source_chunk_id.in_(list(chunk_map)),
             _active(Fact),
-        ).order_by(Fact.created_at).limit(200)
+        ).order_by(Fact.created_at).limit(max_items)
     )) if chunk_map else []
     entity_ids = {
         entity_id for row in graph_fact_rows
@@ -2113,7 +2116,7 @@ def get_project_extraction_workbench(
         select(ComputationRun).where(
             ComputationRun.project_id == project.id,
             _active(ComputationRun),
-        ).order_by(ComputationRun.created_at.desc()).limit(100)
+        ).order_by(ComputationRun.created_at.desc()).limit(max_items)
     ))
     metrics = [{
         "id": row.id,
@@ -2189,8 +2192,154 @@ def get_project_extraction_workbench(
         "evidence_count": len(evidence),
         "pending_count": sum(step["pending_count"] for step in steps),
         "steps": steps,
-        "limits": {"max_items_per_step": 200, "read_only_projection": True},
+        "limits": {"max_items_per_step": max_items, "read_only_projection": True},
     }
+
+
+@router.get("/projects/{project_id}/writing-support.zip")
+def export_project_writing_support(
+    project_id: str,
+    document_id: str | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download the governed, source-bound writing support data as one YAML file."""
+    project = _project(db, project_id, user)
+    writing_document = None
+    if document_id:
+        writing_document, _ = _document(db, document_id, user)
+        if writing_document.project_id != project.id:
+            raise HTTPException(status_code=404, detail="文章不属于当前项目")
+    snapshot = get_project_extraction_workbench(
+        project_id=project.id,
+        document_id=writing_document.id if writing_document else None,
+        max_items=5000,
+        user=user,
+        db=db,
+    )
+    steps = list(snapshot.get("steps") or [])
+    by_key = {str(step.get("key") or ""): step for step in steps}
+    payload = {
+        "schema_version": "chuanshen-writing-support/v1",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "project": {
+            "id": project.id,
+            "code": project.code,
+            "name": project.name,
+            "status": project.status,
+            "knowledge_space_id": project.knowledge_space_id,
+            "knowledge_product_release_id": project.knowledge_product_release_id,
+            "writing_graph_release_id": project.writing_graph_release_id,
+        },
+        "article": (
+            {
+                "id": writing_document.id,
+                "title": writing_document.title,
+                "document_type": writing_document.document_type,
+                "purpose": writing_document.purpose,
+                "audience": writing_document.audience,
+                "applicability": writing_document.applicability or {},
+                "writing_requirements": writing_document.writing_requirements,
+                "status": writing_document.status,
+            }
+            if writing_document else None
+        ),
+        "summary": {
+            "material_count": snapshot.get("material_count", 0),
+            "evidence_count": snapshot.get("evidence_count", 0),
+            "pending_count": snapshot.get("pending_count", 0),
+            "max_items_per_structure": (snapshot.get("limits") or {}).get("max_items_per_step", 5000),
+        },
+        "materials": list((by_key.get("material_role") or {}).get("items") or []),
+        "writing_support": {
+            key: list((by_key.get(key) or {}).get("items") or [])
+            for key in ("sample_profile", "evidence", "entity", "claim", "fact", "relation", "metric")
+        },
+        "extraction_pipeline": [
+            {
+                key: step.get(key)
+                for key in (
+                    "key", "title", "short_title", "purpose", "input_label", "output_label",
+                    "status", "count", "pending_count",
+                )
+            }
+            for step in steps
+        ],
+    }
+    yaml_content = yaml.safe_dump(
+        payload,
+        allow_unicode=True,
+        sort_keys=False,
+        width=120,
+        default_flow_style=False,
+    )
+    readme = f"""# 妙笔写作支撑数据包
+
+本数据包由“{project.name}”导出，用于查看、归档或迁移已经过当前项目权限过滤的写作支撑数据。
+
+## 文件
+
+- `writing-support.yaml`：结构化写作支撑数据，可由程序读取，也可直接人工审阅。
+- `README.md`：本说明文件。
+
+## 顶层结构
+
+| 结构 | 作用 |
+| --- | --- |
+| `schema_version` | 数据契约版本。导入方应按此版本解析，不应猜测字段。 |
+| `exported_at` | 本次导出的 UTC 时间。 |
+| `project` | 项目、知识空间、知识快照和写作图谱版本标识。 |
+| `article` | 本次按某篇文章导出时的文章类型、目的、读者和适用范围；项目级导出时为空。 |
+| `summary` | 材料、证据、待确认项数量及单类结构安全上限。 |
+| `materials` | 项目锁定的材料与文档版本。后续原文件更新不会改写此处版本。 |
+| `writing_support` | 真正用于写作、核验和计算的数据。 |
+| `extraction_pipeline` | 各类数据的业务作用、输入输出和当前数量；不包含模型提示词。 |
+
+## writing_support
+
+| 结构 | 作用 |
+| --- | --- |
+| `sample_profile` | 样稿中提取的目录、文风和附件结构，只作为写作形式参考，不作为业务事实。 |
+| `evidence` | 来自真实材料的不可变切片，包含文件、版本、页码或结构位置和原文。 |
+| `entity` | 组织、项目、地点、资源等稳定业务对象及其原文提及。 |
+| `claim` | 某份材料作出的陈述。Claim 代表“材料这样说”，不代表平台已经确认其为事实。 |
+| `fact` | 当前项目采用或待确认的事实，包含值、单位、来源、版本和核验状态。 |
+| `relation` | 主体—关系—客体形式的业务关系，应能回到对应事实和证据。 |
+| `metric` | 原子指标和确定性计算结果，包含输入、依赖、单位和计算状态。 |
+
+## 关系与使用边界
+
+```text
+原始材料版本 -> Evidence -> Claim -> Fact -> Relation / Metric -> 文章正文块
+```
+
+1. 精确数字应来自已确认 Fact 或确定性计算，不能由大模型自行补写。
+2. Claim 仍可能存在冲突，正式写作前应检查 `needs_confirmation` 和状态字段。
+3. 样稿只用于结构和表达，不能自动成为本项目事实。
+4. Evidence 中的来源版本是正文引用和后续影响分析的核验依据。
+5. 本包不包含模型提示词、API Key、数据库密码、访问令牌或中间件连接信息。
+6. 为防止超大项目单次导出占用过多内存，每类结构最多导出 `{(snapshot.get("limits") or {}).get("max_items_per_step", 5000)}` 条；达到上限时应分批导出或联系管理员。
+
+## 当前导出摘要
+
+- 材料：{snapshot.get("material_count", 0)} 份
+- Evidence：{snapshot.get("evidence_count", 0)} 条
+- 待确认：{snapshot.get("pending_count", 0)} 项
+"""
+    safe_name = re.sub(r'[\\/:*?"<>|]+', "_", project.name).strip(" ._")[:80] or "妙笔项目"
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("writing-support.yaml", yaml_content.encode("utf-8"))
+        bundle.writestr("README.md", readme.encode("utf-8"))
+    filename = f"{safe_name}-写作支撑数据.zip"
+    return Response(
+        archive.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": attachment_content_disposition(filename),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.put("/documents/{document_id}/materials")

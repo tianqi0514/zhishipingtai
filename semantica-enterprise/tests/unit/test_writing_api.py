@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +11,7 @@ from types import SimpleNamespace
 
 import jwt
 import pytest
+import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -946,6 +949,24 @@ def test_extraction_workbench_projects_real_materials_facts_and_prompts() -> Non
         assert by_key["fact"]["items"][0]["key"] == "available_rescuers"
         assert by_key["metric"]["items"][0]["name"] == "可用搜救人员"
         assert by_key["sample_profile"]["status"] == "not_required"
+
+        exported = client.get(f"/api/v1/writing/projects/{project['id']}/writing-support.zip")
+        assert exported.status_code == 200, exported.text
+        assert exported.headers["content-type"].startswith("application/zip")
+        assert "attachment" in exported.headers["content-disposition"]
+        with zipfile.ZipFile(io.BytesIO(exported.content)) as bundle:
+            assert set(bundle.namelist()) == {"writing-support.yaml", "README.md"}
+            support = yaml.safe_load(bundle.read("writing-support.yaml"))
+            readme = bundle.read("README.md").decode("utf-8")
+        assert support["schema_version"] == "chuanshen-writing-support/v1"
+        assert support["project"]["id"] == project["id"]
+        assert support["summary"]["max_items_per_structure"] == 5000
+        assert support["materials"][0]["filename"] == version.filename
+        assert support["writing_support"]["fact"][0]["key"] == "available_rescuers"
+        assert support["writing_support"]["metric"][0]["name"] == "可用搜救人员"
+        assert all("prompt" not in step for step in support["extraction_pipeline"])
+        assert "不包含模型提示词" in readme
+        assert "Evidence" in readme and "Claim" in readme and "Fact" in readme
 
 
 def test_business_scenario_config_round_trip_creates_executable_version() -> None:

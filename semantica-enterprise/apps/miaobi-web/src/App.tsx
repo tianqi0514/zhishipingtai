@@ -5,6 +5,7 @@ import {
   Calculator,
   CheckCircle2,
   ChevronRight,
+  Download,
   FileText,
   GitCompareArrows,
   HelpCircle,
@@ -39,6 +40,12 @@ type WritingSpace = { id: string; name: string; code: string; ready: boolean; re
 type User = { id: string; display_name: string; is_admin: boolean };
 type Tab = 'task' | 'writing' | 'overview' | 'facts' | 'reasoning' | 'plans' | 'review';
 type EditorInsertion = PlateNode | PlateNode[] | MarkdownSuggestionInsertion;
+type UploadQueueItem = {
+  key: string;
+  file: File;
+  status: string;
+  state: 'waiting' | 'uploading' | 'processing' | 'ready' | 'error';
+};
 
 const tabs: Array<{ key: Tab; label: string; icon: typeof LayoutDashboard }> = [
   { key: 'task', label: '项目', icon: LayoutDashboard },
@@ -435,7 +442,7 @@ function MaterialRolePicker({ value, onChange, name }: {
   </fieldset>;
 }
 
-function MaterialsPanel({ project, document, materials, knowledgeContext, onChanged, onError }: {
+export function MaterialsPanel({ project, document, materials, knowledgeContext, onChanged, onError }: {
   project: Project;
   document: WritingDocument | null;
   materials: ProjectMaterial[];
@@ -450,7 +457,7 @@ function MaterialsPanel({ project, document, materials, knowledgeContext, onChan
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadItems, setUploadItems] = useState<UploadQueueItem[]>([]);
   const [uploadStatus, setUploadStatus] = useState('');
   const [spaces, setSpaces] = useState<WritingSpace[]>([]);
   const [spaceId, setSpaceId] = useState('');
@@ -473,48 +480,81 @@ function MaterialsPanel({ project, document, materials, knowledgeContext, onChan
     } catch (reason) { onError(reason instanceof Error ? reason.message : '资料来源添加失败'); }
     finally { setAttachingSpace(false); }
   };
-  const waitForKnowledge = async (documentId: string) => {
+  const updateUploadItem = (key: string, patch: Partial<Pick<UploadQueueItem, 'status' | 'state'>>) => {
+    setUploadItems((current) => current.map((item) => item.key === key ? { ...item, ...patch } : item));
+  };
+  const waitForKnowledge = async (documentId: string, onStatus: (message: string) => void) => {
     for (let attempt = 0; attempt < 150; attempt += 1) {
       const current = await api<{ status: string; current_version_id?: string; versions?: Array<{ id: string; status: string; parse_summary?: Record<string, unknown> }> }>(`/documents/${documentId}`);
       const version = current.versions?.find((item) => item.id === current.current_version_id) || current.versions?.[0];
       const knowledgeStatus = String(version?.parse_summary?.knowledge_status || '');
       if (knowledgeStatus === 'published') return version;
       if (knowledgeStatus === 'partial_failed') throw new Error('资料解析完成，但部分知识加工失败，请在任务中心查看原因');
-      setUploadStatus(version?.status === 'ready' ? '正在建立检索索引…' : '正在解析资料…');
+      onStatus(version?.status === 'ready' ? '正在建立检索索引…' : '正在解析资料…');
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
     }
     throw new Error('资料仍在后台加工，可稍后刷新本页查看进度');
   };
-  const upload = async (file: File | undefined) => {
-    if (!file || uploading) return;
+  const upload = async () => {
+    if (!uploadItems.length || uploading) return;
     if (!uploadSpaceId) {
       onError('当前项目未选择知识空间。可先空白写作，或新建一个带知识空间的项目后上传资料。');
       return;
     }
     setUploading(true);
-    setUploadStatus('正在上传…');
+    setUploadStatus(`正在处理 ${uploadItems.length} 个文件…`);
     try {
-      const formData = new FormData();
-      formData.set('space_id', uploadSpaceId);
-      formData.set('knowledge_processing_mode', 'vector');
-      formData.set('knowledge_processing_targets', JSON.stringify(['fulltext', 'vector', 'writing_graph']));
-      formData.set('material_role', role);
-      formData.set('file', file);
-      const uploaded = await api<{ document: { id: string }; version: { id: string } }>('/documents/upload', { method: 'POST', body: formData });
-      const version = await waitForKnowledge(uploaded.document.id);
-      setUploadStatus('正在固定本次写作使用的资料版本…');
-      await api(`/writing/projects/${project.id}/knowledge-release/refresh`, { method: 'POST' });
-      await api(`/writing/projects/${project.id}/materials`, {
-        method: 'POST',
-        body: { document_id: uploaded.document.id, version_id: version?.id || uploaded.version.id, material_role: role, usage_scope: 'task_only' },
-      });
-      setUploadStatus('资料已就绪');
-      setUploadOpen(false);
-      setUploadFile(null);
+      const pending = [...uploadItems];
+      const completed: Array<{ item: UploadQueueItem; documentId: string; versionId: string }> = [];
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < pending.length) {
+          const item = pending[cursor++];
+          updateUploadItem(item.key, { state: 'uploading', status: '正在上传…' });
+          try {
+            const formData = new FormData();
+            formData.set('space_id', uploadSpaceId);
+            formData.set('knowledge_processing_mode', 'vector');
+            formData.set('knowledge_processing_targets', JSON.stringify(['fulltext', 'vector', 'writing_graph']));
+            formData.set('material_role', role);
+            formData.set('file', item.file);
+            const uploaded = await api<{ document: { id: string }; version: { id: string } }>('/documents/upload', { method: 'POST', body: formData });
+            updateUploadItem(item.key, { state: 'processing', status: '正在解析资料…' });
+            const version = await waitForKnowledge(uploaded.document.id, (status) => updateUploadItem(item.key, { state: 'processing', status }));
+            completed.push({ item, documentId: uploaded.document.id, versionId: version?.id || uploaded.version.id });
+          } catch (reason) {
+            updateUploadItem(item.key, { state: 'error', status: reason instanceof Error ? reason.message : '上传失败' });
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, pending.length) }, () => worker()));
+      let attachedCount = 0;
+      if (completed.length) {
+        setUploadStatus('正在固定本次写作使用的资料版本…');
+        await api(`/writing/projects/${project.id}/knowledge-release/refresh`, { method: 'POST' });
+        for (const result of completed) {
+          try {
+            await api(`/writing/projects/${project.id}/materials`, {
+              method: 'POST',
+              body: { document_id: result.documentId, version_id: result.versionId, material_role: role, usage_scope: 'task_only' },
+            });
+            attachedCount += 1;
+            updateUploadItem(result.item.key, { state: 'ready', status: '已加入项目资料' });
+          } catch (reason) {
+            updateUploadItem(result.item.key, { state: 'error', status: reason instanceof Error ? reason.message : '加入项目失败' });
+          }
+        }
+      }
       await onChanged();
+      const failedCount = pending.length - attachedCount;
+      setUploadStatus(failedCount ? `${attachedCount} 个文件已完成，${failedCount} 个文件需要处理` : `${attachedCount} 个文件已全部加入项目`);
+      if (!failedCount) {
+        setUploadOpen(false);
+        setUploadItems([]);
+      }
     } catch (reason) {
       onError(reason instanceof Error ? reason.message : '资料上传失败');
-      setUploadStatus('');
+      setUploadStatus('批量上传未完成，请查看每个文件的状态');
     } finally { setUploading(false); }
   };
   const loadCandidates = async () => {
@@ -564,12 +604,12 @@ function MaterialsPanel({ project, document, materials, knowledgeContext, onChan
   };
   return <>
     <section className="content-card project-materials">
-      <div className="card-toolbar"><div><span className="eyebrow">项目资料池</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><button type="button" className="secondary upload-button" disabled={uploading || !uploadSpaceId} title={uploadSpaceId ? '上传前先选择材料用途' : '未选择知识空间时仍可空白写作'} onClick={() => { setUploadFile(null); setUploadOpen(true); }}><Upload size={15} />{uploading ? '处理中…' : '上传资料'}</button><button type="button" className="primary compact" disabled={!uploadSpaceId} onClick={() => void loadCandidates()}>选择已有资料</button></div></div>
+      <div className="card-toolbar"><div><span className="eyebrow">项目资料池</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><a className="secondary" aria-disabled={!materials.length} href={materials.length ? `/api/v1/writing/projects/${project.id}/writing-support.zip${document ? `?document_id=${encodeURIComponent(document.id)}` : ''}` : undefined} title="下载 YAML 写作支撑数据及 Markdown 结构说明"><Download size={15} />导出写作数据</a><button type="button" className="secondary upload-button" disabled={uploading || !uploadSpaceId} title={uploadSpaceId ? '可一次选择多个文件，上传前先选择统一的材料用途' : '未选择知识空间时仍可空白写作'} onClick={() => { setUploadItems([]); setUploadStatus(''); setUploadOpen(true); }}><Upload size={15} />{uploading ? '处理中…' : '上传资料'}</button><button type="button" className="primary compact" disabled={!uploadSpaceId} onClick={() => void loadCandidates()}>选择已有资料</button></div></div>
       {uploadStatus && <p className="upload-progress" role="status">{uploadStatus}</p>}
       {materials.length ? <div className="material-list">{materials.map((material) => <article key={material.id}><label className="article-material-check" title={document ? '控制当前文章是否采用这份材料' : '先创建文章'}><input type="checkbox" checked={material.adopted_by_article !== false} disabled={!document} onChange={() => void toggleForArticle(material)} /><span>用于本文</span></label><div><b>{material.document.title}</b><small>{material.version.filename} · 固定 V{material.version.version_number}{material.current_document_version ? '' : ' · 历史版本'}</small></div><div className="material-role-inline"><select aria-label={`设置${material.document.title}的材料角色`} title={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]} value={material.material_role} onChange={(event) => void updateRole(material, event.target.value as ProjectMaterial['material_role'])}>{material.material_role === 'attachment' && <option value="attachment">{MATERIAL_ROLE_LABELS.attachment}</option>}{SELECTABLE_MATERIAL_ROLES.map((value) => <option key={value} value={value} title={MATERIAL_ROLE_DESCRIPTIONS[value]}>{MATERIAL_ROLE_LABELS[value]}</option>)}</select><span className="material-role-question" tabIndex={0} aria-label={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]} data-tooltip={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]}><HelpCircle size={14} /></span></div><button type="button" className="icon-button danger-icon" title="从项目资料池移除" onClick={() => void remove(material)}><Trash2 size={16} /></button></article>)}</div> : <div className="material-empty"><FileText /><div><b>{uploadSpaceId ? '上传本次业务资料，或选择已有资料' : '可先从空白文稿开始'}</b><span>{uploadSpaceId ? '妙笔会调用知识底座完成解析和检索；样稿只学习结构与表达，不作为业务事实。' : '编辑和导出可以直接使用；需要检索依据或上传资料时，再添加一个资料来源。'}</span></div>{!uploadSpaceId && <button type="button" className="secondary" onClick={() => void loadSpaces()}>添加资料来源</button>}</div>}
       {!uploadSpaceId && spaces.length > 0 && <div className="attach-space-row"><label>选择知识空间<select value={spaceId} onChange={(event) => setSpaceId(event.target.value)}>{spaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><button type="button" className="primary compact" disabled={!spaceId || attachingSpace} onClick={() => void attachSpace()}>{attachingSpace ? '添加中…' : '确认添加'}</button></div>}
     </section>
-    {uploadOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !uploading) setUploadOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="上传项目材料"><div className="dialog-head"><div><span className="eyebrow">准备资料</span><h2>上传项目材料</h2></div><button type="button" className="icon-button" disabled={uploading} onClick={() => setUploadOpen(false)}>×</button></div><label>文件<input autoFocus type="file" disabled={uploading} onChange={(event) => setUploadFile(event.target.files?.[0] || null)} /></label><MaterialRolePicker name="upload-material-role" value={role} onChange={setRole} /><div className="dialog-actions"><button type="button" className="secondary" disabled={uploading} onClick={() => setUploadOpen(false)}>取消</button><button type="button" className="primary" disabled={uploading || !uploadFile} onClick={() => void upload(uploadFile || undefined)}>{uploading ? '上传并加工中…' : '上传并加工'}</button></div></section></div>}
+    {uploadOpen && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !uploading) setUploadOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="上传项目材料"><div className="dialog-head"><div><span className="eyebrow">准备资料</span><h2>上传项目材料</h2></div><button type="button" className="icon-button" disabled={uploading} onClick={() => setUploadOpen(false)}>×</button></div><label>文件<input autoFocus type="file" multiple disabled={uploading} onChange={(event) => { const files = Array.from(event.target.files || []); if (files.length > 20) onError('一次最多上传 20 个文件'); const accepted = files.slice(0, 20); setUploadItems(accepted.map((file, index) => ({ key: `${file.name}-${file.size}-${file.lastModified}-${index}`, file, status: '等待上传', state: 'waiting' }))); }} /></label>{uploadItems.length > 0 && <div className="upload-queue" aria-label="待上传文件">{uploadItems.map((item) => <div key={item.key} className={`upload-queue-item ${item.state}`}><span>{item.file.name}</span><small>{item.status}</small></div>)}</div>}<MaterialRolePicker name="upload-material-role" value={role} onChange={setRole} /><p className="field-help">本次选择的文件使用同一种材料用途；系统最多同时加工 3 个文件。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={uploading} onClick={() => setUploadOpen(false)}>取消</button><button type="button" className="primary" disabled={uploading || !uploadItems.length} onClick={() => void upload()}>{uploading ? '上传并加工中…' : `上传 ${uploadItems.length || ''} 个文件`}</button></div></section></div>}
     {open && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setOpen(false); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-label="从智库选择材料"><div className="dialog-head"><div><span className="eyebrow">固定材料版本</span><h2>从智库选择</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={() => setOpen(false)}>×</button></div><label>材料<select autoFocus value={selectedVersion} onChange={(event) => setSelectedVersion(event.target.value)}><option value="">请选择已完成加工的材料</option>{candidates.map((item) => <option key={item.version_id} value={item.version_id} disabled={item.already_linked || !['processed', 'published', 'ready'].includes(item.processing_status)}>{item.title} · V{item.version_number}{item.already_linked ? '（已加入）' : !['processed', 'published', 'ready'].includes(item.processing_status) ? '（加工中）' : ''}</option>)}</select></label><MaterialRolePicker name="existing-material-role" value={role} onChange={setRole} /><p className="field-help">选择的是文档固定版本。后续智库出现新版本时，系统不会静默替换本报告依据。</p>{!candidates.length && <p className="field-help warning-text">当前知识空间没有可选择的文档，请先到传神智库上传并完成知识加工。</p>}<div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={() => setOpen(false)}>取消</button><button type="button" className="primary" disabled={submitting || !selectedVersion} onClick={() => void add()}>{submitting ? '加入中…' : '加入当前任务'}</button></div></section></div>}
   </>;
 }
