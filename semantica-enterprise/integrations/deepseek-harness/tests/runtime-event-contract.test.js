@@ -76,5 +76,6 @@ test('runtime gives formal-writing compaction a bounded non-truncating budget', 
 test('formal report final render keeps the section envelope strict', () => {
   const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
   assert.match(source, /章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings/)
+  assert.match(source, /table 只能有 type 和二维 items，不得有 text/)
   assert.match(source, /禁止 status、state、progress/)
 })
