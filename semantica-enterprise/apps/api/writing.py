@@ -3782,6 +3782,7 @@ def finalize_report_generation(
     allowed_graph_ids: dict[str, set[str]] = {
         "fact": set(), "evidence": set(), "relation": set(),
     }
+    graph_fact_ids_by_key: dict[str, str] = {}
     if release_id:
         for item in db.scalars(select(WritingGraphReleaseItem).where(
             WritingGraphReleaseItem.release_id == release_id,
@@ -3789,10 +3790,15 @@ def finalize_report_generation(
             _active(WritingGraphReleaseItem),
         )):
             allowed_graph_ids[item.object_type].add(str(item.object_id))
+            if item.object_type == "fact":
+                fact_key = str((item.snapshot or {}).get("fact_key") or "")
+                if fact_key:
+                    graph_fact_ids_by_key[fact_key] = str(item.object_id)
     parsed_sections, current_graph_ref_corrections = normalize_agent_reference_kinds(
         parsed_sections,
         project_fact_keys_by_id=project_fact_keys_by_id,
         allowed_ids=allowed_graph_ids,
+        graph_fact_ids_by_key=graph_fact_ids_by_key,
     )
     try:
         parsed_sections, current_heading_refs = normalize_agent_heading_refs(
@@ -3874,6 +3880,7 @@ def finalize_report_generation(
         sections,
         project_fact_keys_by_id=project_fact_keys_by_id,
         allowed_ids=allowed_graph_ids,
+        graph_fact_ids_by_key=graph_fact_ids_by_key,
     )
     if sectional:
         for planned_section, normalized_section in zip(run.section_plan or [], sections, strict=True):

@@ -399,6 +399,7 @@ def normalize_agent_reference_kinds(
     *,
     project_fact_keys_by_id: dict[str, str],
     allowed_ids: dict[str, set[str]],
+    graph_fact_ids_by_key: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Reclassify only IDs whose authoritative type is known exactly.
 
@@ -410,6 +411,7 @@ def normalize_agent_reference_kinds(
     untouched and are rejected by the strict validators that follow.
     """
 
+    graph_fact_ids_by_key = graph_fact_ids_by_key or {}
     field_types = {
         "writing_fact_refs": "fact",
         "writing_evidence_refs": "evidence",
@@ -436,7 +438,20 @@ def normalize_agent_reference_kinds(
                 field: list(dict.fromkeys(map(str, node.get(field) or [])))
                 for field in field_types
             }
-            input_refs = list(dict.fromkeys(map(str, node.get("input_refs") or [])))
+            input_refs: list[str] = []
+            for ref in dict.fromkeys(map(str, node.get("input_refs") or [])):
+                graph_fact_id = graph_fact_ids_by_key.get(ref)
+                if graph_fact_id is None:
+                    input_refs.append(ref)
+                    continue
+                collected["writing_fact_refs"].append(graph_fact_id)
+                changes.append({
+                    "section_key": str(section.get("section_key") or ""),
+                    "node_index": str(node_index),
+                    "reference": ref,
+                    "from": "input_refs",
+                    "to": "writing_fact_refs",
+                })
             for source_field, source_type in field_types.items():
                 kept: list[str] = []
                 for ref in collected[source_field]:

@@ -375,6 +375,7 @@ def test_reference_kind_normalization_is_id_typed_and_fail_closed():
         "content_nodes": [{
             "type": "p",
             "text": "搜救力量和依据已核验。",
+            "input_refs": ["graph-fact-key"],
             "writing_fact_refs": ["project-fact-id", "graph-fact-id", "unknown-id"],
             "writing_relation_refs": ["graph-evidence-id", "graph-relation-id"],
         }],
@@ -387,13 +388,16 @@ def test_reference_kind_normalization_is_id_typed_and_fail_closed():
             "evidence": {"graph-evidence-id"},
             "relation": {"graph-relation-id"},
         },
+        graph_fact_ids_by_key={"graph-fact-key": "graph-fact-id"},
     )
     node = normalized[0]["content_nodes"][0]
     assert node["input_refs"] == ["rescue_required"]
     assert node["writing_fact_refs"] == ["graph-fact-id", "unknown-id"]
     assert node["writing_evidence_refs"] == ["graph-evidence-id"]
     assert node["writing_relation_refs"] == ["graph-relation-id"]
-    assert {item["to"] for item in changes} == {"input_refs", "writing_evidence_refs"}
+    assert {item["to"] for item in changes} == {
+        "input_refs", "writing_fact_refs", "writing_evidence_refs",
+    }
     assert sections[0]["content_nodes"][0]["writing_relation_refs"] == [
         "graph-evidence-id", "graph-relation-id",
     ]
