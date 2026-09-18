@@ -294,6 +294,7 @@ function PageHeader({ project, tab }: { project: Project; tab: Tab }) {
 const DOCUMENT_TYPES = [
   { value: 'response_plan', label: '处置方案' },
   { value: 'emergency_plan', label: '应急预案' },
+  { value: 'annual_report', label: '年度报告' },
   { value: 'work_report', label: '工作报告' },
   { value: 'summary_report', label: '总结报告' },
   { value: 'custom', label: '其他文章' },
@@ -394,6 +395,7 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
     {stage === 'inputs' && <>
       <section className="task-intro-card"><div><span className="eyebrow">准备资料</span><h2>确认本文要使用的资料</h2></div><div className="task-intro-actions">{document && <button type="button" className="secondary" onClick={onOpenEditor}>直接编辑</button>}<button type="button" className="primary" onClick={() => setStage('toolbox')}>{nextLabel}<ChevronRight size={16} /></button></div></section>
       {knowledgeContext && <section className="compact-knowledge-baseline"><BookOpenCheck size={18} /><div><b>{knowledgeContext.spaces.map((space) => space.name).join('、')}</b><small>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份已选业务材料` : '尚未选择项目材料'} · {knowledgeContext.chunk_count} 个已发布知识片段</small></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前版本' : '有新版本'}</span></section>}
+      <DataReadiness project={project} facts={facts} />
       <MaterialsPanel project={project} document={document} materials={materials} knowledgeContext={knowledgeContext} onChanged={onChanged} onError={onError} />
       <details className="preparation-confirmations"><summary><span>查看资料抽取结果</span><small>按需查看</small></summary><div className="preparation-confirmation-body"><ExtractionWorkbench projectId={project.id} documentId={document?.id} materialCount={materials.length} onError={onError} /></div></details>
       <details className="preparation-confirmations" open={pending > 0}>
@@ -407,6 +409,58 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
     {stage === 'toolbox' && <ReportGenerationPanel project={project} facts={facts} computations={computations} plans={plans} document={document} onChanged={onChanged} onOpenEditor={onOpenEditor} onBack={() => setStage('inputs')} onError={onError} />}
     {stage === 'report' && (document ? <section className="report-ready-card"><CheckCircle2 /><div><h2>{reportExists ? '文章可以检查和导出' : '文章草稿已经创建'}</h2><p>在完整编辑器中审校正文、逐段核对依据，并生成 Word 或 PDF。</p></div><button type="button" className="primary" onClick={onOpenEditor}>进入检查与导出<ChevronRight size={16} /></button></section> : <EmptyAction title="还没有文章" detail="先创建文章，再进入检查与导出。" action="新建文章" onClick={onCreateDocument} />)}
   </div>;
+}
+
+function DataReadiness({ project, facts }: { project: Project; facts: Fact[] }) {
+  const requiredKeys = project.input_contract?.required || [];
+  if (!requiredKeys.length) return null;
+  const properties = project.input_contract?.properties || {};
+  const factByKey = new Map(facts.map((item) => [item.fact_key, item]));
+  const requirements = requiredKeys.map((key) => {
+    const field = properties[key] || {};
+    const fact = factByKey.get(key);
+    const confirmationRequired = field.confirmation_required !== false;
+    const complete = Boolean(
+      fact
+      && ['current', 'manual_override'].includes(fact.freshness_status)
+      && (!confirmationRequired || fact.verification_status === 'verified'),
+    );
+    const chapterTitles = (field.affects_sections || []).map((sectionKey) => (
+      project.input_contract?.chapters.find((item) => item.key === sectionKey)?.title || sectionKey
+    ));
+    return {
+      key,
+      title: field.title || key,
+      category: field.category || '其他资料',
+      expectedPeriod: field.expected_period || '',
+      sourceGuidance: field.source_guidance || '',
+      recommendedUpload: field.recommended_upload || '',
+      chapterTitles,
+      fact,
+      complete,
+    };
+  });
+  const completed = requirements.filter((item) => item.complete).length;
+  const groups = requirements.reduce<Record<string, typeof requirements>>((result, item) => {
+    (result[item.category] ||= []).push(item);
+    return result;
+  }, {});
+  return <section className="content-card data-readiness">
+    <div className="card-toolbar">
+      <div><span className="eyebrow">本期数据准备</span><h2>{completed}/{requirements.length} 项已就绪</h2></div>
+      <button type="button" className="primary compact" onClick={() => document.getElementById('miaobi-upload-materials')?.click()}><Upload size={15} />上传本期资料</button>
+    </div>
+    <div className="data-readiness-progress"><span style={{ width: `${Math.round(completed / requirements.length * 100)}%` }} /></div>
+    <p className="field-help">历史年报用于结构和同比参考；只有完成核验的本期数据会写入本期报告。缺少项只影响所列章节，不会阻止其他章节先起草。</p>
+    <div className="data-requirement-groups">{Object.entries(groups).map(([category, items]) => <details key={category} open={items.some((item) => !item.complete)}>
+      <summary><span>{category}</span><small>{items.filter((item) => item.complete).length}/{items.length} 已就绪</small></summary>
+      <div>{items.map((item) => <article key={item.key} className={item.complete ? 'complete' : 'missing'}>
+        <span className="data-requirement-state">{item.complete ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}</span>
+        <div><b>{item.title}{item.expectedPeriod ? <em>{item.expectedPeriod}</em> : null}</b><p>{item.complete ? `${formatValue(item.fact!.value)} ${item.fact!.unit || ''}` : (item.sourceGuidance || '尚未提供本期数据')}</p>{item.recommendedUpload && !item.complete && <small>建议上传：{item.recommendedUpload}</small>}{item.chapterTitles.length > 0 && <small>影响：{item.chapterTitles.join('、')}</small>}</div>
+        <span className={`status ${item.complete ? 'verified' : 'missing'}`}>{item.complete ? '已核验' : '待补充'}</span>
+      </article>)}</div>
+    </details>)}</div>
+  </section>;
 }
 
 const MATERIAL_ROLE_LABELS: Record<ProjectMaterial['material_role'], string> = {
@@ -604,7 +658,7 @@ export function MaterialsPanel({ project, document, materials, knowledgeContext,
   };
   return <>
     <section className="content-card project-materials">
-      <div className="card-toolbar"><div><span className="eyebrow">项目资料池</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><a className="secondary" aria-disabled={!materials.length} href={materials.length ? `/api/v1/writing/projects/${project.id}/writing-support.zip${document ? `?document_id=${encodeURIComponent(document.id)}` : ''}` : undefined} title="下载 YAML 写作支撑数据及 Markdown 结构说明"><Download size={15} />导出写作数据</a><button type="button" className="secondary upload-button" disabled={uploading || !uploadSpaceId} title={uploadSpaceId ? '可一次选择多个文件，上传前先选择统一的材料用途' : '未选择知识空间时仍可空白写作'} onClick={() => { setUploadItems([]); setUploadStatus(''); setUploadOpen(true); }}><Upload size={15} />{uploading ? '处理中…' : '上传资料'}</button><button type="button" className="primary compact" disabled={!uploadSpaceId} onClick={() => void loadCandidates()}>选择已有资料</button></div></div>
+      <div className="card-toolbar"><div><span className="eyebrow">项目资料池</span><h2>{materials.length ? `已选择 ${materials.length} 份` : '尚未选择材料'}</h2></div><div className="task-intro-actions"><a className="secondary" aria-disabled={!materials.length} href={materials.length ? `/api/v1/writing/projects/${project.id}/writing-support.zip${document ? `?document_id=${encodeURIComponent(document.id)}` : ''}` : undefined} title="下载 YAML 写作支撑数据及 Markdown 结构说明"><Download size={15} />导出写作数据</a><button id="miaobi-upload-materials" type="button" className="secondary upload-button" disabled={uploading || !uploadSpaceId} title={uploadSpaceId ? '可一次选择多个文件，上传前先选择统一的材料用途' : '未选择知识空间时仍可空白写作'} onClick={() => { setUploadItems([]); setUploadStatus(''); setUploadOpen(true); }}><Upload size={15} />{uploading ? '处理中…' : '上传资料'}</button><button type="button" className="primary compact" disabled={!uploadSpaceId} onClick={() => void loadCandidates()}>选择已有资料</button></div></div>
       {uploadStatus && <p className="upload-progress" role="status">{uploadStatus}</p>}
       {materials.length ? <div className="material-list">{materials.map((material) => <article key={material.id}><label className="article-material-check" title={document ? '控制当前文章是否采用这份材料' : '先创建文章'}><input type="checkbox" checked={material.adopted_by_article !== false} disabled={!document} onChange={() => void toggleForArticle(material)} /><span>用于本文</span></label><div><b>{material.document.title}</b><small>{material.version.filename} · 固定 V{material.version.version_number}{material.current_document_version ? '' : ' · 历史版本'}</small></div><div className="material-role-inline"><select aria-label={`设置${material.document.title}的材料角色`} title={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]} value={material.material_role} onChange={(event) => void updateRole(material, event.target.value as ProjectMaterial['material_role'])}>{material.material_role === 'attachment' && <option value="attachment">{MATERIAL_ROLE_LABELS.attachment}</option>}{SELECTABLE_MATERIAL_ROLES.map((value) => <option key={value} value={value} title={MATERIAL_ROLE_DESCRIPTIONS[value]}>{MATERIAL_ROLE_LABELS[value]}</option>)}</select><span className="material-role-question" tabIndex={0} aria-label={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]} data-tooltip={MATERIAL_ROLE_DESCRIPTIONS[material.material_role]}><HelpCircle size={14} /></span></div><button type="button" className="icon-button danger-icon" title="从项目资料池移除" onClick={() => void remove(material)}><Trash2 size={16} /></button></article>)}</div> : <div className="material-empty"><FileText /><div><b>{uploadSpaceId ? '上传本次业务资料，或选择已有资料' : '可先从空白文稿开始'}</b><span>{uploadSpaceId ? '妙笔会调用知识底座完成解析和检索；样稿只学习结构与表达，不作为业务事实。' : '编辑和导出可以直接使用；需要检索依据或上传资料时，再添加一个资料来源。'}</span></div>{!uploadSpaceId && <button type="button" className="secondary" onClick={() => void loadSpaces()}>添加资料来源</button>}</div>}
       {!uploadSpaceId && spaces.length > 0 && <div className="attach-space-row"><label>选择知识空间<select value={spaceId} onChange={(event) => setSpaceId(event.target.value)}>{spaces.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><button type="button" className="primary compact" disabled={!spaceId || attachingSpace} onClick={() => void attachSpace()}>{attachingSpace ? '添加中…' : '确认添加'}</button></div>}

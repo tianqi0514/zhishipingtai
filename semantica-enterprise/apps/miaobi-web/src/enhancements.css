@@ -292,6 +292,25 @@
 .missing-input-row td { color: #7b8798; background: #fffaf3; }
 .missing-input-row td:first-child b { color: #4d596e; }
 .missing-input-row button { border: 1px solid #eccb9c; border-radius: 8px; background: #fff6e8; color: #9a5b0b; padding: 6px 10px; }
+
+.data-readiness { display: grid; gap: 13px; }
+.data-readiness-progress { height: 7px; overflow: hidden; border-radius: 999px; background: #edf1f7; }
+.data-readiness-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4e7cff, #42b49c); transition: width .2s ease; }
+.data-requirement-groups { display: grid; gap: 9px; }
+.data-requirement-groups details { overflow: hidden; border: 1px solid #e3e8f0; border-radius: 11px; background: #fff; }
+.data-requirement-groups summary { display: flex; align-items: center; justify-content: space-between; padding: 11px 13px; cursor: pointer; list-style: none; color: #2b3850; font-size: 13px; font-weight: 650; }
+.data-requirement-groups summary::-webkit-details-marker { display: none; }
+.data-requirement-groups summary small { color: #758196; font-size: 11px; font-weight: 500; }
+.data-requirement-groups details > div { border-top: 1px solid #eef1f5; }
+.data-requirement-groups article { display: grid; grid-template-columns: 22px minmax(0,1fr) auto; gap: 9px; align-items: start; padding: 11px 13px; border-bottom: 1px solid #f0f2f6; }
+.data-requirement-groups article:last-child { border-bottom: 0; }
+.data-requirement-groups article.missing { background: #fffdf9; }
+.data-requirement-state { color: #d08a24; padding-top: 1px; }
+.data-requirement-groups article.complete .data-requirement-state { color: #249473; }
+.data-requirement-groups article b { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; color: #27344d; font-size: 13px; }
+.data-requirement-groups article b em { border-radius: 999px; background: #edf3ff; padding: 2px 7px; color: #4972c9; font-size: 10px; font-style: normal; font-weight: 600; }
+.data-requirement-groups article p { margin: 3px 0; color: #6d788a; font-size: 12px; }
+.data-requirement-groups article small { display: block; margin-top: 3px; color: #8a94a5; font-size: 11px; }
 .status.missing { color: #9a5b0b; background: #fff1d6; }
 .review-sidebar { display: flex; min-height: 100%; flex-direction: column; gap: 12px; }
 .review-sidebar > p { margin: 0; color: #758094; font-size: 12px; line-height: 1.6; }

@@ -58,8 +58,20 @@ export type Project = {
   };
   input_contract?: {
     required: string[];
-    properties: Record<string, { type?: string; title?: string; unit?: string; minimum?: number; maximum?: number; confirmation_required?: boolean }>;
-    chapters: Array<{ key: string; title: string }>;
+    properties: Record<string, {
+      type?: string;
+      title?: string;
+      unit?: string;
+      minimum?: number;
+      maximum?: number;
+      confirmation_required?: boolean;
+      source_guidance?: string;
+      category?: string;
+      expected_period?: string;
+      recommended_upload?: string;
+      affects_sections?: string[];
+    }>;
+    chapters: Array<{ key: string; title: string; required_inputs?: string[] }>;
   };
 };
 

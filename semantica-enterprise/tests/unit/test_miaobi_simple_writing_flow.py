@@ -41,6 +41,19 @@ def test_miaobi_upload_requires_a_meaningful_material_role_and_requests_writing_
     assert "报告附件" not in MIAOBI_APP
 
 
+def test_period_data_readiness_is_visible_and_links_to_real_upload() -> None:
+    assert "本期数据准备" in MIAOBI_APP
+    assert "建议上传：" in MIAOBI_APP
+    assert "影响：" in MIAOBI_APP
+    assert "miaobi-upload-materials" in MIAOBI_APP
+    assert "document.getElementById('miaobi-upload-materials')?.click()" in MIAOBI_APP
+    assert "历史年报用于结构和同比参考" in MIAOBI_APP
+
+
+def test_annual_report_is_a_first_class_article_type() -> None:
+    assert "{ value: 'annual_report', label: '年度报告' }" in MIAOBI_APP
+
+
 def test_legacy_earthquake_inputs_are_projected_as_business_labels() -> None:
     config = business_scenario_from_contract(
         {
