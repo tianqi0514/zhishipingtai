@@ -253,7 +253,7 @@ def ensure_project_and_article(
 ) -> dict[str, Any]:
     project = api.one("/writing/projects", "code", CODE)
     if project is None:
-        project = api.post("/writing/projects", {
+        payload = {
             "code": CODE,
             "name": "传神语联2025年度报告编制",
             "space_id": space["id"],
@@ -261,7 +261,20 @@ def ensure_project_and_article(
             "config": {
                 "subject": "以2024年度报告作为历史参照，编制2025年度报告；缺失的2025数据必须显式提示，不得用2024数据替代。",
             },
-        })
+        }
+        # A long annual report can finish parsing before its writing-graph
+        # extraction commits. The project API correctly rejects that interim
+        # state. Retry only this readiness conflict rather than creating a
+        # partial project or treating the parsed document as fully processed.
+        deadline = time.monotonic() + 7200
+        while True:
+            try:
+                project = api.post("/writing/projects", payload)
+                break
+            except RuntimeError as exc:
+                if "尚未完成知识加工" not in str(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(5)
     documents = api.get(f"/writing/projects/{project['id']}/documents")
     article = next((row for row in documents if row.get("title") == "传神语联2025年度报告（编制稿）"), None)
     if article is None:

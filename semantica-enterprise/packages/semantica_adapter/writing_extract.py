@@ -293,7 +293,13 @@ def writing_output_token_budget(
     """Return a bounded response budget proportional to signed source text."""
 
     source_chars = sum(len(item.text) for item in evidence)
-    ceiling = max(512, min(int(configured_max_tokens), 2048))
+    # Dense annual-report tables can express dozens of separately evidenced
+    # metrics inside one parser-owned span.  The former 2k ceiling truncated
+    # otherwise valid strict JSON for those spans and made a full document
+    # target fail after every other batch had succeeded.  Keep the budget
+    # proportional to the signed source text, while allowing a bounded 4k
+    # response for genuinely dense evidence.
+    ceiling = max(512, min(int(configured_max_tokens), 4096))
     return min(ceiling, max(768, source_chars * 5 + 1024))
 
 

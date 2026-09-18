@@ -2425,8 +2425,8 @@ def process_version_task(self, job_id: str) -> dict[str, Any]:
                         max_tokens=max(
                             768,
                             min(
-                                int((llm_model.config or {}).get("writing_graph_max_tokens", 2048)),
-                                2048,
+                                int((llm_model.config or {}).get("writing_graph_max_tokens", 4096)),
+                                4096,
                             ),
                         ),
                         concurrency=max(
