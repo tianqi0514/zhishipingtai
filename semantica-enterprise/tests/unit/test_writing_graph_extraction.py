@@ -243,10 +243,10 @@ def test_output_budget_is_bounded_by_source_size_and_operator_ceiling() -> None:
         "packages.semantica_adapter.writing_extract", fromlist=["WritingEvidenceInput"]
     ).WritingEvidenceInput
     short = [evidence_type.model_validate(EVIDENCE[0])]
-    assert 1024 <= writing_output_token_budget(short, 8192) < 1280
+    assert 1600 <= writing_output_token_budget(short, 8192) < 2000
 
     long = [evidence_type(evidence_id="evidence-0002", text="事实" * 5000)]
-    assert writing_output_token_budget(long, 8192) == 4096
+    assert writing_output_token_budget(long, 8192) == 8192
     assert writing_output_token_budget(long, 1024) == 1024
 
 

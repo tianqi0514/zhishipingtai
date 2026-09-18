@@ -299,8 +299,12 @@ def writing_output_token_budget(
     # target fail after every other batch had succeeded.  Keep the budget
     # proportional to the signed source text, while allowing a bounded 4k
     # response for genuinely dense evidence.
-    ceiling = max(512, min(int(configured_max_tokens), 4096))
-    return min(ceiling, max(768, source_chars * 5 + 1024))
+    ceiling = max(512, min(int(configured_max_tokens), 8192))
+    # Evidence ids are UUID-sized and are repeated across Entity, Claim,
+    # Relation and Metric rows.  Dense annual-report prose can therefore need
+    # materially more output tokens than its short Chinese source text even
+    # though the extraction remains bounded to one signed Evidence span.
+    return min(ceiling, max(768, source_chars * 10 + 1536))
 
 
 def _parse_model_json(provider: Any, content: str | None, finish_reason: str | None) -> dict[str, Any]:
