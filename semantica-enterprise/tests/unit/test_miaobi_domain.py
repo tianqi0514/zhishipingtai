@@ -270,6 +270,16 @@ def test_earthquake_numeric_criteria_feed_real_semantica_datalog() -> None:
     assert len(result["items"][0]["evidence"]) == 2
 
 
+def test_earthquake_numeric_criteria_accept_governed_writing_graph_values() -> None:
+    criteria = evaluate_earthquake_criteria(
+        {
+            "magnitude": {"value": 6.2, "raw_value": "6.2"},
+            "population_density": {"value": 305.6, "raw_value": "305.6"},
+        }
+    )
+    assert all(item["value"]["boolean"] is True for item in criteria)
+
+
 def test_production_export_builds_real_docx_xlsx_json_and_geojson() -> None:
     content = [
         {"id": "heading", "type": "h1", "children": [{"text": "灾情研判"}]},

@@ -396,9 +396,21 @@ def generate_alternative_plans(inputs: dict[str, Any], count: int = 3) -> list[d
 
 def evaluate_earthquake_criteria(facts: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     """Evaluate numeric thresholds before Datalog; no numeric comparison is faked in rules."""
-    magnitude = _number({"magnitude": (facts.get("magnitude") or {}).get("number")}, "magnitude")
+    # Project facts created by the original writing flow use ``number`` while
+    # governed writing-graph facts use ``value``/``raw_value``.  Both are
+    # verified numeric fact representations and must feed the same
+    # deterministic criteria evaluator.
+    def fact_number(name: str) -> Any:
+        fact = facts.get(name) or {}
+        for field in ("number", "value", "raw_value"):
+            value = fact.get(field)
+            if value is not None and not isinstance(value, bool):
+                return value
+        return None
+
+    magnitude = _number({"magnitude": fact_number("magnitude")}, "magnitude")
     density = _number(
-        {"population_density": (facts.get("population_density") or {}).get("number")},
+        {"population_density": fact_number("population_density")},
         "population_density",
     )
     return [

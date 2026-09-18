@@ -1025,6 +1025,7 @@ def _strict_report_quality(
     document: WritingDocument | None = None,
     content: list[dict[str, Any]],
     bindings: dict[str, dict[str, Any]],
+    section_plan: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     scenario, scenario_config, writing_policy = _scenario_runtime_settings(db, project, document)
     toolbox = dict(scenario_config.get("toolbox") or {})
@@ -1059,7 +1060,19 @@ def _strict_report_quality(
         reference_characters = int(sample_body["reference_body_characters"])
     report = report_quality_review(
         content,
-        section_plan=_section_plan_for_article(db, scenario, document, user) if document and sample_confirmed else _section_plan(scenario),
+        # A partial/sectional generation run is intentionally bounded to the
+        # confirmed sections stored on that immutable run.  Validating its
+        # checkpoint against the whole article template incorrectly reports
+        # every unrequested chapter as missing and prevents the generated
+        # chapter from ever being persisted.  Full-report callers omit this
+        # override and retain the complete article quality gate.
+        section_plan=(
+            section_plan
+            if section_plan is not None
+            else _section_plan_for_article(db, scenario, document, user)
+            if document and sample_confirmed
+            else _section_plan(scenario)
+        ),
         bindings=bindings,
         expected_computation_count=len(computations),
         expected_inference_count=inference_count,
@@ -4015,7 +4028,15 @@ def finalize_report_generation(
         input_facts=[serialize_row(f) for f in db.scalars(select(ProjectFact).where(ProjectFact.project_id == project.id, ProjectFact.active.is_(True), _active(ProjectFact)))],
     )
     binding_map = {item["block_id"]: item for item in new_bindings}
-    quality = _strict_report_quality(db, project=project, user=user, document=document, content=content, bindings=binding_map)
+    quality = _strict_report_quality(
+        db,
+        project=project,
+        user=user,
+        document=document,
+        content=content,
+        bindings=binding_map,
+        section_plan=list(run.section_plan or []),
+    )
     if not quality["ok"]:
         run.status = "quality_failed"
         run.stage = "quality_gate"

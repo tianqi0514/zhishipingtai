@@ -379,6 +379,35 @@ def test_quality_gate_rejects_duplicate_chapter_and_platform_process() -> None:
     }
 
 
+def test_partial_generation_quality_gate_only_checks_requested_chapters() -> None:
+    content = [
+        {"id": "title", "type": "h1", "children": [{"text": "报告"}]},
+        {"id": "general", "type": "h2", "children": [{"text": "一、总则"}]},
+        {
+            "id": "general-body",
+            "type": "p",
+            "children": [{"text": "本章说明当前报告的编制目的、适用范围和工作原则。"}],
+        },
+    ]
+    partial = report_quality_review(
+        content,
+        section_plan=[SECTIONS[0]],
+        bindings={},
+        require_citations=False,
+    )
+    full = report_quality_review(
+        content,
+        section_plan=SECTIONS,
+        bindings={},
+        require_citations=False,
+    )
+
+    assert partial["ok"] is True
+    assert partial["metrics"]["chapter_occurrences"] == {"一、总则": 1}
+    assert full["ok"] is False
+    assert {item["code"] for item in full["issues"]} == {"chapter_occurrence"}
+
+
 def test_generation_prompt_requires_one_strict_business_result() -> None:
     prompt = build_generation_prompt(project_name="地震方案", section_plan=SECTIONS, reference_characters=10_000)
     assert "只输出一个 JSON 对象" in prompt
