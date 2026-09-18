@@ -321,7 +321,7 @@ export function apply(ctx) {
           createUserMessage({
             content: [{
               type: 'text',
-              text: '本章所需的项目上下文、章节资料包和真实文档证据已经齐备。现在停止检索，严格按照本轮正式报告 JSON 契约输出唯一根对象 {"sections":[{...}],"warnings":[]}。sections 必须是数组且本轮只有一个章节对象；根层不能把 section_key、title、content_nodes、依赖数组或 status 平铺。章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings，禁止 status、state、progress 或其他字段。content_nodes 中 p、blockquote、h3 只能有 type 和 text，不得有 items；ul、ol 只能有 type 和一维 items，不得有 text；table 只能有 type 和二维 items，不得有 text。每个节点还可包含 input_refs、fact_ids、evidence_ids、relation_ids、computation_run_ids、public_reference_ids，但不得加入其他字段。不得输出工作过程、工具名或额外说明。',
+              text: '本章所需的项目上下文、章节资料包和真实文档证据已经齐备。现在停止检索，严格按照本轮正式报告 JSON 契约输出唯一根对象 {"sections":[{...}],"warnings":[]}。sections 必须是数组且本轮只有一个章节对象；根层不能把 section_key、title、content_nodes、依赖数组或 status 平铺。章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings，禁止 status、state、progress 或其他字段。content_nodes 中 p、blockquote、h3 只能有 type 和 text，不得有 items；ul、ol 只能有 type 和一维 items，不得有 text；table 只能有 type 和二维 items，不得有 text。每个节点还可包含 input_refs、metric_refs、writing_fact_refs、writing_evidence_refs、writing_relation_refs、public_reference_refs，但不得加入其他字段。input_refs 只填写项目已确认事实的 fact_key，不得填写 Chunk ID、Evidence ID、长哈希或 UUID；metric_refs 只填写计算结果 key；写作图谱 Fact、Evidence、Relation ID 必须分别填入对应的 writing_*_refs，不得跨类型。不得输出工作过程、工具名或额外说明。',
             }],
             source: { kind: 'plugin', plugin: name },
           }),
