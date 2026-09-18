@@ -345,6 +345,7 @@ def normalize_agent_heading_refs(
     *,
     input_keys: set[str],
     metric_keys: set[str],
+    source_chunk_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Discard only a confirmed heading mistakenly used as an input key.
 
@@ -352,6 +353,7 @@ def normalize_agent_heading_refs(
     citation, or legitimate input binding is changed.  Every other unknown
     dependency remains a hard validation error.
     """
+    source_chunk_ids = source_chunk_ids or set()
     headings = {
         str(item["key"]): set(item.get("subheadings") or [])
         for item in section_plan
@@ -373,6 +375,13 @@ def normalize_agent_heading_refs(
                     input_refs.append(ref)
                 elif ref in headings[key]:
                     removed.append({"section_key": key, "heading": ref})
+                elif ref in source_chunk_ids:
+                    # Source Chunk IDs are immutable evidence coordinates, not
+                    # structured ProjectFact keys.  Exact membership in this
+                    # article's pinned material versions lets us discard only
+                    # the misplaced dependency; the separately verified
+                    # Citation keeps the actual source binding intact.
+                    removed.append({"section_key": key, "source_chunk_id": ref})
                 else:
                     raise ValueError(f"章节“{section['title']}”使用了不存在的事实输入编码：{ref}")
             if "input_refs" in node:

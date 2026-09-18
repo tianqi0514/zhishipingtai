@@ -310,6 +310,17 @@ def test_confirmed_subheading_is_not_a_business_fact_binding():
     assert normalized[0]["content_nodes"][0]["text"] == "职责依据[1]"
     assert removals == [{"section_key": "chapter-a", "heading": "州抗震救灾指挥部"}]
     assert sections[0]["content_nodes"][0]["input_refs"] == ["州抗震救灾指挥部", "confirmed_staff"]
+    source_normalized, source_removals = normalize_agent_heading_refs(
+        [{**sections[0], "content_nodes": [
+            {"type": "p", "text": "真实来源[1]", "input_refs": ["chunk-sha", "confirmed_staff"]},
+        ]}],
+        plan,
+        input_keys={"confirmed_staff"},
+        metric_keys=set(),
+        source_chunk_ids={"chunk-sha"},
+    )
+    assert source_normalized[0]["content_nodes"][0]["input_refs"] == ["confirmed_staff"]
+    assert source_removals == [{"section_key": "chapter-a", "source_chunk_id": "chunk-sha"}]
     with pytest.raises(ValueError, match="不存在的事实输入编码"):
         normalize_agent_heading_refs(
             [{**sections[0], "content_nodes": [{"type": "p", "text": "未知", "input_refs": ["invented"]}]}],

@@ -3768,6 +3768,16 @@ def finalize_report_generation(
         str(((row.result or {}).get("output_fact") or {}).get("fact_key") or "")
         for row in _latest_computation_rows(db, project.id)
     }
+    source_version_ids = {
+        str(row.version_id) for row in _project_material_rows(db, project.id, document)
+    }
+    known_source_chunk_ids = set(db.scalars(
+        select(Chunk.chunk_id).where(
+            Chunk.version_id.in_(source_version_ids),
+            Chunk.status == "published",
+            _active(Chunk),
+        )
+    )) if source_version_ids else set()
     release_id = document.writing_graph_release_id or project.writing_graph_release_id
     allowed_graph_ids: dict[str, set[str]] = {
         "fact": set(), "evidence": set(), "relation": set(),
@@ -3790,6 +3800,7 @@ def finalize_report_generation(
             [pending[0]] if sectional else (run.section_plan or []),
             input_keys=known_input_keys,
             metric_keys=known_metric_keys,
+            source_chunk_ids=known_source_chunk_ids,
         )
     except ValueError as exc:
         run.status = "quality_failed"
@@ -3876,6 +3887,7 @@ def finalize_report_generation(
         sections, corrected_heading_refs = normalize_agent_heading_refs(
             sections, run.section_plan or [],
             input_keys=known_input_keys, metric_keys=known_metric_keys,
+            source_chunk_ids=known_source_chunk_ids,
         )
     except ValueError as exc:
         run.status = "quality_failed"
