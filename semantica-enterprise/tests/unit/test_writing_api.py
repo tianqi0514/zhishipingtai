@@ -27,6 +27,8 @@ from apps.api.writing_schemas import AgentWritingRequest
 from packages.platform.database import Base, get_db
 from packages.platform.models import (
     AgentCredential,
+    Chunk,
+    ChunkPolicy,
     Conversation,
     Document,
     DocumentVersion,
@@ -517,6 +519,9 @@ def test_writing_project_is_created_from_a_knowledge_space() -> None:
                 "name": "应急知识空间",
                 "code": "emergency",
                 "ready": True,
+                "retrieval_ready": True,
+                "writing_ready": True,
+                "source_chunk_count": 0,
                 "knowledge_version": 1,
                 "writing_graph_ready": False,
                 "writing_graph_releases": [],
@@ -537,6 +542,74 @@ def test_writing_project_is_created_from_a_knowledge_space() -> None:
         )
         assert context.status_code == 200, context.text
         assert [item["id"] for item in context.json()["spaces"]] == [spaces.json()[0]["id"]]
+
+
+def test_new_space_project_automatically_pins_current_published_chunks() -> None:
+    with writing_client() as (client, db, release):
+        seeded = _create_project(client, release.id)
+        space_id = db.scalar(select(KnowledgeProductReleaseItem.space_id).where(
+            KnowledgeProductReleaseItem.product_release_id == release.id,
+        ))
+        user_id = db.scalar(select(User.id))
+        policy = ChunkPolicy(
+            tenant_id=release.tenant_id,
+            name="自动锁定切片测试策略",
+            enabled=True,
+        )
+        document = Document(
+            tenant_id=release.tenant_id,
+            space_id=space_id,
+            title="科研楼项目建议书",
+            owner_id=user_id,
+            status="ready",
+        )
+        db.add_all([policy, document]); db.flush()
+        version = DocumentVersion(
+            tenant_id=release.tenant_id,
+            document_id=document.id,
+            version_number=1,
+            filename="科研楼项目建议书.md",
+            content_type="text/markdown",
+            size=128,
+            sha256="1" * 64,
+            object_key="tests/research-building.md",
+            status="processed",
+            parse_summary={"material_role": "task_data"},
+        )
+        db.add(version); db.flush()
+        document.current_version_id = version.id
+        db.add(Chunk(
+            tenant_id=release.tenant_id,
+            space_id=space_id,
+            document_id=document.id,
+            version_id=version.id,
+            chunk_policy_id=policy.id,
+            chunk_id="research-building-overview",
+            ordinal=1,
+            text="项目拟建设科研实验用房，主要服务教学科研需求。",
+            content_hash="2" * 64,
+            structural_path="项目概况",
+            source_span={},
+            scope_tokens=[],
+            status="published",
+        ))
+        db.commit()
+
+        created = client.post("/api/v1/writing/projects", json={
+            "code": "auto-pin-space-materials",
+            "name": "科研楼可研写作",
+            "scenario_package_version_id": seeded["scenario_package_version_id"],
+            "space_id": space_id,
+        })
+
+        assert created.status_code == 200, created.text
+        materials = client.get(
+            f"/api/v1/writing/projects/{created.json()['id']}/materials"
+        )
+        assert materials.status_code == 200, materials.text
+        assert [(item["document_id"], item["version_id"], item["material_role"]) for item in materials.json()] == [
+            (document.id, version.id, "task_data"),
+        ]
 
 
 def test_project_and_article_pin_one_immutable_writing_graph_release() -> None:

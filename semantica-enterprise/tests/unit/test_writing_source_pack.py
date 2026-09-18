@@ -24,3 +24,19 @@ def test_source_pack_does_not_guess_unmentioned_heading_or_exceed_bound():
     ], ["监测预报"], max_characters=20)
     assert [row["chunk_id"] for row in selected] == ["a"]
     assert truncated is True
+
+
+def test_source_pack_matches_generic_outline_to_business_heading():
+    rows = [
+        {"ordinal": 1, "text": "一、项目概况", "chunk_id": "overview"},
+        {"ordinal": 2, "text": "二、主要建设内容", "chunk_id": "construction"},
+        {"ordinal": 3, "text": "项目拟建设科研实验用房和公共服务空间。", "chunk_id": "construction-body"},
+        {"ordinal": 4, "text": "三、投资估算", "chunk_id": "investment"},
+    ]
+
+    selected, truncated = select_chapter_source_rows(rows, ["主要内容"])
+
+    assert [row["chunk_id"] for row in selected] == [
+        "construction", "construction-body", "investment",
+    ]
+    assert truncated is False

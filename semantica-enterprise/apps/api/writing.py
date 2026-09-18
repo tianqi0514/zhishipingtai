@@ -156,7 +156,7 @@ from packages.platform.writing_sample_profile import (
 )
 from packages.platform.writing_extraction import extraction_step_definitions
 from packages.platform.writing_chunks import sync_writing_version_chunks, version_chunk_dependencies
-from packages.platform.index_release import activate_knowledge_release
+from packages.platform.index_release import activate_knowledge_release, publish_index_snapshot
 from packages.platform.writing_export import CONTENT_TYPES, build_export_artifact
 from packages.platform.writing_configuration import (
     business_scenario_from_contract,
@@ -362,6 +362,49 @@ def _release_for_space(db: Session, space_id: str, user: User) -> KnowledgeProdu
             _active(IndexRelease),
         ).order_by(IndexRelease.release_number.desc())
     )
+    if latest_index is None:
+        source_version_ids = set(db.scalars(
+            select(Chunk.version_id)
+            .join(Document, Document.id == Chunk.document_id)
+            .where(
+                Chunk.tenant_id == user.tenant_id,
+                Chunk.space_id == space.id,
+                Chunk.status == "published",
+                Document.current_version_id == Chunk.version_id,
+                _active(Chunk),
+                _active(Document),
+            )
+            .distinct()
+        ))
+        if source_version_ids:
+            graph_release = db.scalar(select(GraphRelease).where(
+                GraphRelease.tenant_id == user.tenant_id,
+                GraphRelease.space_id == space.id,
+                GraphRelease.status == "published",
+                _active(GraphRelease),
+            ).order_by(GraphRelease.release_number.desc()))
+            try:
+                latest_index, _ = publish_index_snapshot(
+                    db,
+                    tenant_id=user.tenant_id,
+                    space_id=space.id,
+                    graph_release=graph_release,
+                    include_pending_version_ids=source_version_ids,
+                    publish_fulltext=True,
+                    publish_vector=False,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"知识空间已有写作切片，但全文检索发布失败：{str(exc)[:240]}",
+                ) from exc
+            knowledge_release = activate_knowledge_release(
+                db,
+                tenant_id=user.tenant_id,
+                space_id=space.id,
+                graph_release=graph_release,
+                index_release=latest_index,
+            )
     # Existing vector-only spaces predate the optional-graph release model.
     # Bind the *actual* latest index snapshot, never an outdated graph/index
     # pair or an invented graph projection.
@@ -584,6 +627,80 @@ def _is_internal_writing_configuration(document: Document, version: DocumentVers
         return True
     tags = {str(item).strip().lower() for item in (document.tags or [])}
     return bool(tags & {"system-configuration", "internal-contract", "系统配置", "内部契约"})
+
+
+def _pin_space_materials(
+    db: Session,
+    *,
+    project: WritingProject,
+    space_id: str,
+    user: User,
+) -> int:
+    """Pin current source versions when a project starts from a space.
+
+    Choosing a knowledge space is a business decision to use its current
+    material set.  Requiring a second, hidden document-by-document selection
+    left the writing Agent with an empty chapter source pack even though the
+    project visibly showed a ready space.
+    """
+    allowed_roles = {"policy_basis", "task_data", "reference", "sample_style", "attachment"}
+    count = 0
+    documents = list(db.scalars(select(Document).where(
+        Document.tenant_id == user.tenant_id,
+        Document.space_id == space_id,
+        Document.current_version_id.is_not(None),
+        _active(Document),
+    ).order_by(Document.updated_at.desc())))
+    for document in documents:
+        version = db.get(DocumentVersion, document.current_version_id)
+        if (
+            version is None
+            or version.deleted_at is not None
+            or version.status not in {"processed", "published", "ready"}
+            or _is_internal_writing_configuration(document, version)
+        ):
+            continue
+        has_chunks = db.scalar(select(func.count()).select_from(Chunk).where(
+            Chunk.version_id == version.id,
+            Chunk.status == "published",
+            _active(Chunk),
+        ))
+        if not has_chunks:
+            continue
+        declared_role = str((version.parse_summary or {}).get("material_role") or "reference")
+        role = declared_role if declared_role in allowed_roles else "reference"
+        existing = db.scalar(select(WritingProjectMaterial).where(
+            WritingProjectMaterial.project_id == project.id,
+            WritingProjectMaterial.version_id == version.id,
+        ))
+        if existing is not None:
+            existing.deleted_at = None
+            existing.document_id = document.id
+            existing.material_role = role
+            existing.usage_scope = "task_only"
+            existing.status = "active"
+            existing.material_metadata = {
+                **(existing.material_metadata or {}),
+                "pinned_sha256": version.sha256,
+                "auto_pinned_from_space": True,
+            }
+        else:
+            db.add(WritingProjectMaterial(
+                tenant_id=user.tenant_id,
+                project_id=project.id,
+                document_id=document.id,
+                version_id=version.id,
+                material_role=role,
+                usage_scope="task_only",
+                status="active",
+                material_metadata={
+                    "pinned_sha256": version.sha256,
+                    "auto_pinned_from_space": True,
+                },
+                added_by=user.id,
+            ))
+        count += 1
+    return count
 
 
 def _project_allowed_document_ids(
@@ -1495,11 +1612,24 @@ def list_writing_spaces(user: User = Depends(get_current_user), db: Session = De
             WritingGraphRelease.status.in_(["published", "superseded"]),
             _active(WritingGraphRelease),
         ).order_by(WritingGraphRelease.release_number.desc())))
+        source_chunk_count = int(db.scalar(select(func.count()).select_from(Chunk).join(
+            Document, Document.id == Chunk.document_id,
+        ).where(
+            Chunk.tenant_id == user.tenant_id,
+            Chunk.space_id == space.id,
+            Chunk.status == "published",
+            Document.current_version_id == Chunk.version_id,
+            _active(Chunk),
+            _active(Document),
+        )) or 0)
         result.append({
             "id": space.id,
             "name": space.name,
             "code": space.code,
             "ready": index is not None,
+            "retrieval_ready": index is not None,
+            "writing_ready": bool(index is not None or source_chunk_count),
+            "source_chunk_count": source_chunk_count,
             "knowledge_version": release.release_number if release else (index.release_number if index else None),
             "writing_graph_ready": bool(graph_releases),
             "writing_graph_releases": [
@@ -1633,6 +1763,12 @@ def create_project(
     row = WritingProject(tenant_id=user.tenant_id, owner_id=user.id, status="draft", **values)
     db.add(row)
     db.flush()
+    pinned_material_count = (
+        _pin_space_materials(
+            db, project=row, space_id=selected_space_id, user=user,
+        )
+        if selected_space_id else 0
+    )
     db.add(
         WritingProjectMember(
             tenant_id=user.tenant_id,
@@ -1653,7 +1789,10 @@ def create_project(
                 status="pending",
             )
         )
-    audit(db, user.tenant_id, user.id, "writing.project.create", "writing_project", row.id)
+    audit(
+        db, user.tenant_id, user.id, "writing.project.create", "writing_project", row.id,
+        {"space_id": selected_space_id, "auto_pinned_material_count": pinned_material_count},
+    )
     _commit(db, "方案任务编码已存在")
     db.refresh(row)
     return serialize_row(row)
@@ -4045,6 +4184,19 @@ def _rebase_project_to_release(
             "stale_reason": "knowledge_product_release_rebased",
             "previous_knowledge_product_release_id": old_release_id,
         }
+    existing_material_count = int(db.scalar(select(func.count()).select_from(WritingProjectMaterial).where(
+        WritingProjectMaterial.project_id == row.id,
+        WritingProjectMaterial.status == "active",
+        _active(WritingProjectMaterial),
+    )) or 0)
+    pinned_material_count = 0
+    if selected_space_id and existing_material_count == 0:
+        pinned_material_count = _pin_space_materials(
+            db,
+            project=row,
+            space_id=selected_space_id,
+            user=user,
+        )
     audit(
         db,
         user.tenant_id,
@@ -4060,6 +4212,7 @@ def _rebase_project_to_release(
             "writing_graph_release_id": next_graph_release_id,
             "stale_bindings": len(stale_bindings),
             "inherited_documents": len(inherited_documents),
+            "auto_pinned_material_count": pinned_material_count,
             "reason": reason,
         },
     )
@@ -4069,6 +4222,7 @@ def _rebase_project_to_release(
         "unchanged": False,
         "stale_bindings": len(stale_bindings),
         "inherited_documents": len(inherited_documents),
+        "auto_pinned_material_count": pinned_material_count,
     }
 
 

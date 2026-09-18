@@ -682,7 +682,7 @@ export function apply(ctx) {
     output: jsonOutput, timeoutMs: TIMEOUT_MS, isConcurrencySafe: () => true,
     execute: (args, exec) => authorizedPost(exec, '/internal/agent/writing/chapter-source-pack', {
       section_key: args.section_key,
-      max_characters: args.max_characters || 3000,
+      max_characters: args.max_characters || 5000,
     }),
   }))
 

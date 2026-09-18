@@ -1400,7 +1400,11 @@ def agent_writing_chapter_source_pack(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "本文没有这个章节")
     required_inputs = [str(item) for item in chapter.get("required_inputs") or [] if str(item)]
     toolbox_outputs = [str(item) for item in chapter.get("toolbox_outputs") or [] if str(item)]
-    terms = [str(chapter.get("title") or "")] + [str(term) for term in chapter.get("subheadings") or []]
+    terms = [
+        str(chapter.get("title") or ""),
+        str(chapter.get("instruction") or ""),
+        *[str(term) for term in chapter.get("subheadings") or []],
+    ]
     adopted = None if document.adopted_material_ids is None else set(document.adopted_material_ids)
     materials = list(db.scalars(select(WritingProjectMaterial).where(
         WritingProjectMaterial.project_id == project.id,
@@ -1408,6 +1412,7 @@ def agent_writing_chapter_source_pack(
         _active(WritingProjectMaterial),
     ).order_by(WritingProjectMaterial.created_at)))
     items: list[dict[str, Any]] = []
+    fallback_items: list[dict[str, Any]] = []
     remaining = payload.max_characters
     truncated = False
     for material in materials:
@@ -1434,11 +1439,24 @@ def agent_writing_chapter_source_pack(
             })
         selected, shortened = select_chapter_source_rows(rows, terms, max_characters=remaining)
         items.extend(selected)
+        fallback_items.extend([
+            row for row in rows
+            if len(str(row.get("text") or "").strip()) >= 20
+        ][:2])
         remaining -= sum(len(item["text"]) for item in selected)
         truncated = truncated or shortened
         if remaining < 300:
             truncated = True
             break
+    if not items and fallback_items:
+        remaining = payload.max_characters
+        for item in fallback_items:
+            size = len(str(item.get("text") or ""))
+            if size > remaining:
+                truncated = True
+                break
+            items.append(item)
+            remaining -= size
 
     snapshot_facts = {
         str(item.get("fact_key") or ""): item

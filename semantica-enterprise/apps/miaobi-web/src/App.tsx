@@ -29,13 +29,13 @@ import { createClientId } from './ids';
 import { createFrameDeltaBuffer } from './streaming';
 import type { AgentEvent, AgentMessage, AlternativePlan, ComputationRun, DecisionGate, ExportJob, Fact, KnowledgeContext, KnowledgeResult, KnowledgeSearchResponse, PlateNode, Project, ProjectMaterial, ProjectMaterialCandidate, ScenarioPackage, WritingAgentSession, WritingDocument, WritingGenerationRun, WritingInputChange } from './types/domain';
 import type { MarkdownSuggestionInsertion } from './editor/MiaobiEditor';
-import { ChapterEvidencePanel, ParagraphEvidenceList } from './components/ChapterEvidence';
+import { ParagraphEvidenceList } from './components/ChapterEvidence';
 import { ImpactPreviewDialog } from './components/ImpactPreviewDialog';
 import { EditorMetricChange } from './components/EditorMetricChange';
 import { SampleProfilePanel } from './components/SampleProfilePanel';
 import { ExtractionWorkbench } from './components/ExtractionWorkbench';
 
-type WritingSpace = { id: string; name: string; code: string; ready: boolean; knowledge_version?: number; writing_graph_ready: boolean; writing_graph_releases: Array<{ id: string; release_number: number; status: string; fact_count: number; relation_count: number }> };
+type WritingSpace = { id: string; name: string; code: string; ready: boolean; retrieval_ready?: boolean; writing_ready?: boolean; source_chunk_count?: number; knowledge_version?: number; writing_graph_ready: boolean; writing_graph_releases: Array<{ id: string; release_number: number; status: string; fact_count: number; relation_count: number }> };
 type User = { id: string; display_name: string; is_admin: boolean };
 type Tab = 'task' | 'writing' | 'overview' | 'facts' | 'reasoning' | 'plans' | 'review';
 type EditorInsertion = PlateNode | PlateNode[] | MarkdownSuggestionInsertion;
@@ -336,7 +336,7 @@ function CreateDocumentDialog({ project, onClose, onCreated, onError }: {
     } catch (reason) { onError(reason instanceof Error ? reason.message : '文章创建失败'); }
     finally { setSubmitting(false); }
   };
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}><section className="dialog create-document-dialog" role="dialog" aria-modal="true" aria-labelledby="create-document-title"><div className="dialog-head"><div><span className="eyebrow">第一步 · 明确写作任务</span><h2 id="create-document-title">新建文章</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={submitting}>×</button></div><div className="document-form-grid"><label className="wide">文章名称<input autoFocus value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="例如：积石山县地震应急处置方案" /></label><label>文章类型<select value={form.document_type} onChange={(event) => setForm({ ...form, document_type: event.target.value })}>{DOCUMENT_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>给谁看<input value={form.audience} onChange={(event) => setForm({ ...form, audience: event.target.value })} placeholder="例如：应急指挥部审阅" /></label><label className="wide">写作目的<textarea value={form.purpose} onChange={(event) => setForm({ ...form, purpose: event.target.value })} placeholder="这篇文章要解决什么问题、用于什么场合" /></label><label>地区<input value={form.region} onChange={(event) => setForm({ ...form, region: event.target.value })} /></label><label>组织<input value={form.organization} onChange={(event) => setForm({ ...form, organization: event.target.value })} /></label><label>事项<input value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} /></label><label>时间范围<input value={form.time_range} onChange={(event) => setForm({ ...form, time_range: event.target.value })} placeholder="例如：2026年9月" /></label><label className="wide">其他写作要求<textarea value={form.writing_requirements} onChange={(event) => setForm({ ...form, writing_requirements: event.target.value })} placeholder="可选：结构、重点、语气或必须保留的附件" /></label></div><p className="field-help">创建后直接进入完整编辑器。资料、目录和分析计算可以随后补充，不会阻止起草。</p><div className="dialog-actions"><button type="button" className="secondary" onClick={onClose} disabled={submitting}>取消</button><button type="button" className="primary" onClick={() => void submit()} disabled={submitting}>{submitting ? '创建中…' : '创建并开始写作'}</button></div></section></div>;
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}><section className="dialog create-document-dialog" role="dialog" aria-modal="true" aria-labelledby="create-document-title"><div className="dialog-head"><div><span className="eyebrow">新建文章</span><h2 id="create-document-title">这次要写什么</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={submitting}>×</button></div><div className="document-form-grid"><label className="wide">文章名称<input autoFocus value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="例如：科研楼建设项目可行性研究报告" /></label><label>文章类型<select value={form.document_type} onChange={(event) => setForm({ ...form, document_type: event.target.value })}>{DOCUMENT_TYPES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label>给谁看<input value={form.audience} onChange={(event) => setForm({ ...form, audience: event.target.value })} placeholder="例如：项目决策会议" /></label><label className="wide">写作目的<textarea value={form.purpose} onChange={(event) => setForm({ ...form, purpose: event.target.value })} placeholder="说明这篇文章要解决的问题" /></label></div><details className="optional-writing-fields"><summary>更多写作范围（可选）</summary><div className="document-form-grid"><label>地区<input value={form.region} onChange={(event) => setForm({ ...form, region: event.target.value })} /></label><label>组织<input value={form.organization} onChange={(event) => setForm({ ...form, organization: event.target.value })} /></label><label>事项<input value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} /></label><label>时间范围<input value={form.time_range} onChange={(event) => setForm({ ...form, time_range: event.target.value })} placeholder="例如：2026年9月" /></label><label className="wide">其他要求<textarea value={form.writing_requirements} onChange={(event) => setForm({ ...form, writing_requirements: event.target.value })} placeholder="例如：重点说明投资估算和建设必要性" /></label></div></details><p className="field-help">这些信息会参与目录规划、资料筛选和正文生成；未填写时使用项目资料中的有效范围。</p><div className="dialog-actions"><button type="button" className="secondary" onClick={onClose} disabled={submitting}>取消</button><button type="button" className="primary" onClick={() => void submit()} disabled={submitting}>{submitting ? '创建中…' : '开始写作'}</button></div></section></div>;
 }
 
 function TaskWorkspace({ project, materials, facts, computations, plans, documents, document, knowledgeContext, onChanged, onOpenEditor, onOpenDocument, onCreateDocument, onError }: {
@@ -374,7 +374,7 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
   });
   const steps = [
     { key: 'inputs' as const, index: 1, title: '准备资料', detail: !materials.length ? '可先空白起草' : ready ? `${verified} 项关键信息已确认` : `${pending} 项仅影响相关内容`, done: ready },
-    { key: 'toolbox' as const, index: 2, title: '起草编辑', detail: latest.size ? `已采用 ${latest.size} 项计算结果` : '按需检索、计算和推演', done: reportExists },
+    { key: 'toolbox' as const, index: 2, title: '写作', detail: reportExists ? '初稿已生成' : '生成或直接编辑', done: reportExists },
     { key: 'report' as const, index: 3, title: '检查导出', detail: reportExists ? '可进入审校与导出' : '形成草稿后检查', done: document?.status === 'published' },
   ];
   return <div className="task-workspace">
@@ -385,10 +385,10 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
       </button>)}
     </section>
     {stage === 'inputs' && <>
-      <section className="task-intro-card"><div><span className="eyebrow">准备资料</span><h2>选择依据，确认影响结论的关键信息</h2><p>可以先写已有依据的章节；缺失信息只影响相关内容，不妨碍打开空白文稿。</p></div><div className="task-intro-actions">{document && <button type="button" className="secondary" onClick={onOpenEditor}>打开空白文稿</button>}<button type="button" className="primary" onClick={() => setStage('toolbox')}>{nextLabel}<ChevronRight size={16} /></button></div></section>
+      <section className="task-intro-card"><div><span className="eyebrow">准备资料</span><h2>确认本文要使用的资料</h2></div><div className="task-intro-actions">{document && <button type="button" className="secondary" onClick={onOpenEditor}>直接编辑</button>}<button type="button" className="primary" onClick={() => setStage('toolbox')}>{nextLabel}<ChevronRight size={16} /></button></div></section>
       {knowledgeContext && <section className="compact-knowledge-baseline"><BookOpenCheck size={18} /><div><b>{knowledgeContext.spaces.map((space) => space.name).join('、')}</b><small>{knowledgeContext.task_material_count ? `${knowledgeContext.task_material_count} 份已选业务材料` : '尚未选择项目材料'} · {knowledgeContext.chunk_count} 个已发布知识片段</small></div><span className={`status ${knowledgeContext.release.is_latest ? 'verified' : 'pending'}`}>{knowledgeContext.release.is_latest ? '当前版本' : '有新版本'}</span></section>}
       <MaterialsPanel project={project} document={document} materials={materials} knowledgeContext={knowledgeContext} onChanged={onChanged} onError={onError} />
-      <ExtractionWorkbench projectId={project.id} documentId={document?.id} materialCount={materials.length} onError={onError} />
+      <details className="preparation-confirmations"><summary><span>查看资料抽取结果</span><small>按需查看</small></summary><div className="preparation-confirmation-body"><ExtractionWorkbench projectId={project.id} documentId={document?.id} materialCount={materials.length} onError={onError} /></div></details>
       <details className="preparation-confirmations" open={pending > 0}>
         <summary><span>确认结构与写作输入</span><small>{pending > 0 ? `${pending} 项待处理` : '已完成'}</small></summary>
         <div className="preparation-confirmation-body">
@@ -397,7 +397,6 @@ function TaskWorkspace({ project, materials, facts, computations, plans, documen
         </div>
       </details>
     </>}
-    {stage === 'toolbox' && <ChapterEvidencePanel projectId={project.id} onChanged={onChanged} />}
     {stage === 'toolbox' && <ReportGenerationPanel project={project} facts={facts} computations={computations} plans={plans} document={document} onChanged={onChanged} onOpenEditor={onOpenEditor} onBack={() => setStage('inputs')} onError={onError} />}
     {stage === 'report' && (document ? <section className="report-ready-card"><CheckCircle2 /><div><h2>{reportExists ? '文章可以检查和导出' : '文章草稿已经创建'}</h2><p>在完整编辑器中审校正文、逐段核对依据，并生成 Word 或 PDF。</p></div><button type="button" className="primary" onClick={onOpenEditor}>进入检查与导出<ChevronRight size={16} /></button></section> : <EmptyAction title="还没有文章" detail="先创建文章，再进入检查与导出。" action="新建文章" onClick={onCreateDocument} />)}
   </div>;
@@ -460,7 +459,7 @@ function MaterialsPanel({ project, document, materials, knowledgeContext, onChan
   const loadSpaces = async () => {
     try {
       const rows = await api<WritingSpace[]>('/writing/spaces');
-      const readySpaces = rows.filter((item) => item.ready);
+      const readySpaces = rows.filter((item) => item.writing_ready ?? item.ready);
       setSpaces(readySpaces);
       setSpaceId((current) => current || readySpaces[0]?.id || '');
     } catch (reason) { onError(reason instanceof Error ? reason.message : '知识空间加载失败'); }
@@ -714,7 +713,7 @@ export function ReportGenerationPanel({ project, facts, computations, plans, doc
   const conclusion = facts.find((item) => item.fact_type === 'semantica_inference' && item.freshness_status === 'current');
   const revisableChapters = (run?.section_plan || []).filter((item) => run?.toolbox_result?.agent_section_parts?.[item.key]);
   return <div className="toolbox-page">
-    <section className="task-intro-card"><div><span className="eyebrow">起草编辑</span><h2>根据当前文章需要生成初稿</h2><p>系统只生成已具备资料和已确认信息的章节；缺少信息的章节会明确保留为待补充，不会阻止整篇起草。</p></div><div className="task-intro-actions"><button type="button" className="secondary" disabled={running} onClick={onBack}>返回准备资料</button>{document && <button type="button" className="secondary" disabled={running} onClick={onOpenEditor}>直接编辑</button>}<button type="button" className="primary generation-button" disabled={running} onClick={() => void start()}><Sparkles size={17} />{running ? stageLabel : document ? '生成可写章节' : '创建并生成初稿'}</button>{running && <button type="button" className="danger-soft" onClick={() => void stop()}><Square size={15} />停止</button>}</div></section>
+    <section className="task-intro-card"><div><span className="eyebrow">写作</span><h2>生成初稿</h2></div><div className="task-intro-actions"><button type="button" className="secondary" disabled={running} onClick={onBack}>返回资料</button>{document && <button type="button" className="secondary" disabled={running} onClick={onOpenEditor}>直接编辑</button>}<button type="button" className="primary generation-button" disabled={running} onClick={() => void start()}><Sparkles size={17} />{running ? stageLabel : document ? '生成初稿' : '创建并生成初稿'}</button>{running && <button type="button" className="danger-soft" onClick={() => void stop()}><Square size={15} />停止</button>}</div></section>
     {(running || run) && <section className="generation-progress"><div><b>{stageLabel}</b><span>{progress}%</span></div><progress max="100" value={progress} /><small>进度来自真实后端任务与 Agent 事件，不使用固定动画伪造阶段。</small></section>}
     <section className="toolbox-summary-grid">
       <article><span>输入数据</span><b>{facts.filter((item) => item.verification_status === 'verified').length}/{facts.length}</b><small>只有已确认输入参与计算</small></article>
@@ -1345,14 +1344,14 @@ function EmptyAction({ title, detail, action, onClick }: { title: string; detail
 
 function CreateProjectDialog({ onClose, onCreated, onError }: { onClose: () => void; onCreated: (project: Project) => void; onError: (message: string) => void }) {
   const [spaces, setSpaces] = useState<WritingSpace[]>([]);
-  const [form, setForm] = useState({ name: '', subject: '', space_id: '', writing_graph_release_id: '' });
+  const [form, setForm] = useState({ name: '', subject: '', space_id: '' });
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     api<WritingSpace[]>('/writing/spaces')
       .then((spaceRows) => {
         setSpaces(spaceRows);
-        setForm((current) => ({ ...current, space_id: '', writing_graph_release_id: '' }));
+        setForm((current) => ({ ...current, space_id: '' }));
       }).catch((reason) => onError(reason instanceof Error ? reason.message : '创建表单加载失败'));
   }, []);
 
@@ -1361,7 +1360,7 @@ function CreateProjectDialog({ onClose, onCreated, onError }: { onClose: () => v
     setSubmitting(true);
     try {
       const applicationId = new URLSearchParams(window.location.search).get('application_id');
-      const project = await api<Project>('/writing/projects', { method: 'POST', body: { name: form.name.trim(), application_id: applicationId || undefined, space_id: form.space_id || undefined, writing_graph_release_id: form.writing_graph_release_id || undefined, config: { subject: form.subject.trim() } } });
+      const project = await api<Project>('/writing/projects', { method: 'POST', body: { name: form.name.trim(), application_id: applicationId || undefined, space_id: form.space_id || undefined, config: { subject: form.subject.trim() } } });
       onCreated(project);
     } catch (reason) {
       onError(reason instanceof ApiError ? reason.message : '创建项目失败');
@@ -1369,7 +1368,12 @@ function CreateProjectDialog({ onClose, onCreated, onError }: { onClose: () => v
   };
 
   const selectedSpace = spaces.find((item) => item.id === form.space_id);
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title"><div className="dialog-head"><div><span className="eyebrow">第一步</span><h2 id="create-title">新建写作项目</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={onClose}>×</button></div><label>项目名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：积石山县地震应急材料" autoFocus /></label><label>事项说明（可选）<textarea value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} placeholder="用一句话说明这个项目围绕什么事项开展" rows={3} /></label><label>已有知识空间（可选）<select value={form.space_id} onChange={(event) => { const space = spaces.find((item) => item.id === event.target.value); setForm({ ...form, space_id: event.target.value, writing_graph_release_id: space?.writing_graph_releases[0]?.id || '' }); }}><option value="">暂不选择，先空白写作</option>{spaces.map((item) => <option key={item.id} value={item.id} disabled={!item.ready}>{item.name}{item.ready ? '' : '（尚未完成加工）'}</option>)}</select></label>{selectedSpace && <label>写作图谱版本<select value={form.writing_graph_release_id} onChange={(event) => setForm({ ...form, writing_graph_release_id: event.target.value })}><option value="">不使用写作图谱</option>{selectedSpace.writing_graph_releases.map((item) => <option key={item.id} value={item.id}>R{item.release_number} · {item.fact_count} 事实 · {item.relation_count} 关系{item.status === 'published' ? ' · 当前' : ' · 历史'}</option>)}</select></label>}<p className="field-help">知识空间提供原文检索；已发布写作图谱提供经治理的事实、关系和来源。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={onClose}>取消</button><button type="button" className="primary" disabled={submitting || !form.name.trim()} onClick={() => void submit()}>{submitting ? '创建中…' : '创建项目'}</button></div></section></div>;
+  const selectedSpaceStatus = selectedSpace ? (
+    selectedSpace.retrieval_ready
+      ? `已就绪 · ${selectedSpace.source_chunk_count || 0} 个可用切片${selectedSpace.writing_graph_releases[0] ? ` · 写作图谱 R${selectedSpace.writing_graph_releases[0].release_number}` : ''}`
+      : `已有 ${selectedSpace.source_chunk_count || 0} 个可用切片，首次使用时自动准备检索`
+  ) : '';
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) onClose(); }}><section className="dialog compact-dialog" role="dialog" aria-modal="true" aria-labelledby="create-title"><div className="dialog-head"><div><span className="eyebrow">新建项目</span><h2 id="create-title">选择资料，开始写作</h2></div><button type="button" className="icon-button" disabled={submitting} onClick={onClose}>×</button></div><label>项目名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：科研楼可研报告" autoFocus /></label><label>知识空间（可选）<select value={form.space_id} onChange={(event) => setForm({ ...form, space_id: event.target.value })}><option value="">暂不选择，先空白写作</option>{spaces.map((item) => <option key={item.id} value={item.id} disabled={!(item.writing_ready ?? item.ready)}>{item.name}{(item.writing_ready ?? item.ready) ? '' : '（暂无可用切片）'}</option>)}</select></label>{selectedSpaceStatus && <p className="space-ready-hint">{selectedSpaceStatus}</p>}<details className="optional-writing-fields"><summary>补充项目说明（可选）</summary><label>事项说明<textarea value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} placeholder="用一句话说明这个项目围绕什么事项开展" rows={3} /></label></details><p className="field-help">选择空间后，系统自动锁定当前有效文档、切片和最新写作图谱，无需再配置版本。</p><div className="dialog-actions"><button type="button" className="secondary" disabled={submitting} onClick={onClose}>取消</button><button type="button" className="primary" disabled={submitting || !form.name.trim()} onClick={() => void submit()}>{submitting ? '创建中…' : '创建并开始写作'}</button></div></section></div>;
 }
 
 function statusLabel(value: string) { return ({ draft: '准备中', preparing: '数据准备', ready: '任务已创建', reasoning: '推演中', writing: '撰写中', reviewing: '审校中', published: '已发布' } as Record<string,string>)[value] || value; }

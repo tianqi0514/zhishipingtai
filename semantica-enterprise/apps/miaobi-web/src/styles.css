@@ -1315,6 +1315,14 @@ td small {
 .writing-knowledge-baseline small { color: #8490a4; font-size: 9px; }
 .writing-knowledge-baseline b { overflow: hidden; color: #253c61; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .writing-knowledge-baseline em { border-radius: 999px; background: #e3eeff; padding: 3px 6px; font-size: 9px; font-style: normal; white-space: nowrap; }
+.optional-writing-fields { margin: 2px 0 12px; border: 1px solid #e2e7ef; border-radius: 10px; background: #fafbfc; }
+.optional-writing-fields > summary { cursor: pointer; list-style: none; padding: 10px 12px; color: #526077; font-size: 12px; font-weight: 600; }
+.optional-writing-fields > summary::-webkit-details-marker { display: none; }
+.optional-writing-fields > summary::after { content: '⌄'; float: right; color: #8a94a7; }
+.optional-writing-fields[open] > summary::after { content: '⌃'; }
+.optional-writing-fields[open] > summary { border-bottom: 1px solid #e7ebf1; }
+.optional-writing-fields > label, .optional-writing-fields > .document-form-grid { margin: 0; padding: 12px; }
+.space-ready-hint { margin: -4px 0 10px; border-radius: 8px; background: #eef8f2; padding: 8px 10px; color: #24724a; font-size: 11px; }
 @media (max-width: 900px) {
   .input-config-row, .section-config-row, .config-cards, .config-publish-grid { grid-template-columns: 1fr; }
   .material-list article { grid-template-columns: 74px minmax(0, 1fr) 34px; }
