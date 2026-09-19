@@ -2261,3 +2261,133 @@ def test_input_change_rollback_creates_new_version_and_restores_authority() -> N
         assert current["content"][0]["value"] == 180
         current_facts = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
         assert next(row for row in current_facts if row["fact_key"] == "rescue_available")["value"]["number"] == 320
+
+
+def test_feasibility_price_change_recomputes_full_investment_chain() -> None:
+    with writing_client() as (client, _db, release):
+        project = _create_project(client, release.id)
+
+        def create_fact(key: str, label: str, number: float, unit: str) -> dict:
+            response = client.post(f"/api/v1/writing/projects/{project['id']}/facts", json={
+                "fact_key": key,
+                "label": label,
+                "fact_type": "official_brief",
+                "value": {"number": number},
+                "unit": unit,
+                "source_type": "official_brief",
+                "source_id": "feasibility-live-fixture",
+                "verification_status": "verified",
+            })
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        facts = {
+            "civil_quantity": create_fact("civil_quantity", "土建工程量", 10_000, "平方米"),
+            "civil_unit_price": create_fact("civil_unit_price", "土建综合单价", 3200, "元/平方米"),
+            "installation_quantity": create_fact("installation_quantity", "安装工程量", 10_000, "平方米"),
+            "installation_unit_price": create_fact("installation_unit_price", "安装综合单价", 800, "元/平方米"),
+            "other_cost": create_fact("other_cost", "工程建设其他费", 5_000_000, "元"),
+            "reserve_rate": create_fact("reserve_rate", "基本预备费率", 5, "%"),
+            "construction_interest": create_fact("construction_interest", "建设期利息", 1_000_000, "元"),
+        }
+
+        def compute(operation: str, inputs: dict, input_map: dict, output_key: str, label: str, unit: str, digits: int = 0) -> dict:
+            response = client.post(f"/api/v1/writing/projects/{project['id']}/compute", json={
+                "operation": operation,
+                "inputs": inputs,
+                "input_fact_ids": [facts[key]["id"] for key in input_map.values()],
+                "input_fact_map": {name: facts[key]["id"] for name, key in input_map.items()},
+                "output_fact_key": output_key,
+                "output_label": label,
+                "output_unit": unit,
+                "rounding": {"mode": "half_up", "digits": digits},
+            })
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            facts[output_key] = payload["generated_fact"]
+            return payload
+
+        civil = compute(
+            "quantity_amount", {"quantity": 10_000, "unit_price": 3200},
+            {"quantity": "civil_quantity", "unit_price": "civil_unit_price"},
+            "civil_cost", "土建工程费", "元",
+        )
+        installation = compute(
+            "quantity_amount", {"quantity": 10_000, "unit_price": 800},
+            {"quantity": "installation_quantity", "unit_price": "installation_unit_price"},
+            "installation_cost", "安装工程费", "元",
+        )
+        construction = compute(
+            "construction_installation_cost", {"civil_cost": 32_000_000, "installation_cost": 8_000_000},
+            {"civil_cost": "civil_cost", "installation_cost": "installation_cost"},
+            "construction_cost", "建安工程费", "元",
+        )
+        reserve = compute(
+            "basic_reserve", {"construction_cost": 40_000_000, "other_cost": 5_000_000, "reserve_rate": 5},
+            {"construction_cost": "construction_cost", "other_cost": "other_cost", "reserve_rate": "reserve_rate"},
+            "basic_reserve", "基本预备费", "元",
+        )
+        total = compute(
+            "total_investment",
+            {"construction_cost": 40_000_000, "other_cost": 5_000_000, "basic_reserve": 2_250_000, "construction_interest": 1_000_000},
+            {
+                "construction_cost": "construction_cost", "other_cost": "other_cost",
+                "basic_reserve": "basic_reserve", "construction_interest": "construction_interest",
+            },
+            "total_investment", "总投资", "元",
+        )
+        ratio = compute(
+            "investment_ratio", {"part": 40_000_000, "total": 48_250_000},
+            {"part": "construction_cost", "total": "total_investment"},
+            "construction_ratio", "建安工程费占比", "%", digits=2,
+        )
+        assert {civil["result"]["value"], installation["result"]["value"], construction["result"]["value"], reserve["result"]["value"]} == {
+            32_000_000, 8_000_000, 40_000_000, 2_250_000,
+        }
+
+        total_node = {
+            "id": "feasibility-total", "type": "computed_metric", "label": "总投资",
+            "value": 48_250_000, "unit": "元", "computation_run_id": total["id"],
+            "children": [{"text": "项目总投资为48250000元。"}],
+        }
+        ratio_node = {
+            "id": "feasibility-ratio", "type": "computed_metric", "label": "建安工程费占比",
+            "value": 82.9, "unit": "%", "computation_run_id": ratio["id"],
+            "children": [{"text": "建安工程费占总投资82.9%。"}],
+        }
+        document = client.post("/api/v1/writing/documents", json={
+            "project_id": project["id"], "title": "科研楼可研投资联动", "content": [total_node, ratio_node],
+        }).json()
+        for node, run in ((total_node, total), (ratio_node, ratio)):
+            response = client.post(f"/api/v1/writing/documents/{document['id']}/bindings", json={
+                "block_id": node["id"], "block_type": node["type"], "source_type": "computation",
+                "computation_run_id": run["id"], "content_hash": content_hash(node),
+                "block_content": node, "evidence_ids": run["input_fact_ids"], "verification_status": "verified",
+            })
+            assert response.status_code == 200, response.text
+
+        preview_response = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/preview", json={
+            "document_id": document["id"],
+            "changes": [{"fact_key": "civil_unit_price", "new_value": {"number": 3500}, "reason": "复核综合单价"}],
+        })
+        assert preview_response.status_code == 200, preview_response.text
+        preview = preview_response.json()
+        calculations = {item["result_key"]: item["new_value"] for item in preview["impact"]["calculations"]}
+        assert calculations == {
+            "civil_cost": 35_000_000,
+            "construction_cost": 43_000_000,
+            "basic_reserve": 2_400_000,
+            "total_investment": 51_400_000,
+            "construction_ratio": 83.66,
+        }
+        assert len(preview["impact"]["propagation"]["paths"]) >= 5
+
+        applied = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/apply", json={
+            "preview_id": preview["id"],
+            "accepted_block_ids": ["feasibility-total", "feasibility-ratio"],
+        })
+        assert applied.status_code == 200, applied.text
+        current = client.get(f"/api/v1/writing/documents/{document['id']}").json()["current_version"]
+        by_id = {item["id"]: item for item in current["content"]}
+        assert by_id["feasibility-total"]["value"] == 51_400_000
+        assert by_id["feasibility-ratio"]["value"] == 83.66

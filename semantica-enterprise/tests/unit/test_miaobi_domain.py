@@ -107,6 +107,46 @@ def test_resource_gap_ground_truth(required: int, available: int, expected: int)
     assert result["value"] == expected
 
 
+def test_feasibility_investment_formulas_and_missing_interest_guard() -> None:
+    civil = execute_formula("quantity_amount", {"quantity": 10_000, "unit_price": 3200})
+    installation = execute_formula("quantity_amount", {"quantity": 10_000, "unit_price": 800})
+    construction = execute_formula(
+        "construction_installation_cost",
+        {"civil_cost": civil["value"], "installation_cost": installation["value"]},
+    )
+    reserve = execute_formula(
+        "basic_reserve",
+        {"construction_cost": construction["value"], "other_cost": 5_000_000, "reserve_rate": 5},
+    )
+    total = execute_formula(
+        "total_investment",
+        {
+            "construction_cost": construction["value"],
+            "other_cost": 5_000_000,
+            "basic_reserve": reserve["value"],
+            "construction_interest": 1_000_000,
+        },
+    )
+    ratio = execute_formula(
+        "investment_ratio",
+        {"part": construction["value"], "total": total["value"]},
+        rounding={"mode": "half_up", "digits": 2},
+    )
+
+    assert civil["value"] == 32_000_000
+    assert installation["value"] == 8_000_000
+    assert construction["value"] == 40_000_000
+    assert reserve["value"] == 2_250_000
+    assert total["value"] == 48_250_000
+    assert ratio["value"] == 82.9
+
+    with pytest.raises(ValueError, match="construction_interest"):
+        execute_formula(
+            "total_investment",
+            {"construction_cost": 40_000_000, "other_cost": 5_000_000, "basic_reserve": 2_250_000},
+        )
+
+
 def test_formula_engine_never_evaluates_arbitrary_expression() -> None:
     with pytest.raises(ValueError, match="不支持的确定性公式"):
         execute_formula("__import__('os').system('id')", {})

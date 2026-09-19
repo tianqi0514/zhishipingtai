@@ -68,6 +68,27 @@ BUILTIN_FORMULAS = {
     "ambulance_trips": {"name": "救护车趟次", "expression": "ceil(severe_injured / (ambulances * persons_per_trip))", "unit": "趟"},
     "medical_pressure": {"name": "医疗分流压力", "expression": "severe_injured / available_trauma_beds", "unit": None},
     "route_utility": {"name": "路线效用评分", "expression": "controlled weighted route score", "unit": "分"},
+    "quantity_amount": {"name": "工程量金额", "expression": "quantity * unit_price", "unit": None},
+    "construction_installation_cost": {
+        "name": "建安工程费",
+        "expression": "civil_cost + installation_cost",
+        "unit": None,
+    },
+    "basic_reserve": {
+        "name": "基本预备费",
+        "expression": "(construction_cost + other_cost) * reserve_rate / 100",
+        "unit": None,
+    },
+    "total_investment": {
+        "name": "项目总投资",
+        "expression": "construction_cost + other_cost + basic_reserve + construction_interest",
+        "unit": None,
+    },
+    "investment_ratio": {
+        "name": "投资占比",
+        "expression": "part / total * 100",
+        "unit": "%",
+    },
 }
 
 
@@ -234,6 +255,29 @@ def execute_formula(
             + Decimal(str(params.get("capacity_weight", 6))) * _number(inputs, "capacity")
             - Decimal(str(params.get("slope_risk_weight", 8))) * _number(inputs, "slope_risk")
         )
+    elif operation == "quantity_amount":
+        result = _number(inputs, "quantity") * _number(inputs, "unit_price")
+    elif operation == "construction_installation_cost":
+        result = _number(inputs, "civil_cost") + _number(inputs, "installation_cost")
+    elif operation == "basic_reserve":
+        rate = _number(inputs, "reserve_rate")
+        if rate < 0:
+            raise ValueError("基本预备费率不能小于 0")
+        result = (_number(inputs, "construction_cost") + _number(inputs, "other_cost")) * rate / Decimal(100)
+    elif operation == "total_investment":
+        # An unknown financing cost is not zero. Requiring the input prevents
+        # an apparently precise but incomplete total from becoming authority.
+        result = (
+            _number(inputs, "construction_cost")
+            + _number(inputs, "other_cost")
+            + _number(inputs, "basic_reserve")
+            + _number(inputs, "construction_interest")
+        )
+    elif operation == "investment_ratio":
+        total = _number(inputs, "total")
+        if total <= 0:
+            raise ValueError("投资总额必须大于 0")
+        result = _number(inputs, "part") / total * Decimal(100)
     else:
         raise ValueError(f"不支持的确定性公式：{operation}")
     rounded = _round(result, rounding or {})

@@ -306,6 +306,8 @@ class ComputationRequest(StrictModel):
     operation: Literal[
         "resource_gap", "shelter_gap", "water_demand", "vehicle_trips", "ambulance_trips",
         "medical_pressure", "route_utility",
+        "quantity_amount", "construction_installation_cost", "basic_reserve",
+        "total_investment", "investment_ratio",
     ] | None = None
     inputs: dict[str, Any]
     parameters: dict[str, Any] = Field(default_factory=dict)

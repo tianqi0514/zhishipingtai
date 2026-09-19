@@ -4874,47 +4874,70 @@ def preview_input_changes(
     affected_calculations: list[dict[str, Any]] = []
     affected_run_ids: set[str] = set()
     all_latest = _latest_computation_rows(db, project.id)
-    for run in all_latest:
-        result = dict(run.result or {})
-        dependencies = dict(result.get("dependencies") or {})
-        if not set(dependencies.values()).intersection(proposed_by_key):
-            continue
-        definition = _tenant_row(
-            db,
-            ComputationDefinitionVersion,
-            run.definition_version_id,
-            user.tenant_id,
-            "公式版本",
-        )
-        preview_inputs = dict(run.inputs or {})
-        for input_name, fact_key in dependencies.items():
-            if fact_key not in proposed_by_key:
+    changed_keys = set(proposed_by_key)
+    # Re-evaluate the computation DAG to a fixed point. A direct change may
+    # update an amount, which updates a subtotal, which updates total
+    # investment and finally a ratio. Stopping after one hop would make the
+    # impact dialog look safe while leaving later figures inconsistent.
+    calculation_by_run_id: dict[str, dict[str, Any]] = {}
+    stabilized = False
+    for _depth in range(max(1, len(all_latest) * 2 + 1)):
+        progressed = False
+        for run in all_latest:
+            result = dict(run.result or {})
+            dependencies = dict(result.get("dependencies") or {})
+            if not set(dependencies.values()).intersection(changed_keys):
                 continue
-            value = proposed_by_key[fact_key]
-            preview_inputs[input_name] = value.get("number", value.get("value"))
-        try:
-            preview_result = execute_formula(
-                definition.operation,
-                preview_inputs,
-                parameters=result.get("parameters") or {},
-                rounding=result.get("rounding") or definition.rounding,
+            definition = _tenant_row(
+                db,
+                ComputationDefinitionVersion,
+                run.definition_version_id,
+                user.tenant_id,
+                "公式版本",
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"影响预览计算失败：{exc}") from exc
-        output = dict(result.get("output_fact") or {})
-        affected_run_ids.add(run.id)
-        affected_calculations.append(
-            {
+            preview_inputs = dict(run.inputs or {})
+            for input_name, fact_key in dependencies.items():
+                if fact_key not in proposed_by_key:
+                    continue
+                value = proposed_by_key[fact_key]
+                preview_inputs[input_name] = value.get("number", value.get("value"))
+            try:
+                preview_result = execute_formula(
+                    definition.operation,
+                    preview_inputs,
+                    parameters=result.get("parameters") or {},
+                    rounding=result.get("rounding") or definition.rounding,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"影响预览计算失败：{exc}") from exc
+            output = dict(result.get("output_fact") or {})
+            output_key = str(output.get("fact_key") or "")
+            previous_preview = proposed_by_key.get(output_key) if output_key else None
+            first_visit = run.id not in calculation_by_run_id
+            affected_run_ids.add(run.id)
+            calculation_by_run_id[run.id] = {
                 "previous_run_id": run.id,
-                "result_key": output.get("fact_key"),
+                "result_key": output_key or None,
                 "label": output.get("label") or result.get("operation"),
                 "unit": output.get("unit"),
                 "old_value": result.get("value"),
                 "new_value": preview_result["value"],
                 "formula": definition.expression,
                 "dependencies": dependencies,
+                "depth": _depth + 1,
             }
-        )
+            if output_key:
+                proposed_by_key[output_key] = {"number": preview_result["value"]}
+                changed_keys.add(output_key)
+            progressed = progressed or first_visit or previous_preview != proposed_by_key.get(output_key)
+        if not progressed:
+            stabilized = True
+            break
+    if not stabilized:
+        raise HTTPException(status_code=409, detail="计算依赖存在循环或无法解析的上游结果")
+    affected_calculations = sorted(
+        calculation_by_run_id.values(), key=lambda item: (int(item.get("depth") or 0), str(item["previous_run_id"]))
+    )
     bindings = list(
         db.scalars(
             select(WritingBlockBinding).where(
@@ -5098,6 +5121,27 @@ def preview_input_changes(
             propagation_edges.append(PropagationEdge(
                 f"project_fact:{fact_id}", f"computation_run:{run.id}",
                 "DERIVES_FROM", {"certainty": "definite", "formula_run_id": run.id},
+            ))
+    output_fact_by_run = {
+        str(row.source_id): row
+        for row in db.scalars(select(ProjectFact).where(
+            ProjectFact.project_id == project.id,
+            ProjectFact.fact_type == "deterministic_computation",
+            ProjectFact.source_id.in_([run.id for run in all_latest]),
+            _active(ProjectFact),
+        ))
+        if row.source_id
+    } if all_latest else {}
+    for run in all_latest:
+        output_fact = output_fact_by_run.get(run.id)
+        if output_fact is not None:
+            propagation_edges.append(PropagationEdge(
+                f"computation_run:{run.id}", f"project_fact:{output_fact.id}",
+                "DERIVES_FROM", {
+                    "certainty": "definite",
+                    "fact_key": output_fact.fact_key,
+                    "fact_version": output_fact.version,
+                },
             ))
     closure = propagation_closure(
         [f"project_fact:{item['fact_id']}" for item in requested],
@@ -6577,10 +6621,50 @@ def recompute_impacts(
             )
         )
     )
-    run_rows = list(db.scalars(select(ComputationRun).where(ComputationRun.project_id == project.id, _active(ComputationRun)).order_by(ComputationRun.created_at.desc())))
+    run_rows = _latest_computation_rows(db, project.id)
     runs = [serialize_row(row) for row in run_rows]
     bindings = [serialize_row(row) for row in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, _active(WritingBlockBinding)))]
     impact = affected_dependency_ids(fact_ids, runs, bindings)
+    affected_run_ids: set[str] = set(impact["computation_run_ids"])
+    affected_fact_keys = set(changed_keys)
+    # Expand by logical output keys, not only immutable Fact IDs. Downstream
+    # runs refer to the previous version of a computed Fact and must still be
+    # invalidated when its upstream source changes.
+    for _depth in range(len(run_rows) + 1):
+        progressed = False
+        for run in run_rows:
+            result = dict(run.result or {})
+            dependencies = set(dict(result.get("dependencies") or {}).values())
+            if not dependencies.intersection(affected_fact_keys):
+                continue
+            output_key = str(dict(result.get("output_fact") or {}).get("fact_key") or "")
+            if run.id not in affected_run_ids:
+                affected_run_ids.add(run.id)
+                progressed = True
+            if output_key and output_key not in affected_fact_keys:
+                affected_fact_keys.add(output_key)
+                progressed = True
+        if not progressed:
+            break
+    impact["computation_run_ids"] = sorted(affected_run_ids)
+    affected_blocks = {
+        str(binding["block_id"])
+        for binding in bindings
+        if (
+            str(binding.get("fact_id") or "") in fact_ids
+            or str(binding.get("computation_run_id") or "") in affected_run_ids
+            or affected_run_ids.intersection(
+                (binding.get("metadata_json") or binding.get("metadata") or {}).get("computation_run_ids") or []
+            )
+            or affected_fact_keys.intersection(
+                (binding.get("metadata_json") or binding.get("metadata") or {}).get("metric_keys") or []
+            )
+            or changed_keys.intersection(
+                (binding.get("metadata_json") or binding.get("metadata") or {}).get("input_keys") or []
+            )
+        )
+    }
+    impact["block_ids"] = sorted(set(impact["block_ids"]) | affected_blocks)
     if impact["block_ids"]:
         db.query(WritingBlockBinding).filter(WritingBlockBinding.document_id == document.id, WritingBlockBinding.block_id.in_(impact["block_ids"]), _active(WritingBlockBinding)).update({"freshness_status": "stale"}, synchronize_session=False)
     active_by_key = {
@@ -6594,67 +6678,94 @@ def recompute_impacts(
             )
         )
     }
-    latest_dependencies: dict[tuple[str, str], ComputationRun] = {}
-    for old_run in run_rows:
-        if old_run.id not in set(impact["computation_run_ids"]):
-            continue
-        output = dict((old_run.result or {}).get("output_fact") or {})
-        key = (old_run.definition_version_id, str(output.get("fact_key") or old_run.id))
-        latest_dependencies.setdefault(key, old_run)
+    pending_runs = [run for run in run_rows if run.id in affected_run_ids]
     replacements = []
-    for old_run in latest_dependencies.values():
-        dependencies = dict((old_run.result or {}).get("dependencies") or {})
-        if not dependencies:
-            replacements.append({"previous_run_id": old_run.id, "status": "manual_input_mapping_required"})
-            continue
-        missing = sorted(set(dependencies.values()) - set(active_by_key))
-        if missing:
-            replacements.append({"previous_run_id": old_run.id, "status": "missing_verified_facts", "missing": missing})
-            continue
-        input_facts = {name: active_by_key[fact_key] for name, fact_key in dependencies.items()}
-        inputs = dict(old_run.inputs or {})
-        for name, fact in input_facts.items():
-            inputs[name] = _fact_number(fact)
-        definition = _tenant_row(db, ComputationDefinitionVersion, old_run.definition_version_id, user.tenant_id, "公式版本")
-        expected_checksum = content_hash(
-            {
-                "definition": definition.checksum,
-                "inputs": inputs,
-                "parameters": (old_run.result or {}).get("parameters") or {},
-                "dependencies": dependencies,
-                "input_fact_ids": [row.id for row in input_facts.values()],
-            }
-        )
-        new_run = db.scalar(
-            select(ComputationRun).where(
-                ComputationRun.project_id == project.id,
-                ComputationRun.checksum == expected_checksum,
-                _active(ComputationRun),
-            ).order_by(ComputationRun.created_at.desc())
-        )
-        output_fact = dict((old_run.result or {}).get("output_fact") or {}) or None
-        generated = None
-        if new_run is None:
-            new_run, generated = _execute_computation_run(
-                db,
-                project=project,
-                user=user,
-                definition_version=definition,
-                inputs=inputs,
-                parameters=(old_run.result or {}).get("parameters") or {},
-                rounding=(old_run.result or {}).get("rounding") or definition.rounding,
-                input_facts=input_facts,
-                output_fact=output_fact,
+    for _depth in range(len(pending_runs) + 1):
+        if not pending_runs:
+            break
+        progressed = False
+        pending_output_keys = {
+            str(dict((run.result or {}).get("output_fact") or {}).get("fact_key") or "")
+            for run in pending_runs
+        } - {""}
+        for old_run in list(pending_runs):
+            dependencies = dict((old_run.result or {}).get("dependencies") or {})
+            # Recompute upstream outputs before consuming their new Fact
+            # versions. This prevents totals from mixing a new subtotal with
+            # an old reserve amount.
+            own_output = str(dict((old_run.result or {}).get("output_fact") or {}).get("fact_key") or "")
+            unresolved = set(dependencies.values()).intersection(pending_output_keys - {own_output})
+            if unresolved:
+                continue
+            progressed = True
+            pending_runs.remove(old_run)
+            if not dependencies:
+                replacements.append({"previous_run_id": old_run.id, "status": "manual_input_mapping_required"})
+                continue
+            missing = sorted(set(dependencies.values()) - set(active_by_key))
+            if missing:
+                replacements.append({"previous_run_id": old_run.id, "status": "missing_verified_facts", "missing": missing})
+                continue
+            input_facts = {name: active_by_key[fact_key] for name, fact_key in dependencies.items()}
+            inputs = dict(old_run.inputs or {})
+            for name, fact in input_facts.items():
+                inputs[name] = _fact_number(fact)
+            definition = _tenant_row(db, ComputationDefinitionVersion, old_run.definition_version_id, user.tenant_id, "公式版本")
+            expected_checksum = content_hash(
+                {
+                    "definition": definition.checksum,
+                    "inputs": inputs,
+                    "parameters": (old_run.result or {}).get("parameters") or {},
+                    "dependencies": dependencies,
+                    "input_fact_ids": [row.id for row in input_facts.values()],
+                }
             )
-        replacements.append(
-            {
-                "previous_run_id": old_run.id,
-                "replacement_run_id": new_run.id,
-                "status": "recomputed",
-                "result": new_run.result,
-                "generated_fact_id": generated.id if generated else None,
-            }
-        )
+            new_run = db.scalar(
+                select(ComputationRun).where(
+                    ComputationRun.project_id == project.id,
+                    ComputationRun.checksum == expected_checksum,
+                    _active(ComputationRun),
+                ).order_by(ComputationRun.created_at.desc())
+            )
+            output_fact = dict((old_run.result or {}).get("output_fact") or {}) or None
+            generated = None
+            if new_run is None:
+                new_run, generated = _execute_computation_run(
+                    db,
+                    project=project,
+                    user=user,
+                    definition_version=definition,
+                    inputs=inputs,
+                    parameters=(old_run.result or {}).get("parameters") or {},
+                    rounding=(old_run.result or {}).get("rounding") or definition.rounding,
+                    input_facts=input_facts,
+                    output_fact=output_fact,
+                )
+            if output_fact:
+                current_output = generated or db.scalar(select(ProjectFact).where(
+                    ProjectFact.project_id == project.id,
+                    ProjectFact.fact_key == str(output_fact.get("fact_key") or ""),
+                    ProjectFact.active.is_(True),
+                    _active(ProjectFact),
+                ).order_by(ProjectFact.version.desc()))
+                if current_output is not None:
+                    active_by_key[current_output.fact_key] = current_output
+            replacements.append(
+                {
+                    "previous_run_id": old_run.id,
+                    "replacement_run_id": new_run.id,
+                    "status": "recomputed",
+                    "result": new_run.result,
+                    "generated_fact_id": generated.id if generated else (current_output.id if output_fact and current_output else None),
+                }
+            )
+        if not progressed:
+            replacements.extend({
+                "previous_run_id": run.id,
+                "status": "cyclic_or_unresolved_dependency",
+                "dependencies": dict((run.result or {}).get("dependencies") or {}),
+            } for run in pending_runs)
+            break
     audit(db, user.tenant_id, user.id, "writing.document.impact", "writing_document", document.id, impact)
     if db.info.get("writing_atomic_input_apply"):
         db.flush()
