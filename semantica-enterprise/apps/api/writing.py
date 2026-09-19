@@ -4952,6 +4952,11 @@ def preview_input_changes(
     affected_calculations = sorted(
         calculation_by_run_id.values(), key=lambda item: (int(item.get("depth") or 0), str(item["previous_run_id"]))
     )
+    # Depth is an orchestration detail used only to order a fixed-point DAG.
+    # Keep the established public response contract stable for existing
+    # clients and plugins.
+    for item in affected_calculations:
+        item.pop("depth", None)
     bindings = list(
         db.scalars(
             select(WritingBlockBinding).where(
@@ -6657,18 +6662,27 @@ def recompute_impacts(
     run_rows: list[ComputationRun] = []
     selected_run_ids: set[str] = set()
     reachable_fact_ids = set(fact_ids)
+    reachable_fact_keys = set(changed_keys)
     for _depth in range(len(all_runs) + 1):
         progressed = False
         for run in all_runs:
             if run.id in selected_run_ids:
                 continue
-            if not reachable_fact_ids.intersection(str(item) for item in (run.input_fact_ids or [])):
+            result = dict(run.result or {})
+            dependency_keys = set(dict(result.get("dependencies") or {}).values())
+            if (
+                not reachable_fact_ids.intersection(str(item) for item in (run.input_fact_ids or []))
+                and not reachable_fact_keys.intersection(dependency_keys)
+            ):
                 continue
             selected_run_ids.add(run.id)
             run_rows.append(run)
             new_outputs = output_fact_ids_by_run.get(run.id, set()) - reachable_fact_ids
             if new_outputs:
                 reachable_fact_ids.update(new_outputs)
+            output_key = str(dict(result.get("output_fact") or {}).get("fact_key") or "")
+            if output_key:
+                reachable_fact_keys.add(output_key)
             progressed = True
         if not progressed:
             break
