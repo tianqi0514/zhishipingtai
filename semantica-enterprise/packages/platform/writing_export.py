@@ -56,6 +56,28 @@ def _cjk_font_name() -> str:
     return "Arial Unicode MS"
 
 
+def _docx_font_name() -> str:
+    """Return a portable Office CJK font name.
+
+    DOCX stores a font *request*, not the server font that happened to be
+    installed while the file was generated.  Persisting a Linux-only font
+    such as WenQuanYi makes Word/LibreOffice choose an unreliable Latin
+    fallback on another workstation.  Arial Unicode MS is deliberately used
+    for the OOXML request because the supported desktop renderers substitute
+    it with a CJK-capable system font when it is unavailable.
+    """
+    return "Arial Unicode MS"
+
+
+def _set_rfonts(rfonts, font_name: str) -> None:
+    for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
+        rfonts.set(qn(f"w:{attribute}"), font_name)
+    for attribute in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+        key = qn(f"w:{attribute}")
+        if key in rfonts.attrib:
+            del rfonts.attrib[key]
+
+
 def _node_text(node: dict[str, Any]) -> str:
     if "text" in node:
         return str(node.get("text") or "")
@@ -106,9 +128,9 @@ def bindings_for_content(content: list[dict[str, Any]], bindings: dict[str, dict
 
 
 def _set_run_font(run, size: float = 11, bold: bool = False) -> None:
-    font_name = _cjk_font_name()
+    font_name = _docx_font_name()
     run.font.name = font_name
-    run._element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), font_name)
+    _set_rfonts(run._element.get_or_add_rPr().rFonts, font_name)
     run.font.size = Pt(size)
     run.bold = bold
     run.font.color.rgb = RGBColor(0, 0, 0)
@@ -172,11 +194,14 @@ def _configure_docx(document: Document, title: str) -> None:
     section.left_margin = Inches(0.86)
     section.right_margin = Inches(0.78)
     styles = document.styles
-    font_name = _cjk_font_name()
+    font_name = _docx_font_name()
+    defaults = styles.element.xpath("./w:docDefaults/w:rPrDefault/w:rPr/w:rFonts")
+    if defaults:
+        _set_rfonts(defaults[0], font_name)
     for style_name, size, bold in (("Normal", 11, False), ("Title", 22, True), ("Heading 1", 16, True), ("Heading 2", 14, True), ("Heading 3", 12, True)):
         style = styles[style_name]
         style.font.name = font_name
-        style._element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), font_name)
+        _set_rfonts(style._element.get_or_add_rPr().rFonts, font_name)
         style.font.size = Pt(size)
         style.font.bold = bold
         style.font.color.rgb = RGBColor(0, 0, 0)

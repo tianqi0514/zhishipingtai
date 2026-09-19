@@ -215,6 +215,28 @@ def test_formal_export_does_not_invent_subtitle_or_platform_opening(tmp_path):
     assert [p.text for p in Document(target).paragraphs if p.text] == ["供水保障报告", "先核实库存。"]
 
 
+def test_formal_export_declares_portable_cjk_font_for_defaults_styles_and_runs(tmp_path):
+    import zipfile
+    from packages.platform.writing_export import build_docx
+
+    target = tmp_path / "portable-font.docx"
+    build_docx(
+        target,
+        title="科研楼建设项目可行性研究报告",
+        content=[{"type": "p", "children": [{"text": "建安工程费为四千三百万元。"}]}],
+        audit_summary={},
+    )
+    with zipfile.ZipFile(target) as archive:
+        styles = archive.read("word/styles.xml").decode("utf-8")
+        document = archive.read("word/document.xml").decode("utf-8")
+    for xml in (styles, document):
+        assert 'w:eastAsia="Arial Unicode MS"' in xml
+        assert 'w:ascii="Arial Unicode MS"' in xml
+        assert 'w:hAnsi="Arial Unicode MS"' in xml
+    assert "WenQuanYi Zen Hei" not in styles
+    assert "WenQuanYi Zen Hei" not in document
+
+
 def test_formal_export_preserves_native_plate_list_paragraphs(tmp_path):
     from docx import Document
     from packages.platform.writing_export import build_docx
