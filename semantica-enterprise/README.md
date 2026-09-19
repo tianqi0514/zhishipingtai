@@ -175,6 +175,18 @@ ADMIN_PASSWORD='your-admin-password' KEEP_CONVERSATIONS=1 python3 tests/e2e/grou
 
 ## 文档
 
+- [可控推演写作产品设计](docs/controlled-writing/PRODUCT_DESIGN.md)
+- [语料包产物映射](docs/controlled-writing/CORPUS_ARTIFACT_MAPPING.md)
+- [继承 Diff](docs/controlled-writing/INHERITANCE_DIFF.md)
+- [编辑语义 Diff](docs/controlled-writing/EDITOR_SEMANTIC_DIFF.md)
+- [传播引擎](docs/controlled-writing/PROPAGATION_ENGINE.md)
+- [影响预览](docs/controlled-writing/IMPACT_PREVIEW.md)
+- [DeepSeek Work 插件](docs/controlled-writing/DEEPSEEK_WORK_PLUGIN.md)
+- [可控写作测试报告](docs/controlled-writing/TEST_REPORT.md)
+- [可控写作浏览器测试](docs/controlled-writing/BROWSER_TEST_REPORT.md)
+- [可控写作部署记录](docs/controlled-writing/DEPLOYMENT.md)
+- [可控写作已知限制](docs/controlled-writing/KNOWN_LIMITATIONS.md)
+
 - [写作图谱产品设计](docs/miaobi/WRITING_GRAPH_PRODUCT_DESIGN.md)
 - [写作图谱数据模型](docs/miaobi/WRITING_GRAPH_DATA_MODEL.md)
 - [写作图谱抽取](docs/miaobi/WRITING_GRAPH_EXTRACTION.md)
