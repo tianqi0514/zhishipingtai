@@ -472,6 +472,9 @@ def propagation_closure(
     result = {
         "roots": root_list,
         "impacts": ordered,
+        # Keep an explicit path list for API/UI consumers that only need to
+        # render the proof routes without re-projecting every impact object.
+        "paths": [item["path"] for item in ordered],
         "direct_count": sum(item["direct"] for item in ordered),
         "indirect_count": sum(not item["direct"] for item in ordered),
         "cycles": cycles,
