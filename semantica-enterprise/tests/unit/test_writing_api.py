@@ -2098,3 +2098,166 @@ def test_draft_project_can_explicitly_rebase_to_a_new_immutable_knowledge_releas
         assert version.json()["version"] == 2
         assert version.json()["knowledge_product_release_id"] == new_release.id
         assert db.get(WritingDocumentVersion, old_version["id"]).knowledge_product_release_id == release.id
+
+
+def test_controlled_corpus_inheritance_and_editor_diff_are_persisted() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        space_id = db.scalar(select(KnowledgeProductReleaseItem.space_id).where(
+            KnowledgeProductReleaseItem.product_release_id == release.id,
+        ))
+        user_id = db.scalar(select(User.id))
+        policy = ChunkPolicy(tenant_id=release.tenant_id, name="受控语料测试切片", enabled=True)
+        source = Document(
+            tenant_id=release.tenant_id, space_id=space_id, title="科研楼历史可研样稿",
+            owner_id=user_id, status="ready",
+        )
+        db.add_all([policy, source])
+        db.flush()
+        sample_text = (
+            "1 项目概况\n本项目历史建筑面积为12000平方米，历史总投资为8500万元。\n"
+            "2 建设必要性\n项目建设应服务教学科研，并结合当前项目资料重新论证。\n"
+            "3 建设方案\n历史方案仅用于目录和行文结构参考，不得继承其中数值。\n"
+            "4 投资估算\n投资估算应由工程量、综合单价和其他费用确定性计算形成。\n"
+        ) * 3
+        source_version = DocumentVersion(
+            tenant_id=release.tenant_id, document_id=source.id, version_number=1,
+            filename="科研楼历史可研样稿.md", content_type="text/markdown",
+            size=len(sample_text.encode()), sha256=hashlib.sha256(sample_text.encode()).hexdigest(),
+            object_key="tests/controlled-corpus.md", status="processed",
+        )
+        db.add(source_version)
+        db.flush()
+        source.current_version_id = source_version.id
+        db.add(Chunk(
+            tenant_id=release.tenant_id, space_id=space_id, document_id=source.id,
+            version_id=source_version.id, chunk_policy_id=policy.id,
+            chunk_id="controlled-corpus-chunk", ordinal=0, text=sample_text,
+            content_hash=content_hash(sample_text), structural_path="document",
+        ))
+        material = WritingProjectMaterial(
+            tenant_id=release.tenant_id, project_id=project["id"], document_id=source.id,
+            version_id=source_version.id, material_role="sample_style", status="active",
+            added_by=user_id,
+        )
+        db.add(material)
+        db.commit()
+
+        corpus = client.post(
+            f"/api/v1/writing/projects/{project['id']}/corpus-packages",
+            json={"code": "research-building-corpus", "name": "科研楼可研语料包", "source_material_ids": [material.id]},
+        )
+        assert corpus.status_code == 200, corpus.text
+        artifacts = client.get(
+            f"/api/v1/writing/corpus-packages/{corpus.json()['id']}/artifacts"
+        )
+        assert artifacts.status_code == 200, artifacts.text
+        skeleton = artifacts.json()["skeletons"][0]["text"]
+        assert "12000" not in skeleton and "8500" not in skeleton
+        assert "{{node:" in skeleton
+        assert artifacts.json()["style_profile"]["sample_values_available_to_agent"] is False
+
+        inherited = client.post(
+            f"/api/v1/writing/projects/{project['id']}/inheritance/preview",
+            json={"corpus_package_version_id": corpus.json()["current_version"]["id"]},
+        )
+        assert inherited.status_code == 200, inherited.text
+        assert inherited.json()["blocking_issues"]
+        assert all(item["historical_value_inherited"] is False for item in inherited.json()["alignment"])
+
+        document = client.post("/api/v1/writing/documents", json={
+            "project_id": project["id"], "title": "科研楼可研受控编辑",
+            "content": [{"id": "intro", "type": "p", "children": [{"text": "项目用于教学科研。"}]}],
+        }).json()
+        change = client.post(
+            f"/api/v1/writing/documents/{document['id']}/changesets/preview",
+            json={"operations": [{
+                "operation": "MOD", "block_id": "intro",
+                "before": "项目用于教学科研。", "after": "项目主要服务教学科研活动。",
+            }]},
+        )
+        assert change.status_code == 200, change.text
+        assert change.json()["semantic_verdicts"][0]["semantic_relation"] == "NEW"
+        applied = client.post(
+            f"/api/v1/writing/documents/{document['id']}/changesets/{change.json()['id']}/apply",
+            json={"accepted_operation_indexes": [0]},
+        )
+        assert applied.status_code == 200, applied.text
+        assert applied.json()["document_version"]["content"][0]["children"][0]["text"] == "项目主要服务教学科研活动。"
+
+        unsafe = client.post(
+            f"/api/v1/writing/documents/{document['id']}/changesets/preview",
+            json={"operations": [{
+                "operation": "ADD", "block_id": "unbound-cost", "after": "项目总投资为9999万元。",
+            }]},
+        )
+        assert unsafe.status_code == 200, unsafe.text
+        blocked = client.post(
+            f"/api/v1/writing/documents/{document['id']}/changesets/{unsafe.json()['id']}/apply",
+            json={"accepted_operation_indexes": [0]},
+        )
+        assert blocked.status_code == 409
+        assert "无权威绑定" in blocked.text
+
+
+def test_input_change_rollback_creates_new_version_and_restores_authority() -> None:
+    with writing_client() as (client, _db, release):
+        project = _create_project(client, release.id)
+        facts = {}
+        for key, label, number in (
+            ("rescue_required", "搜救人员需求", 500),
+            ("rescue_available", "可用搜救人员", 320),
+        ):
+            response = client.post(f"/api/v1/writing/projects/{project['id']}/facts", json={
+                "fact_key": key, "label": label, "fact_type": "official_brief",
+                "value": {"number": number}, "unit": "人", "source_type": "official_brief",
+                "source_id": "rollback-test", "verification_status": "verified",
+            })
+            assert response.status_code == 200, response.text
+            facts[key] = response.json()
+        computed = client.post(f"/api/v1/writing/projects/{project['id']}/compute", json={
+            "operation": "resource_gap", "inputs": {"required": 500, "available": 320},
+            "parameters": {}, "rounding": {},
+            "input_fact_ids": [facts["rescue_required"]["id"], facts["rescue_available"]["id"]],
+            "input_fact_map": {
+                "required": facts["rescue_required"]["id"],
+                "available": facts["rescue_available"]["id"],
+            },
+            "output_fact_key": "rescue_gap", "output_label": "搜救人员缺口", "output_unit": "人",
+        })
+        assert computed.status_code == 200, computed.text
+        run = computed.json()
+        metric = {
+            "id": "rollback-metric", "type": "computed_metric", "label": "搜救人员缺口",
+            "value": 180, "unit": "人", "computation_run_id": run["id"],
+            "children": [{"text": "经核验与测算，搜救人员缺口为180人。"}],
+        }
+        document = client.post("/api/v1/writing/documents", json={
+            "project_id": project["id"], "title": "事实回滚测试", "content": [metric],
+        }).json()
+        binding = client.post(f"/api/v1/writing/documents/{document['id']}/bindings", json={
+            "block_id": metric["id"], "block_type": metric["type"], "source_type": "computation",
+            "computation_run_id": run["id"], "content_hash": content_hash(metric),
+            "block_content": metric, "evidence_ids": run["input_fact_ids"],
+            "verification_status": "verified",
+        })
+        assert binding.status_code == 200, binding.text
+        preview = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/preview", json={
+            "document_id": document["id"],
+            "changes": [{"fact_key": "rescue_available", "new_value": {"number": 400}, "reason": "回滚验证"}],
+        })
+        assert preview.status_code == 200, preview.text
+        applied = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/apply", json={
+            "preview_id": preview.json()["id"], "accepted_block_ids": ["rollback-metric"],
+        })
+        assert applied.status_code == 200, applied.text
+        rollback = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/{preview.json()['id']}/rollback"
+        )
+        assert rollback.status_code == 200, rollback.text
+        assert rollback.json()["status"] == "rolled_back"
+        current = client.get(f"/api/v1/writing/documents/{document['id']}").json()["current_version"]
+        assert current["version"] == 3
+        assert current["content"][0]["value"] == 180
+        current_facts = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
+        assert next(row for row in current_facts if row["fact_key"] == "rescue_available")["value"]["number"] == 320

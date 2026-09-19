@@ -552,6 +552,68 @@ class WritingInputChangeApply(StrictModel):
         return self
 
 
+class WritingCorpusPackageCreate(StrictModel):
+    code: str
+    name: str = Field(min_length=1, max_length=300)
+    source_material_ids: list[str] = Field(min_length=1, max_length=100)
+    writing_graph_release_id: str | None = None
+
+    _normalize_code = field_validator("code")(_code)
+
+    @model_validator(mode="after")
+    def unique_materials(self):
+        if len(self.source_material_ids) != len(set(self.source_material_ids)):
+            raise ValueError("语料包不能重复引用同一资料")
+        return self
+
+
+class WritingInheritancePreview(StrictModel):
+    corpus_package_version_id: str
+
+
+class WritingInheritanceApply(StrictModel):
+    alignment_id: str
+    accepted_node_keys: list[str] = Field(default_factory=list, max_length=1000)
+
+    @model_validator(mode="after")
+    def unique_nodes(self):
+        if len(self.accepted_node_keys) != len(set(self.accepted_node_keys)):
+            raise ValueError("不能重复选择同一继承节点")
+        return self
+
+
+class WritingEditOperation(StrictModel):
+    operation: Literal["ADD", "DEL", "MOD", "MOVE"]
+    block_id: str = Field(min_length=1, max_length=100)
+    before: str = Field(default="", max_length=50_000)
+    after: str = Field(default="", max_length=50_000)
+    from_section_id: str | None = Field(default=None, max_length=100)
+    to_section_id: str | None = Field(default=None, max_length=100)
+    binding_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
+class WritingChangeSetPreview(StrictModel):
+    operations: list[WritingEditOperation] = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def unique_operations(self):
+        keys = [(item.operation, item.block_id) for item in self.operations]
+        if len(keys) != len(set(keys)):
+            raise ValueError("一次编辑预览不能重复提交同一块的同类操作")
+        return self
+
+
+class WritingChangeSetApply(StrictModel):
+    accepted_operation_indexes: list[int] = Field(min_length=1, max_length=500)
+
+    @field_validator("accepted_operation_indexes")
+    @classmethod
+    def unique_operation_indexes(cls, value: list[int]) -> list[int]:
+        if len(value) != len(set(value)) or any(item < 0 for item in value):
+            raise ValueError("编辑操作序号必须唯一且不能小于0")
+        return value
+
+
 class WritingAgentEditCreate(StrictModel):
     action: Literal[
         "expand", "rewrite", "shorten", "formalize", "simplify", "tone",

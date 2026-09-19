@@ -122,6 +122,7 @@ from packages.platform.models import (
     WritingGenerationRun,
     WritingGraphReleaseItem,
     WritingInputChange,
+    WritingPropagationRun,
     WritingAgentEdit,
     WritingEventProjection,
     WritingReasoningRun,
@@ -153,6 +154,7 @@ from packages.platform.writing_flow import (
     validate_writing_graph_refs,
 )
 from packages.platform.writing_impact import find_plate_node, propose_bound_text_change
+from packages.platform.controlled_writing import PropagationEdge, propagation_closure, stable_checksum
 from packages.platform.writing_sample_profile import (
     extract_sample_profile, sample_main_body_lengths, validate_sample_profile,
 )
@@ -4984,13 +4986,25 @@ def preview_input_changes(
     calculation_by_key = {item["result_key"]: item for item in affected_calculations if item.get("result_key")}
     content_proposals: list[dict[str, Any]] = []
     for block_id in affected_blocks:
-        binding = binding_by_block[block_id]
+        binding = binding_by_block.get(block_id)
         node = find_plate_node((current_version.content if current_version else []) or [], block_id)
         section = block_sections.get(block_id, "报告正文")
         if node is None:
             content_proposals.append({
                 "block_id": block_id, "section": section, "selectable": False,
                 "reason": "正文块已移除，请人工核对", "impact_type": "definite",
+                "dependency_reasons": sorted(dependency_reasons.get(block_id) or []),
+            })
+            continue
+        if binding is None:
+            content_proposals.append({
+                "block_id": block_id, "section": section, "selectable": False,
+                "old_text": "".join(
+                    str(child.get("text") or "") for child in walk_plate_nodes([node])
+                    if isinstance(child, dict)
+                ),
+                "reason": "该正文块存在正式依赖但缺少兼容绑定，请人工核对",
+                "impact_type": "definite",
                 "dependency_reasons": sorted(dependency_reasons.get(block_id) or []),
             })
             continue
@@ -5055,6 +5069,81 @@ def preview_input_changes(
             for item in requested
         ],
     }
+    # Build an explainable dependency closure from immutable Fact and
+    # Computation versions to the current article chunks.  It is descriptive
+    # only: the actual selected mutations still occur in apply_input_changes.
+    propagation_edges: list[PropagationEdge] = []
+    dependency_by_chunk: dict[str, WritingChunk] = {}
+    if current_version is not None:
+        for chunk, dependency in version_chunk_dependencies(
+            db, document_version_id=current_version.id,
+        ):
+            dependency_by_chunk[chunk.id] = chunk
+            relation = "RESTATES" if dependency.binding_type in {
+                "project_fact", "computation_run", "inferred_fact", "writing_fact",
+            } else "REFERENCES"
+            propagation_edges.append(PropagationEdge(
+                f"{dependency.binding_type}:{dependency.binding_id}",
+                f"chunk:{chunk.chunk_id}",
+                relation,
+                {
+                    "certainty": "definite",
+                    "block_id": chunk.chunk_id,
+                    "section": block_sections.get(chunk.chunk_id, "报告正文"),
+                    "binding_version": dependency.binding_version,
+                },
+            ))
+    for run in all_latest:
+        for fact_id in run.input_fact_ids or []:
+            propagation_edges.append(PropagationEdge(
+                f"project_fact:{fact_id}", f"computation_run:{run.id}",
+                "DERIVES_FROM", {"certainty": "definite", "formula_run_id": run.id},
+            ))
+    closure = propagation_closure(
+        [f"project_fact:{item['fact_id']}" for item in requested],
+        propagation_edges,
+    )
+    bound_block_ids = set(binding_by_block)
+    suspected_impacts: list[dict[str, Any]] = []
+    for node in (current_version.content if current_version else []) or []:
+        block_id = str(node.get("id") or "")
+        if not block_id or block_id in bound_block_ids:
+            continue
+        text_value = "".join(
+            str(child.get("text") or "") for child in walk_plate_nodes([node])
+            if isinstance(child, dict)
+        )
+        matched_labels = [item["label"] for item in requested if item["label"] and item["label"] in text_value]
+        if matched_labels:
+            suspected_impacts.append({
+                "block_id": block_id,
+                "section": block_sections.get(block_id, "报告正文"),
+                "matched_labels": matched_labels,
+                "reason": "文字提到变更事实但未登记绑定，只能提示人工核对",
+                "impact_type": "suspected",
+                "automatic_update": False,
+            })
+    binding_snapshots = [
+        {
+            "id": row.id,
+            "source_type": row.source_type,
+            "source_id": row.source_id,
+            "source_version": row.source_version,
+            "chunk_id": row.chunk_id,
+            "fact_id": row.fact_id,
+            "inferred_fact_id": row.inferred_fact_id,
+            "query_run_id": row.query_run_id,
+            "retrieval_query_run_id": row.retrieval_query_run_id,
+            "computation_run_id": row.computation_run_id,
+            "tool_run_id": row.tool_run_id,
+            "evidence_ids": row.evidence_ids,
+            "content_hash": row.content_hash,
+            "verification_status": row.verification_status,
+            "freshness_status": row.freshness_status,
+            "metadata_json": row.metadata_json,
+        }
+        for row in bindings if row.block_id in set(affected_blocks)
+    ]
     impact = {
         "document_version_id": document.current_version_id,
         "input_changes": requested,
@@ -5069,8 +5158,10 @@ def preview_input_changes(
             for block_id in affected_blocks
         ],
         "content_proposals": content_proposals,
-        "suspected_impacts": [],
+        "propagation": closure,
+        "suspected_impacts": suspected_impacts,
         "unaffected_results": unchanged,
+        "binding_snapshots": binding_snapshots,
         "automatic_overwrite": False,
     }
     row = WritingInputChange(
@@ -5084,6 +5175,21 @@ def preview_input_changes(
         preview_fingerprint=content_hash(snapshot),
     )
     db.add(row)
+    db.flush()
+    db.add(WritingPropagationRun(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        source_type="input_change_preview",
+        source_id=row.id,
+        root_node_ids=closure["roots"],
+        graph_snapshot={
+            "document_version_id": document.current_version_id,
+            "edge_count": len(propagation_edges),
+        },
+        result=closure,
+        checksum=stable_checksum(closure),
+        created_by=user.id,
+    ))
     audit(db, user.tenant_id, user.id, "writing.input_change.preview", "writing_input_change", row.id, {"changed_keys": sorted(proposed_by_key)})
     db.commit()
     db.refresh(row)
@@ -5362,6 +5468,7 @@ def apply_input_changes(
         "accepted_block_ids": sorted(accepted_block_ids),
         "pending_review_block_ids": sorted(affected_block_ids - accepted_block_ids),
         "replacement_runs": recomputed.get("replacement_runs") or [],
+        "replacement_fact_ids": replacement_fact_ids,
     }
     audit(db, user.tenant_id, user.id, "writing.input_change.apply", "writing_input_change", preview.id, {"document_version_id": version.id, "changed_blocks": sorted(set(changed_blocks))})
     db.commit()
@@ -6791,3 +6898,5 @@ def _assemble_checked(**kwargs):
 
 from apps.api.writing_semantics import router as semantics_router
 router.include_router(semantics_router)
+from apps.api.writing_controlled import router as controlled_writing_router
+router.include_router(controlled_writing_router)

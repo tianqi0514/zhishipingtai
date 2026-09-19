@@ -15,6 +15,14 @@ const preview: WritingInputChange = {
       { block_id: 'paragraph', section: '处置行动', kind: 'p', selectable: true, old_text: '可用320人。', new_text: '可用400人。' },
       { block_id: 'review', section: '综合判断', kind: 'p', selectable: false, old_text: '资源压力较大。', reason: '需人工核对' },
     ],
+    suspected_impacts: [{ block_id: 'unbound', section: '摘要', reason: '文字提到变更事实但未登记绑定', matched_labels: ['可用搜救人员'] }],
+    propagation: {
+      roots: ['project_fact:available'], direct_count: 1, indirect_count: 2, truncated: false,
+      impacts: [{
+        node_id: 'chunk:metric', direct: false, depth: 2, relation: 'RESTATES', action: 'sync_text',
+        certainty: 'definite', path: ['project_fact:available', 'computation_run:gap', 'chunk:metric'],
+      }],
+    },
   },
 };
 
@@ -24,6 +32,8 @@ describe('指标影响预览', () => {
     render(<ImpactPreviewDialog preview={preview} submitting={false} onCancel={vi.fn()} onApply={onApply} />);
     expect(screen.getByText('缺口100人。', { exact: false })).toBeInTheDocument();
     expect(screen.getByText('可用400人。', { exact: false })).toBeInTheDocument();
+    expect(screen.getByLabelText('传播摘要')).toHaveTextContent('2 处间接影响');
+    expect(screen.getByText('这些文字没有登记权威绑定，系统不会自动修改。')).toBeInTheDocument();
     const review = screen.getByLabelText('采用综合判断中的更新') as HTMLInputElement;
     expect(review.disabled).toBe(true);
     fireEvent.click(screen.getByLabelText('采用处置行动中的更新'));

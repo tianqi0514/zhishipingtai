@@ -1774,6 +1774,77 @@ class WritingGraphReleaseItem(Base, TimestampMixin):
     snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class WritingCorpusPackage(Base, TimestampMixin):
+    """A governed source package used for structure and style inheritance.
+
+    Source documents remain authoritative in the document domain.  This row
+    identifies a versioned projection; it never becomes another editable copy
+    of Evidence, Fact or Relation.
+    """
+
+    __tablename__ = "writing_corpus_packages"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code", name="uq_writing_corpus_package_code"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_projects.id"), nullable=True, index=True
+    )
+    space_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_spaces.id"), nullable=True, index=True
+    )
+    code: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+
+
+class WritingCorpusPackageVersion(Base, TimestampMixin):
+    __tablename__ = "writing_corpus_package_versions"
+    __table_args__ = (
+        UniqueConstraint("package_id", "version", name="uq_writing_corpus_package_version"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    package_id: Mapped[str] = mapped_column(ForeignKey("writing_corpus_packages.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    source_document_version_ids: Mapped[list] = mapped_column(JSON, default=list)
+    writing_graph_release_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_graph_releases.id"), nullable=True, index=True
+    )
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict)
+    outline: Mapped[list] = mapped_column(JSON, default=list)
+    skeletons: Mapped[list] = mapped_column(JSON, default=list)
+    style_profile: Mapped[dict] = mapped_column(JSON, default=dict)
+    artifact_mapping: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="ready", index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+
+
+class WritingInheritanceAlignment(Base, TimestampMixin):
+    """Immutable inheritance preview; applying it records decisions, not old values."""
+
+    __tablename__ = "writing_inheritance_alignments"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    corpus_package_version_id: Mapped[str] = mapped_column(
+        ForeignKey("writing_corpus_package_versions.id"), index=True
+    )
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="preview", index=True)
+    alignment: Mapped[list] = mapped_column(JSON, default=list)
+    todo: Mapped[list] = mapped_column(JSON, default=list)
+    outline_diff: Mapped[dict] = mapped_column(JSON, default=dict)
+    blocking_issues: Mapped[list] = mapped_column(JSON, default=list)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    applied_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class WritingProject(Base, TimestampMixin):
     __tablename__ = "writing_projects"
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_writing_project_code"),)
@@ -2266,6 +2337,51 @@ class WritingInputChange(Base, TimestampMixin):
     )
     applied_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rollback_document_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_document_versions.id"), nullable=True, index=True
+    )
+    rolled_back_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WritingChangeSet(Base, TimestampMixin):
+    """A reviewed structural/semantic editor diff over one immutable version."""
+
+    __tablename__ = "writing_change_sets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("writing_documents.id"), index=True)
+    base_document_version_id: Mapped[str] = mapped_column(
+        ForeignKey("writing_document_versions.id"), index=True
+    )
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="preview", index=True)
+    operations: Mapped[list] = mapped_column(JSON, default=list)
+    semantic_verdicts: Mapped[list] = mapped_column(JSON, default=list)
+    propagation: Mapped[dict] = mapped_column(JSON, default=dict)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    applied_document_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("writing_document_versions.id"), nullable=True, index=True
+    )
+    applied_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WritingPropagationRun(Base, TimestampMixin):
+    """Immutable closure result used to explain direct and indirect impact."""
+
+    __tablename__ = "writing_propagation_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("writing_projects.id"), index=True)
+    source_type: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[str] = mapped_column(String(36), index=True)
+    root_node_ids: Mapped[list] = mapped_column(JSON, default=list)
+    graph_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
 
 
 class WritingAgentEdit(Base, TimestampMixin):

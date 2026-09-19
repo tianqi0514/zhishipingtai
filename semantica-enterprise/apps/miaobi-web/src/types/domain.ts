@@ -236,7 +236,7 @@ export type WritingInputChange = {
   id: string;
   project_id: string;
   document_id: string;
-  status: 'preview' | 'applied' | 'cancelled' | 'superseded';
+  status: 'preview' | 'applied' | 'cancelled' | 'superseded' | 'rolled_back';
   changes: Array<{ fact_key: string; label: string; old_value: Record<string, unknown>; new_value: Record<string, unknown>; unit?: string }>;
   impact: {
     calculations?: Array<{ result_key: string; label: string; old_value: number; new_value: number; unit?: string }>;
@@ -246,7 +246,19 @@ export type WritingInputChange = {
       old_text?: string; new_text?: string; reason?: string;
       impact_type?: 'definite' | 'suspected'; dependency_reasons?: string[];
     }>;
-    suspected_impacts?: Array<{ block_id: string; section: string; reason: string }>;
+    suspected_impacts?: Array<{ block_id: string; section: string; reason: string; matched_labels?: string[]; automatic_update?: boolean }>;
+    propagation?: {
+      roots?: string[];
+      direct_count?: number;
+      indirect_count?: number;
+      truncated?: boolean;
+      cycles?: string[][];
+      impacts?: Array<{
+        node_id: string; direct: boolean; depth: number; relation: string; action: string;
+        certainty: 'definite' | 'suspected'; path: string[];
+        metadata?: { section?: string; block_id?: string; binding_version?: string };
+      }>;
+    };
     accepted_block_ids?: string[];
     pending_review_block_ids?: string[];
     unaffected_results?: Array<{ result_key: string; label: string; value: number; unit?: string }>;
