@@ -1266,6 +1266,20 @@ def _execute_computation_run(
     return run, generated
 
 
+def _next_project_fact_version(db: Session, project_id: str, fact_key: str) -> int:
+    """Allocate an immutable Fact version even after an older version is restored.
+
+    Rollback changes which row is active; it never deletes the superseded row.
+    Consequently ``active.version + 1`` can collide with a retained history
+    version.  Version allocation must always use the persisted maximum.
+    """
+    return int(db.scalar(select(func.max(ProjectFact.version)).where(
+        ProjectFact.project_id == project_id,
+        ProjectFact.fact_key == fact_key,
+        _active(ProjectFact),
+    )) or 0) + 1
+
+
 def _upsert_generated_fact(
     db: Session,
     *,
@@ -1291,7 +1305,7 @@ def _upsert_generated_fact(
     )
     if current is not None and current.value == value and current.source_locator == source_locator:
         return current
-    version = current.version + 1 if current else 1
+    version = _next_project_fact_version(db, project.id, fact_key)
     if current is not None:
         current.active = False
         current.freshness_status = "superseded"
@@ -4615,7 +4629,7 @@ def create_fact(
 ):
     project = _project(db, project_id, user, "editor")
     current = db.scalar(select(ProjectFact).where(ProjectFact.project_id == project.id, ProjectFact.fact_key == payload.fact_key, ProjectFact.active.is_(True), _active(ProjectFact)).order_by(ProjectFact.version.desc()))
-    version = (current.version + 1) if current else 1
+    version = _next_project_fact_version(db, project.id, payload.fact_key)
     if current:
         current.active = False
         current.freshness_status = "superseded"
@@ -4804,7 +4818,7 @@ def confirm_fact(
             confidence=1.0,
             verification_status="verified",
             freshness_status="manual_override",
-            version=previous.version + 1,
+            version=_next_project_fact_version(db, previous.project_id, previous.fact_key),
             active=True,
             created_by=user.id,
             confirmed_by=user.id,
@@ -5324,7 +5338,7 @@ def apply_input_changes(
             confidence=1.0,
             verification_status="verified",
             freshness_status="manual_override",
-            version=previous.version + 1,
+            version=_next_project_fact_version(db, previous.project_id, previous.fact_key),
             active=True,
             created_by=user.id,
             confirmed_by=user.id,

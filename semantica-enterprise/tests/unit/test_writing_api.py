@@ -2262,6 +2262,23 @@ def test_input_change_rollback_creates_new_version_and_restores_authority() -> N
         current_facts = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
         assert next(row for row in current_facts if row["fact_key"] == "rescue_available")["value"]["number"] == 320
 
+        # Rollback reactivates v1 but deliberately preserves v2. A subsequent
+        # change must allocate v3 instead of colliding with the retained v2.
+        repeated = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/preview", json={
+            "document_id": document["id"],
+            "changes": [{"fact_key": "rescue_available", "new_value": {"number": 400}, "reason": "回滚后再次变更"}],
+        })
+        assert repeated.status_code == 200, repeated.text
+        repeated_apply = client.post(f"/api/v1/writing/projects/{project['id']}/input-changes/apply", json={
+            "preview_id": repeated.json()["id"], "accepted_block_ids": ["rollback-metric"],
+        })
+        assert repeated_apply.status_code == 200, repeated_apply.text
+        assert repeated_apply.json()["document_version"]["version"] == 4
+        facts_after_repeat = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
+        active = next(row for row in facts_after_repeat if row["fact_key"] == "rescue_available")
+        assert active["version"] == 3
+        assert active["value"]["number"] == 400
+
 
 def test_feasibility_price_change_recomputes_full_investment_chain() -> None:
     with writing_client() as (client, _db, release):
