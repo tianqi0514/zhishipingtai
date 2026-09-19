@@ -6609,19 +6609,56 @@ def recompute_impacts(
     if len(facts) != len(requested_fact_ids):
         raise HTTPException(status_code=422, detail="变更事实不存在或不属于当前方案任务")
     changed_keys = {fact.fact_key for fact in facts}
-    # Dependency runs are immutable and retain the exact historical fact ID.
-    # Expand a changed logical fact to every version of that key so a new fact
-    # version invalidates calculations that consumed its predecessor.
-    fact_ids = set(
+    # Application creates the new immutable Fact version before recomputing.
+    # A compatibility-only "latest run" query will therefore (correctly)
+    # reject the old run, but that old run is precisely the formula definition
+    # and dependency snapshot we must replay. Follow immutable predecessor IDs
+    # and computation output Fact IDs to collect the exact historical DAG.
+    fact_ids = {fact.id for fact in facts}
+    for fact in facts:
+        if fact.source_type == "manual_override" and fact.source_id:
+            predecessor = db.get(ProjectFact, fact.source_id)
+            if predecessor is not None and predecessor.project_id == project.id:
+                fact_ids.add(predecessor.id)
+    all_runs = list(
         db.scalars(
-            select(ProjectFact.id).where(
-                ProjectFact.project_id == project.id,
-                ProjectFact.fact_key.in_(changed_keys),
-                _active(ProjectFact),
-            )
+            select(ComputationRun).where(
+                ComputationRun.project_id == project.id,
+                ComputationRun.status == "succeeded",
+                _active(ComputationRun),
+            ).order_by(ComputationRun.created_at)
         )
     )
-    run_rows = _latest_computation_rows(db, project.id)
+    output_fact_ids_by_run: dict[str, set[str]] = {}
+    if all_runs:
+        for output_fact in db.scalars(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.source_type == "computation",
+                ProjectFact.source_id.in_([run.id for run in all_runs]),
+                _active(ProjectFact),
+            )
+        ):
+            output_fact_ids_by_run.setdefault(str(output_fact.source_id), set()).add(output_fact.id)
+    run_rows: list[ComputationRun] = []
+    selected_run_ids: set[str] = set()
+    reachable_fact_ids = set(fact_ids)
+    for _depth in range(len(all_runs) + 1):
+        progressed = False
+        for run in all_runs:
+            if run.id in selected_run_ids:
+                continue
+            if not reachable_fact_ids.intersection(str(item) for item in (run.input_fact_ids or [])):
+                continue
+            selected_run_ids.add(run.id)
+            run_rows.append(run)
+            new_outputs = output_fact_ids_by_run.get(run.id, set()) - reachable_fact_ids
+            if new_outputs:
+                reachable_fact_ids.update(new_outputs)
+            progressed = True
+        if not progressed:
+            break
+    fact_ids.update(reachable_fact_ids)
     runs = [serialize_row(row) for row in run_rows]
     bindings = [serialize_row(row) for row in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, _active(WritingBlockBinding)))]
     impact = affected_dependency_ids(fact_ids, runs, bindings)
