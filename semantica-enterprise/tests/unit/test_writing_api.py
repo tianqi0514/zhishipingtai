@@ -2279,6 +2279,17 @@ def test_input_change_rollback_creates_new_version_and_restores_authority() -> N
         active = next(row for row in facts_after_repeat if row["fact_key"] == "rescue_available")
         assert active["version"] == 3
         assert active["value"]["number"] == 400
+        repeated_rollback = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/{repeated.json()['id']}/rollback"
+        )
+        assert repeated_rollback.status_code == 200, repeated_rollback.text
+        facts_after_second_rollback = client.get(
+            f"/api/v1/writing/projects/{project['id']}/facts"
+        ).json()
+        by_key = {row["fact_key"]: row for row in facts_after_second_rollback}
+        assert len(facts_after_second_rollback) == len(by_key)
+        assert by_key["rescue_available"]["value"]["number"] == 320
+        assert by_key["rescue_gap"]["value"]["number"] == 180
 
 
 def test_feasibility_price_change_recomputes_full_investment_chain() -> None:

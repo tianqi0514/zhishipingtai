@@ -5353,6 +5353,20 @@ def apply_input_changes(
         db.flush()
         created_fact_ids.append(row.id)
         replacement_fact_ids[previous.id] = row.id
+    affected_result_keys = {
+        str(item.get("result_key") or "")
+        for item in (preview.impact or {}).get("calculations") or []
+        if item.get("result_key")
+    }
+    active_outputs_before_recompute = {
+        row.fact_key: row
+        for row in db.scalars(select(ProjectFact).where(
+            ProjectFact.project_id == project.id,
+            ProjectFact.fact_key.in_(affected_result_keys) if affected_result_keys else False,
+            ProjectFact.active.is_(True),
+            _active(ProjectFact),
+        ))
+    }
     # Keep fact replacement, deterministic recomputation and the document
     # version in one transaction.  If a formula or a bound node fails, no
     # half-applied input can leak into the current project.
@@ -5377,18 +5391,13 @@ def apply_input_changes(
     for replacement in recomputed.get("replacement_runs") or []:
         if replacement.get("status") != "recomputed":
             continue
-        previous_run_id = str(replacement.get("previous_run_id") or "")
         generated_fact_id = str(replacement.get("generated_fact_id") or "")
-        if not previous_run_id or not generated_fact_id:
-            continue
-        previous_output = db.scalar(
-            select(ProjectFact).where(
-                ProjectFact.project_id == project.id,
-                ProjectFact.source_type == "computation",
-                ProjectFact.source_id == previous_run_id,
-                _active(ProjectFact),
-            ).order_by(ProjectFact.version.desc())
+        result_key = str(
+            ((replacement.get("result") or {}).get("output_fact") or {}).get("fact_key") or ""
         )
+        if not result_key or not generated_fact_id:
+            continue
+        previous_output = active_outputs_before_recompute.get(result_key)
         generated_output = db.get(ProjectFact, generated_fact_id)
         if (
             previous_output is not None

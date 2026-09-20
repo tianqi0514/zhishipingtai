@@ -692,12 +692,21 @@ def rollback_input_change(
     # Facts are immutable, so previous_run_id and generated_fact_id provide a
     # deterministic, auditable old -> new mapping.  This also keeps rollback
     # compatible with already-applied previews during a rolling deployment.
+    baseline_run_ids = {
+        str(item.get("previous_run_id") or "")
+        for item in (preview.impact or {}).get("calculations") or []
+        if item.get("previous_run_id")
+    }
     for replacement in (preview.impact or {}).get("replacement_runs") or []:
         if replacement.get("status") != "recomputed":
             continue
         previous_run_id = str(replacement.get("previous_run_id") or "")
         generated_fact_id = str(replacement.get("generated_fact_id") or "")
-        if not previous_run_id or not generated_fact_id:
+        if (
+            not previous_run_id
+            or not generated_fact_id
+            or (baseline_run_ids and previous_run_id not in baseline_run_ids)
+        ):
             continue
         previous_output = db.scalar(
             select(ProjectFact).where(
