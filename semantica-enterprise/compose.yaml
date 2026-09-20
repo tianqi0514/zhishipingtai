@@ -5,6 +5,9 @@ x-app-environment: &app-environment
   APP_SECRET_KEY: ${APP_SECRET_KEY:-local-semantic-enterprise-2026-change-me}
   BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
   BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-Admin@123456}
+  # Direct HTTP development/test deployments must opt out explicitly. The
+  # production overlay overrides the default to true for HTTPS deployments.
+  AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
   DATABASE_URL: postgresql+psycopg://semantica:${POSTGRES_PASSWORD:-semantica}@postgres:5432/semantica
   REDIS_URL: redis://redis:6379/0
   CELERY_BROKER_URL: amqp://semantica:${RABBITMQ_PASSWORD:-semantica}@rabbitmq:5672//
