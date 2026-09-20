@@ -2261,6 +2261,7 @@ def test_input_change_rollback_creates_new_version_and_restores_authority() -> N
         assert current["content"][0]["value"] == 180
         current_facts = client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
         assert next(row for row in current_facts if row["fact_key"] == "rescue_available")["value"]["number"] == 320
+        assert next(row for row in current_facts if row["fact_key"] == "rescue_gap")["value"]["number"] == 180
 
         # Rollback reactivates v1 but deliberately preserves v2. A subsequent
         # change must allocate v3 instead of colliding with the retained v2.
@@ -2408,3 +2409,18 @@ def test_feasibility_price_change_recomputes_full_investment_chain() -> None:
         by_id = {item["id"]: item for item in current["content"]}
         assert by_id["feasibility-total"]["value"] == 51_400_000
         assert by_id["feasibility-ratio"]["value"] == 83.66
+
+        rollback = client.post(
+            f"/api/v1/writing/projects/{project['id']}/input-changes/{preview['id']}/rollback"
+        )
+        assert rollback.status_code == 200, rollback.text
+        current_facts = {
+            row["fact_key"]: row
+            for row in client.get(f"/api/v1/writing/projects/{project['id']}/facts").json()
+        }
+        assert current_facts["civil_unit_price"]["value"]["number"] == 3200
+        assert current_facts["civil_cost"]["value"]["number"] == 32_000_000
+        assert current_facts["construction_cost"]["value"]["number"] == 40_000_000
+        assert current_facts["basic_reserve"]["value"]["number"] == 2_250_000
+        assert current_facts["total_investment"]["value"]["number"] == 48_250_000
+        assert current_facts["construction_ratio"]["value"]["number"] == 82.9

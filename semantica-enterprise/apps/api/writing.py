@@ -5367,6 +5367,36 @@ def apply_input_changes(
         )
     finally:
         db.info.pop("writing_atomic_input_apply", None)
+    # A rollback must restore the entire authoritative Fact set, not only the
+    # manually changed root inputs.  Recalculation creates immutable output
+    # Fact versions and supersedes the previous output Facts.  Persist those
+    # old -> new replacements alongside the root replacements so rollback can
+    # atomically reactivate every prior derived value as well as the prose
+    # projection.  Without this mapping the document could show the old value
+    # while /facts still exposed the newer derived value.
+    for replacement in recomputed.get("replacement_runs") or []:
+        if replacement.get("status") != "recomputed":
+            continue
+        previous_run_id = str(replacement.get("previous_run_id") or "")
+        generated_fact_id = str(replacement.get("generated_fact_id") or "")
+        if not previous_run_id or not generated_fact_id:
+            continue
+        previous_output = db.scalar(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.source_type == "computation",
+                ProjectFact.source_id == previous_run_id,
+                _active(ProjectFact),
+            ).order_by(ProjectFact.version.desc())
+        )
+        generated_output = db.get(ProjectFact, generated_fact_id)
+        if (
+            previous_output is not None
+            and generated_output is not None
+            and generated_output.project_id == project.id
+            and previous_output.id != generated_output.id
+        ):
+            replacement_fact_ids[previous_output.id] = generated_output.id
     replacement_by_old = {
         str(item.get("previous_run_id")): item
         for item in recomputed.get("replacement_runs") or []

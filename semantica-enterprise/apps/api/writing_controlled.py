@@ -687,6 +687,34 @@ def rollback_input_change(
     if base is None:
         raise HTTPException(status_code=409, detail="变更前文稿版本不存在")
     replacement_ids = dict((preview.impact or {}).get("replacement_fact_ids") or {})
+    # Backfill derived Fact replacement pairs for previews created before the
+    # full replacement map was persisted.  Computation runs and their output
+    # Facts are immutable, so previous_run_id and generated_fact_id provide a
+    # deterministic, auditable old -> new mapping.  This also keeps rollback
+    # compatible with already-applied previews during a rolling deployment.
+    for replacement in (preview.impact or {}).get("replacement_runs") or []:
+        if replacement.get("status") != "recomputed":
+            continue
+        previous_run_id = str(replacement.get("previous_run_id") or "")
+        generated_fact_id = str(replacement.get("generated_fact_id") or "")
+        if not previous_run_id or not generated_fact_id:
+            continue
+        previous_output = db.scalar(
+            select(ProjectFact).where(
+                ProjectFact.project_id == project.id,
+                ProjectFact.source_type == "computation",
+                ProjectFact.source_id == previous_run_id,
+                _active(ProjectFact),
+            ).order_by(ProjectFact.version.desc())
+        )
+        generated_output = db.get(ProjectFact, generated_fact_id)
+        if (
+            previous_output is not None
+            and generated_output is not None
+            and generated_output.project_id == project.id
+            and previous_output.id != generated_output.id
+        ):
+            replacement_ids.setdefault(previous_output.id, generated_output.id)
     if not replacement_ids:
         raise HTTPException(status_code=409, detail="该旧变更没有完整回滚元数据")
     for old_id, new_id in replacement_ids.items():
