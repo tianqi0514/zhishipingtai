@@ -307,11 +307,14 @@ class ComputationRequest(StrictModel):
         "resource_gap", "shelter_gap", "water_demand", "vehicle_trips", "ambulance_trips",
         "medical_pressure", "route_utility",
         "quantity_amount", "construction_installation_cost", "basic_reserve",
-        "total_investment", "investment_ratio",
+        "total_investment", "investment_ratio", "amount_difference",
     ] | None = None
     inputs: dict[str, Any]
     parameters: dict[str, Any] = Field(default_factory=dict)
-    rounding: dict[str, Any] = Field(default_factory=lambda: {"mode": "half_up", "digits": 0})
+    # An empty value delegates to the immutable formula version.  Most
+    # formulas default to whole units while monetary differences default to
+    # cents, so one global default would be incorrect.
+    rounding: dict[str, Any] = Field(default_factory=dict)
     input_fact_ids: list[str] = Field(default_factory=list)
     input_fact_map: dict[str, str] = Field(default_factory=dict)
     output_fact_key: str | None = Field(default=None, min_length=1, max_length=160)
@@ -391,6 +394,69 @@ class WritingDocumentVersionCreate(StrictModel):
     content: list[dict[str, Any]]
     change_summary: str = Field(default="", max_length=4000)
     publish: bool = False
+    base_version_id: str | None = Field(default=None, max_length=36)
+    request_id: str | None = Field(default=None, min_length=8, max_length=100)
+
+
+class NativeChapterWorkPackageCreate(StrictModel):
+    section_key: str = Field(min_length=1, max_length=100)
+    request_id: str = Field(min_length=8, max_length=100)
+    fact_keys: list[str] = Field(default_factory=list, max_length=100)
+    source_chunk_ids: list[str] = Field(default_factory=list, max_length=30)
+
+
+class NativeOutlineSection(StrictModel):
+    key: str = Field(min_length=1, max_length=100, pattern=r"^[a-z][a-z0-9_-]*$")
+    title: str = Field(min_length=1, max_length=300)
+    instruction: str = Field(min_length=1, max_length=2000)
+    citation_required: bool = True
+    required_inputs: list[str] = Field(default_factory=list, max_length=100)
+    toolbox_outputs: list[str] = Field(default_factory=list, max_length=100)
+
+
+class NativeOutlineSave(StrictModel):
+    base_version_id: str = Field(min_length=1, max_length=36)
+    request_id: str = Field(min_length=8, max_length=100)
+    sections: list[NativeOutlineSection] = Field(min_length=1, max_length=60)
+
+    @model_validator(mode="after")
+    def unique_sections(self):
+        for field in ("key", "title"):
+            values = [getattr(item, field) for item in self.sections]
+            if len(values) != len(set(values)):
+                raise ValueError("目录章节编码及标题不可重复")
+        return self
+
+
+class NativeNumericOccurrence(StrictModel):
+    leaf_path: list[int] = Field(min_length=1, max_length=20)
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    source_type: Literal["fact", "computation"]
+    source_id: str = Field(min_length=1, max_length=100)
+    scale: Literal["1", "0.0001", "10000", "0.01", "100"] | None = None
+    decimal_places: int | None = Field(default=None, ge=0, le=8)
+    display_unit: str | None = Field(default=None, max_length=40)
+    grouping: bool = False
+    show_unit: bool = False
+
+
+class NativeChapterBinding(StrictModel):
+    block_id: str = Field(min_length=1, max_length=100)
+    fact_ids: list[str] = Field(default_factory=list, max_length=100)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=100)
+    computation_run_ids: list[str] = Field(default_factory=list, max_length=100)
+    writing_fact_ids: list[str] = Field(default_factory=list, max_length=100)
+    relation_ids: list[str] = Field(default_factory=list, max_length=100)
+    public_reference_ids: list[str] = Field(default_factory=list, max_length=100)
+    occurrences: list[NativeNumericOccurrence] = Field(default_factory=list, max_length=100)
+
+
+class NativeChapterSubmit(StrictModel):
+    checksum: str = Field(min_length=64, max_length=64)
+    request_id: str = Field(min_length=8, max_length=100)
+    draft_blocks: list[dict[str, Any]] = Field(min_length=1, max_length=120)
+    bindings: list[NativeChapterBinding] = Field(default_factory=list, max_length=120)
 
 
 class WritingBlockBindingUpsert(StrictModel):

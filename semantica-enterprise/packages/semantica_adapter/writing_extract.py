@@ -11,6 +11,10 @@ from .extract import _effective_temperature
 from .llm_transport import apply_model_transport_options
 
 
+class WritingExtractionTruncated(ValueError):
+    """The transport explicitly stopped before declaring a complete reply."""
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -317,12 +321,15 @@ def _parse_model_json(provider: Any, content: str | None, finish_reason: str | N
     and signed Evidence checks before any candidate is persisted.
     """
 
+    # A provider may return syntactically valid JSON and still report a token
+    # limit (for example, a repair-capable provider parser). Syntax alone must
+    # never turn an explicitly incomplete extraction into accepted candidates.
+    if str(finish_reason or "").casefold() in {"length", "max_tokens"}:
+        raise WritingExtractionTruncated("模型结构化响应因输出上限截断，不能安全修复")
     raw_content = content or ""
     try:
         parsed = provider._parse_json(raw_content)
     except Exception:
-        if str(finish_reason or "").casefold() in {"length", "max_tokens"}:
-            raise ValueError("模型结构化响应因输出上限截断，不能安全修复")
         from json_repair import loads as repair_json_loads
 
         parsed = repair_json_loads(raw_content)
@@ -358,6 +365,14 @@ def extract_writing_knowledge(
     if not normalized:
         return JointWritingExtraction()
     prompt = writing_extraction_prompt(normalized, material_role=material_role)
+    output_budget = writing_output_token_budget(normalized, max_tokens)
+    retry_ceiling = max(512, min(int(max_tokens), 8192))
+    if material_role == "sample_style":
+        # Preserve the existing context safety bound for larger sample batches.
+        # A separate smaller sample batch, not an unbounded response, is needed
+        # if a profile cannot fit this budget.
+        output_budget = min(output_budget, 1792)
+        retry_ceiling = min(retry_ceiling, 1792)
     if generator is None:
         from semantica.semantic_extract.providers import OpenAIProvider
 
@@ -373,11 +388,6 @@ def extract_writing_knowledge(
         # extraction output may be larger than the source, but never needs an
         # unbounded answer.  This is a transport guard, not a truncation of
         # persisted evidence.
-        output_budget = writing_output_token_budget(normalized, max_tokens)
-        if material_role == "sample_style":
-            # Leave a safety margin for 16k-context local models. A concise
-            # structure/style profile does not require the full 2k ceiling.
-            output_budget = min(output_budget, 1792)
         effective_temperature = _effective_temperature(model, temperature)
 
         def provider_generator(value: str) -> dict[str, Any]:
@@ -450,6 +460,14 @@ def extract_writing_knowledge(
             )
             if not invalid_structured_output or attempt + 1 >= attempts:
                 raise
+            # Source length is only an estimate: repeated UUID provenance and
+            # a dense short row can require more tokens. Retrying with the
+            # identical estimated budget repeats the same failure. Escalate
+            # only after explicit truncation, within this call's operator
+            # ceiling and existing retry count. Never change model config or
+            # persist a repaired/truncated prefix as a successful batch.
+            if isinstance(exc, WritingExtractionTruncated):
+                output_budget = retry_ceiling
             current_prompt = (
                 prompt
                 + "\n\n纠错重试：上一轮输出不是可校验的完整 JSON。"

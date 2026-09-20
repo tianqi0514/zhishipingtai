@@ -21,6 +21,7 @@ from .models import (
     WritingSection,
 )
 from .writing import content_hash
+from .writing_occurrences import validate_numeric_occurrences
 
 
 HEADING_TYPES = {"h1", "h2", "h3", "heading1", "heading2", "heading3"}
@@ -63,27 +64,30 @@ def _walk_with_section(
         yield from descendants(node, current)
 
 
-def _dependency_specs(binding: WritingBlockBinding | None) -> list[dict[str, Any]]:
-    if binding is None:
-        return []
-    metadata = dict(binding.metadata_json or {})
+def _dependency_specs(binding: WritingBlockBinding | None, node: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    metadata = dict(binding.metadata_json or {}) if binding else {}
     values: list[tuple[str, str | None, str | None, dict[str, Any]]] = []
 
     def add(binding_type: str, binding_id: str | None, version: str | None = None, **extra: Any) -> None:
         if binding_id:
             values.append((binding_type, str(binding_id), version, extra))
 
-    add("project_fact", binding.fact_id, binding.source_version)
+    if binding:
+        add("project_fact", binding.fact_id, binding.source_version)
     for item in metadata.get("input_fact_ids") or []:
         add("project_fact", str(item))
-    add("computation_run", binding.computation_run_id)
+    if binding:
+        add("computation_run", binding.computation_run_id)
     for item in metadata.get("computation_run_ids") or []:
         add("computation_run", str(item))
-    add("source_chunk", binding.chunk_id, binding.source_version)
-    add("inferred_fact", binding.inferred_fact_id, binding.source_version)
-    add("structured_query_run", binding.query_run_id)
-    add("retrieval_query_run", binding.retrieval_query_run_id)
-    add("tool_run", binding.tool_run_id)
+    if binding:
+        add("source_chunk", binding.chunk_id, binding.source_version)
+        add("inferred_fact", binding.inferred_fact_id, binding.source_version)
+        add("structured_query_run", binding.query_run_id)
+        add("retrieval_query_run", binding.retrieval_query_run_id)
+        add("tool_run", binding.tool_run_id)
+    for item in metadata.get("source_chunk_ids") or []:
+        add("source_chunk", str(item))
     for item in metadata.get("writing_fact_ids") or []:
         add("writing_fact", str(item))
     for item in metadata.get("writing_evidence_ids") or []:
@@ -93,13 +97,34 @@ def _dependency_specs(binding: WritingBlockBinding | None) -> list[dict[str, Any
     for item in metadata.get("public_reference_ids") or []:
         add("public_reference", str(item))
 
+    # Position bindings participate in the same formal dependency graph, even
+    # when a compatibility WritingBlockBinding row is absent. They do not
+    # create a separate source of truth or infer authority from prose.
+    for occurrence in validate_numeric_occurrences(node or {}):
+        location = {
+            "occurrence_id": occurrence["occurrence_id"],
+            "leaf_path": occurrence["leaf_path"],
+            "fact_key": occurrence["fact_key"],
+            "unit": occurrence["unit"],
+            "display_unit": occurrence["display_unit"] or occurrence["unit"],
+        }
+        add("project_fact", occurrence.get("fact_id"), str(occurrence["fact_version"]) if occurrence.get("fact_version") else None, occurrences=[location])
+        add("computation_run", occurrence.get("computation_run_id"), occurrences=[location])
+        for evidence_id in occurrence.get("evidence_ids") or []:
+            add(occurrence["evidence_type"], evidence_id, occurrences=[location])
+
     unique: dict[tuple[str, str], dict[str, Any]] = {}
     for binding_type, binding_id, version, extra in values:
+        previous = unique.get((binding_type, binding_id)) or {}
+        previous_metadata = previous.get("metadata") or {}
+        merged_metadata = {**previous_metadata, **extra}
+        if previous_metadata.get("occurrences") and extra.get("occurrences"):
+            merged_metadata["occurrences"] = previous_metadata["occurrences"] + extra["occurrences"]
         unique[(binding_type, binding_id)] = {
             "binding_type": binding_type,
             "binding_id": binding_id,
-            "binding_version": version,
-            "metadata": extra,
+            "binding_version": version if version is not None else previous.get("binding_version"),
+            "metadata": merged_metadata,
         }
     return list(unique.values())
 
@@ -227,7 +252,7 @@ def sync_writing_version_chunks(
             for key, value in values.items():
                 setattr(row, key, value)
 
-        specs = _dependency_specs(binding)
+        specs = _dependency_specs(binding, node)
         spec_keys = {(item["binding_type"], item["binding_id"]) for item in specs}
         for obsolete in db.scalars(select(WritingChunkDependency).where(
             WritingChunkDependency.writing_chunk_id == row.id,

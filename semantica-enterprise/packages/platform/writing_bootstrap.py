@@ -66,7 +66,7 @@ def bootstrap_writing(db: Session, *, tenant_id: str, actor_id: str) -> None:
         manifest = {
             "operation": operation,
             "expression": spec["expression"],
-            "rounding": {"mode": "half_up", "digits": 0},
+            "rounding": dict(spec.get("rounding") or {"mode": "half_up", "digits": 0}),
         }
         version = ComputationDefinitionVersion(
             tenant_id=tenant_id,

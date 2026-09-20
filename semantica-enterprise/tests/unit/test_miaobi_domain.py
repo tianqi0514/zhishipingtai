@@ -147,6 +147,27 @@ def test_feasibility_investment_formulas_and_missing_interest_guard() -> None:
         )
 
 
+def test_amount_difference_is_signed_decimal_and_defaults_to_cents() -> None:
+    source_rounding = execute_formula(
+        "amount_difference",
+        {"minuend": "111880030", "subtrahend": "111880000"},
+    )
+    negative = execute_formula(
+        "amount_difference",
+        {"minuend": "100.001", "subtrahend": "100.006"},
+    )
+    configured = execute_formula(
+        "amount_difference",
+        {"minuend": "10.1234", "subtrahend": "1.0000"},
+        rounding={"mode": "half_up", "digits": 3},
+    )
+
+    assert source_rounding["value"] == 30.0
+    assert source_rounding["rounding"] == {"mode": "half_up", "digits": 2}
+    assert negative["value"] == -0.01
+    assert configured["value"] == 9.123
+
+
 def test_formula_engine_never_evaluates_arbitrary_expression() -> None:
     with pytest.raises(ValueError, match="不支持的确定性公式"):
         execute_formula("__import__('os').system('id')", {})

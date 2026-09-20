@@ -154,7 +154,7 @@ from packages.platform.writing_flow import (
     validate_writing_graph_refs,
 )
 from packages.platform.writing_impact import find_plate_node, propose_bound_text_change
-from packages.platform.controlled_writing import PropagationEdge, propagation_closure, stable_checksum
+from packages.platform.controlled_writing import PropagationEdge, propagation_closure, require_complete_propagation, stable_checksum
 from packages.platform.writing_sample_profile import (
     extract_sample_profile, sample_main_body_lengths, validate_sample_profile,
 )
@@ -781,6 +781,14 @@ def _section_plan_for_article(
 ) -> list[dict[str, Any]]:
     if document is None:
         return _section_plan(version)
+    native_outline = dict((document.applicability or {}).get("native_outline") or {})
+    if native_outline.get("sections"):
+        from apps.api.writing_schemas import NativeOutlineSection
+        try:
+            return [{**NativeOutlineSection.model_validate(item).model_dump(), "generation_mode": "agent"}
+                    for item in native_outline["sections"]]
+        except ValueError as exc:
+            raise HTTPException(409, "本文目录已失效，请重新保存目录") from exc
     profile = dict((document.applicability or {}).get("sample_profile") or {})
     if profile.get("status") != "confirmed":
         return _section_plan(version)
@@ -1062,6 +1070,15 @@ def _strict_report_quality(
     sample_body = _article_sample_body_lengths(db, document, user) if document and sample_confirmed else {}
     if sample_body.get("reference_body_characters"):
         reference_characters = int(sample_body["reference_body_characters"])
+    native_authoring = any(
+        (binding.get("metadata_json") or binding.get("metadata") or {}).get("authoring_runtime") == "dsh_native"
+        for binding in bindings.values()
+    )
+    effective_section_plan = (
+        section_plan if section_plan is not None
+        else _section_plan_for_article(db, scenario, document, user) if document
+        else _section_plan(scenario)
+    )
     report = report_quality_review(
         content,
         # A partial/sectional generation run is intentionally bounded to the
@@ -1070,22 +1087,31 @@ def _strict_report_quality(
         # every unrequested chapter as missing and prevents the generated
         # chapter from ever being persisted.  Full-report callers omit this
         # override and retain the complete article quality gate.
-        section_plan=(
-            section_plan
-            if section_plan is not None
-            else _section_plan_for_article(db, scenario, document, user)
-            if document and sample_confirmed
-            else _section_plan(scenario)
-        ),
+        section_plan=effective_section_plan,
         bindings=bindings,
-        expected_computation_count=len(computations),
-        expected_inference_count=inference_count,
+        expected_computation_count=0 if native_authoring else len(computations),
+        expected_inference_count=0 if native_authoring else inference_count,
         reference_characters=int(reference_characters) if reference_characters else None,
-        require_citations=bool(writing_policy.get("require_citations", True)),
+        require_citations=not native_authoring and bool(writing_policy.get("require_citations", True)),
         draft_requires_signoff=sample_confirmed
         and bool((sample_profile.get("style") or {}).get("notice_requires_authorized_signoff"))
         and bool(re.search(r"讨论稿|草稿|征求意见稿", document.title if document else "")),
     )
+    if native_authoring:
+        # Native chapters use ordinary prose and position bindings, not the
+        # old coloured authority cards or mandatory inline widget counts.
+        for section in effective_section_plan:
+            if not section.get("citation_required"):
+                continue
+            supported = any(
+                (metadata := binding.get("metadata_json") or binding.get("metadata") or {}).get("section_key") == section["key"]
+                and (metadata.get("source_chunk_ids") or metadata.get("public_reference_ids") or binding.get("chunk_id"))
+                for binding in bindings.values()
+            )
+            if not supported:
+                report["issues"].append({"code": "missing_section_evidence", "severity": "error",
+                    "message": f"章节“{section['title']}”没有可核验来源"})
+                report["ok"] = False
     numeric_issues = authoritative_numeric_binding_issues(
         content,
         bindings,
@@ -1153,10 +1179,11 @@ def _ensure_formula_version(db: Session, user: User, operation: str) -> Computat
     )
     if version is None:
         spec = BUILTIN_FORMULAS[operation]
+        formula_rounding = dict(spec.get("rounding") or {"mode": "half_up", "digits": 0})
         manifest = {
             "operation": operation,
             "expression": spec["expression"],
-            "rounding": {"mode": "half_up", "digits": 0},
+            "rounding": formula_rounding,
         }
         version = ComputationDefinitionVersion(
             tenant_id=user.tenant_id,
@@ -4835,6 +4862,26 @@ def confirm_fact(
     return serialize_row(row)
 
 
+def _input_change_state_hash(db: Session, project: WritingProject, document: WritingDocument) -> str:
+    """Fingerprint every authority read by the fixed-point impact calculator."""
+    facts = list(db.scalars(select(ProjectFact).where(ProjectFact.project_id == project.id,
+        ProjectFact.active.is_(True), _active(ProjectFact)).order_by(ProjectFact.id)))
+    runs = _latest_computation_rows(db, project.id)
+    definitions = list(db.scalars(select(ComputationDefinitionVersion).where(
+        ComputationDefinitionVersion.id.in_([run.definition_version_id for run in runs])
+    ).order_by(ComputationDefinitionVersion.id)))
+    bindings = list(db.scalars(select(WritingBlockBinding).where(
+        WritingBlockBinding.document_id == document.id, _active(WritingBlockBinding),
+    ).order_by(WritingBlockBinding.id)))
+    scenario, _, _ = _scenario_runtime_settings(db, project, document)
+    return content_hash({"document_version_id": document.current_version_id,
+        "scenario": serialize_row(scenario), "writing_graph_release_id": document.writing_graph_release_id or project.writing_graph_release_id,
+        "facts": [serialize_row(row) for row in facts],
+        "computations": [serialize_row(row) for row in sorted(runs, key=lambda row: row.id)],
+        "definitions": [serialize_row(row) for row in definitions],
+        "bindings": [serialize_row(row) for row in bindings]})
+
+
 @router.post("/projects/{project_id}/input-changes/preview")
 def preview_input_changes(
     project_id: str,
@@ -5024,6 +5071,18 @@ def preview_input_changes(
         if str(node.get("id") or "") in affected_blocks:
             block_sections[str(node["id"])] = current_section
     binding_by_block = {row.block_id: row for row in bindings}
+    # A table and its cells project the same exact occurrences. Present one
+    # selectable containing block, retaining all paths inside that proposal.
+    nested_in_bound = {}
+    for top in (current_version.content if current_version else []) or []:
+        top_id = str(top.get("id") or "")
+        if top_id in binding_by_block and top_id in affected_blocks:
+            for child in walk_plate_nodes(top.get("children") or []):
+                if child.get("id"):
+                    nested_in_bound[str(child["id"])] = top_id
+    for child_id, top_id in nested_in_bound.items():
+        dependency_reasons.setdefault(top_id, set()).update(dependency_reasons.get(child_id) or [])
+    affected_blocks = [block_id for block_id in affected_blocks if block_id not in nested_in_bound]
     calculation_by_run = {item["previous_run_id"]: item for item in affected_calculations}
     calculation_by_key = {item["result_key"]: item for item in affected_calculations if item.get("result_key")}
     content_proposals: list[dict[str, Any]] = []
@@ -5081,10 +5140,10 @@ def preview_input_changes(
             or calculation.get("result_key") in (metadata.get("metric_keys") or [])
         ]
         changes = [
-            {"old_value": change["old_value"], "new_value": change["new_value"]}
+            dict(change)
             for change in direct_changes
         ] + [
-            {"old_value": calculation["old_value"], "new_value": calculation["new_value"]}
+            dict(calculation)
             for calculation in metric_changes
         ]
         proposal = propose_bound_text_change(node, changes)
@@ -5166,6 +5225,13 @@ def preview_input_changes(
         [f"project_fact:{item['fact_id']}" for item in requested],
         propagation_edges,
     )
+    try:
+        require_complete_propagation(closure)
+    except ValueError as exc:
+        # Numerical recomputation alone cannot certify a complete impact
+        # preview if the explanatory dependency walk omitted later objects.
+        # Do not create an applicable preview for a truncated traversal.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     bound_block_ids = set(binding_by_block)
     suspected_impacts: list[dict[str, Any]] = []
     for node in (current_version.content if current_version else []) or []:
@@ -5209,6 +5275,7 @@ def preview_input_changes(
     ]
     impact = {
         "document_version_id": document.current_version_id,
+        "authority_state_hash": _input_change_state_hash(db, project, document),
         "input_changes": requested,
         "calculations": affected_calculations,
         "report_blocks": [
@@ -5272,9 +5339,27 @@ def apply_input_changes(
     if writing_policy.get("allow_manual_override", True) is False:
         raise HTTPException(status_code=409, detail="当前写作场景不允许人工修正输入")
     preview = _tenant_row(db, WritingInputChange, payload.preview_id, user.tenant_id, "影响预览")
-    if preview.project_id != project.id or preview.status != "preview":
+    if preview.project_id != project.id:
+        raise HTTPException(status_code=404, detail="影响预览不存在")
+    if preview.status == "applied" and preview.applied_by == user.id:
+        accepted = set((preview.impact or {}).get("accepted_block_ids") or [])
+        if payload.accepted_block_ids is not None and set(payload.accepted_block_ids) == accepted:
+            prior = db.get(WritingDocumentVersion, preview.applied_document_version_id)
+            return {**serialize_row(preview), "document_version": serialize_row(prior), "unchanged": True}
+    if preview.status != "preview":
         raise HTTPException(status_code=409, detail="影响预览不存在、已取消或已经应用")
+    try:
+        require_complete_propagation((preview.impact or {}).get("propagation"))
+    except ValueError as exc:
+        # Also reject previews saved by older builds with a truncated graph;
+        # this guard precedes every Fact, computation and document mutation.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     document, _ = _document(db, preview.document_id, user, "editor")
+    db.refresh(document, with_for_update=True)
+    if document.status == "published":
+        raise HTTPException(409, "已定稿文章不能直接应用变更，请先创建新草稿")
+    if (preview.impact or {}).get("authority_state_hash") and preview.impact["authority_state_hash"] != _input_change_state_hash(db, project, document):
+        raise HTTPException(409, "事实、公式、依赖绑定或正文已在预览后变化，请重新预览")
     if preview.impact.get("document_version_id") and preview.impact["document_version_id"] != document.current_version_id:
         raise HTTPException(409, "正文已在预览后修改，请重新查看影响")
     current_facts = {}
@@ -5423,6 +5508,13 @@ def apply_input_changes(
 
     changed_blocks: list[str] = []
     affected_block_ids = {str(item.get("block_id") or "") for item in (preview.impact or {}).get("report_blocks") or []}
+    occurrence_fact_replacements = {
+        previous: {"id": current, "version": db.get(ProjectFact, current).version}
+        for previous, current in replacement_fact_ids.items()
+    }
+    occurrence_run_replacements = {
+        previous: item["replacement_run_id"] for previous, item in replacement_by_old.items()
+    }
 
     def update_node(node: dict[str, Any]) -> dict[str, Any]:
         updated = dict(node)
@@ -5434,7 +5526,9 @@ def apply_input_changes(
                 raise HTTPException(status_code=409, detail="正文修改提案已失效，请重新预览")
             if str(proposed_node.get("id") or "") != block_id:
                 raise HTTPException(status_code=409, detail="正文修改提案与当前内容不匹配")
-            updated = proposed_node
+            from packages.platform.writing_occurrences import rebind_numeric_occurrences
+            updated = rebind_numeric_occurrences(proposed_node,
+                fact_replacements=occurrence_fact_replacements, run_replacements=occurrence_run_replacements)
             binding = db.scalar(select(WritingBlockBinding).where(
                 WritingBlockBinding.document_id == document.id,
                 WritingBlockBinding.block_id == block_id,
@@ -5767,10 +5861,26 @@ def compute(
             raise HTTPException(status_code=409, detail=f"事实“{row.label}”尚未核验，不能形成正式测算")
         if name not in payload.inputs or float(payload.inputs[name]) != _fact_number(row):
             raise HTTPException(status_code=409, detail=f"计算输入 {name} 与已核验事实不一致")
+    if definition_version.operation == "amount_difference":
+        required_names = {"minuend", "subtrahend"}
+        if set(input_facts) != required_names:
+            raise HTTPException(status_code=422, detail="金额差异必须绑定 minuend 和 subtrahend 两项已核验事实")
+        input_units = {str(input_facts[name].unit or "").strip() for name in required_names}
+        if "" in input_units or len(input_units) != 1:
+            raise HTTPException(status_code=422, detail="金额差异的两个输入必须使用相同且明确的单位")
+        common_unit = next(iter(input_units))
+        if payload.output_unit and payload.output_unit != common_unit:
+            raise HTTPException(status_code=422, detail="金额差异的输出单位必须与输入单位一致")
+    else:
+        common_unit = None
     if payload.output_fact_key and not input_facts:
         raise HTTPException(status_code=409, detail="生成权威测算事实必须绑定已核验输入事实")
     output_fact = (
-        {"fact_key": payload.output_fact_key, "label": payload.output_label, "unit": payload.output_unit}
+        {
+            "fact_key": payload.output_fact_key,
+            "label": payload.output_label,
+            "unit": payload.output_unit or common_unit,
+        }
         if payload.output_fact_key else None
     )
     run, generated = _execute_computation_run(
@@ -6377,6 +6487,51 @@ def create_document_version(
     db: Session = Depends(get_db),
 ):
     document, project = _document(db, document_id, user, "publisher" if payload.publish else "editor")
+    # Serialize version allocation and pointer changes. Native Plate clients
+    # additionally send an explicit baseline; legacy clients retain their
+    # request shape while using the same database lock.
+    db.refresh(document, with_for_update=True)
+    request_hash = content_hash(payload.model_dump())
+    if payload.request_id:
+        previous_events = db.scalars(select(AuditEvent).where(
+            AuditEvent.tenant_id == user.tenant_id,
+            AuditEvent.actor_id == user.id,
+            AuditEvent.action == "writing.document.version.create",
+        ).order_by(AuditEvent.created_at.desc()))
+        for event in previous_events:
+            detail = event.detail or {}
+            if detail.get("request_id") == payload.request_id and detail.get("document_id") == document.id:
+                if detail.get("request_hash") != request_hash:
+                    raise HTTPException(409, "保存幂等标识已用于不同内容")
+                prior = db.get(WritingDocumentVersion, event.object_id)
+                return {**serialize_row(prior), "unchanged": True, "issues": []}
+    if document.status == "published":
+        raise HTTPException(409, "已定稿文章不能通过普通保存修改，请创建新草稿")
+    if payload.base_version_id is not None and payload.base_version_id != document.current_version_id:
+        raise HTTPException(409, {"message": "正文已在其他页面更新，请刷新后合并修改", "current_version_id": document.current_version_id})
+    from packages.platform.writing_occurrences import validate_numeric_occurrences
+    current_for_bindings = db.get(WritingDocumentVersion, document.current_version_id) if document.current_version_id else None
+    old_occurrences = {}
+    old_block_occurrences = {}
+    for block in (current_for_bindings.content if current_for_bindings else []) or []:
+        items = validate_numeric_occurrences(block)
+        old_block_occurrences[block.get("id")] = {item["occurrence_id"] for item in items}
+        old_occurrences.update({item["occurrence_id"]: {key: value for key, value in item.items() if key != "leaf_path"} for item in items})
+    seen_occurrences = set()
+    try:
+        for block in payload.content:
+            items = validate_numeric_occurrences(block)
+            block_ids = {item["occurrence_id"] for item in items}
+            if old_block_occurrences.get(block.get("id"), set()) - block_ids:
+                raise ValueError("受控数值的绑定不能在普通保存时移除，请通过指标变更处理")
+            for item in items:
+                occurrence_id = item["occurrence_id"]
+                canonical = {key: value for key, value in item.items() if key != "leaf_path"}
+                if occurrence_id in seen_occurrences or old_occurrences.get(occurrence_id) != canonical:
+                    raise ValueError("位置绑定不可伪造或重复，受控值请通过指标变更修改")
+                seen_occurrences.add(occurrence_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     bindings = {row.block_id: serialize_row(row) for row in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, _active(WritingBlockBinding)))}
     issues = validate_plate_content(payload.content, bindings)
     strict_quality = _generated_report_quality(
@@ -6390,6 +6545,13 @@ def create_document_version(
     if strict_quality and not strict_quality["ok"]:
         issues.extend(strict_quality["issues"])
     if payload.publish:
+        unreviewed_native = [key for key, binding in bindings.items()
+            if (binding.get("metadata_json") or {}).get("authoring_runtime") == "dsh_native"
+            and binding.get("verification_status") != "verified"
+            and any(node.get("id") == key for node in walk_plate_nodes(payload.content))]
+        if unreviewed_native:
+            raise HTTPException(409, {"message": "DSH 章节通过了结构与数值校验，但仍需人工确认语义与职责依据后定稿",
+                                     "unreviewed_block_ids": unreviewed_native})
         pending_gates = int(db.scalar(select(func.count()).select_from(DecisionGate).where(DecisionGate.project_id == project.id, DecisionGate.required.is_(True), DecisionGate.status != "confirmed", _active(DecisionGate))) or 0)
         if pending_gates:
             raise HTTPException(status_code=409, detail=f"仍有 {pending_gates} 个必需确认节点未完成")
@@ -6416,6 +6578,11 @@ def create_document_version(
         and current.writing_graph_release_id == (document.writing_graph_release_id or project.writing_graph_release_id)
         and not payload.publish
     ):
+        if payload.request_id:
+            audit(db, user.tenant_id, user.id, "writing.document.version.create", "writing_document_version", current.id,
+                  {"document_id": document.id, "request_id": payload.request_id, "request_hash": request_hash,
+                   "base_version_id": payload.base_version_id, "unchanged": True})
+            db.commit()
         return {**serialize_row(current), "issues": issues, "unchanged": True}
     number = int(db.scalar(select(func.max(WritingDocumentVersion.version)).where(WritingDocumentVersion.document_id == document.id)) or 0) + 1
     row = WritingDocumentVersion(
@@ -6446,7 +6613,10 @@ def create_document_version(
     )
     document.current_version_id = row.id
     document.status = "published" if payload.publish else "draft"
-    audit(db, user.tenant_id, user.id, "writing.document.version.create", "writing_document_version", row.id, {"version": number, "published": payload.publish, "content_hash": row.content_hash})
+    audit(db, user.tenant_id, user.id, "writing.document.version.create", "writing_document_version", row.id,
+          {"version": number, "published": payload.publish, "content_hash": row.content_hash,
+           "document_id": document.id, "request_id": payload.request_id, "request_hash": request_hash,
+           "base_version_id": payload.base_version_id})
     db.commit()
     return {**serialize_row(row), "issues": issues}
 
@@ -7115,3 +7285,5 @@ from apps.api.writing_semantics import router as semantics_router
 router.include_router(semantics_router)
 from apps.api.writing_controlled import router as controlled_writing_router
 router.include_router(controlled_writing_router)
+from apps.api.writing_native import router as native_writing_router
+router.include_router(native_writing_router)

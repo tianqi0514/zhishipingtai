@@ -406,7 +406,7 @@ def propagation_closure(
     roots: Iterable[str],
     edges: Iterable[PropagationEdge | dict[str, Any]],
     *,
-    max_depth: int = 12,
+    max_depth: int = 64,
     max_nodes: int = 2000,
 ) -> dict[str, Any]:
     """Return a bounded directed closure with every explanatory path."""
@@ -459,12 +459,15 @@ def propagation_closure(
                 "path": next_path,
                 "metadata": deepcopy(edge.metadata),
             }
-            if existing is None or next_depth < existing["depth"]:
-                impacts[edge.target] = candidate
-            if len(impacts) >= max_nodes:
+            # Reaching exactly the limit is not truncation: a bounded graph
+            # with no additional unique target is still complete. Fail only
+            # when a new impact would exceed the configured node budget.
+            if existing is None and len(impacts) >= max_nodes:
                 truncated = True
                 queue.clear()
                 break
+            if existing is None or next_depth < existing["depth"]:
+                impacts[edge.target] = candidate
             if next_depth < best_depth.get(edge.target, max_depth + 1):
                 best_depth[edge.target] = next_depth
                 queue.append((edge.target, next_depth, next_path))
@@ -483,3 +486,14 @@ def propagation_closure(
     }
     result["checksum"] = stable_checksum(result)
     return result
+
+
+def require_complete_propagation(closure: dict[str, Any] | None) -> None:
+    """Never approve a partial or legacy-unchecked dependency traversal.
+
+    Callers may render partial results as diagnostics, but a mutation preview
+    must prove that traversal finished within its limits before it is saved
+    or applied. Older unchecked previews require a fresh preview.
+    """
+    if not isinstance(closure, dict) or closure.get("truncated") is not False:
+        raise ValueError("影响范围超过安全遍历上限或尚未完整验证，不能应用，请缩小变更范围后重新预览")

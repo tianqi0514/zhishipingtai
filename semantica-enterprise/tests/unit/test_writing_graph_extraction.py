@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from packages.semantica_adapter.writing_extract import (
     JointWritingExtraction,
+    WritingExtractionTruncated,
     _parse_model_json,
     candidate_key,
     extract_writing_knowledge,
@@ -294,3 +295,64 @@ def test_model_json_never_repairs_truncated_or_incomplete_contract() -> None:
         _parse_model_json(Provider(), '{"entities": [', "length")
     with pytest.raises(ValueError, match="缺少顶层键"):
         _parse_model_json(Provider(), '{"entities": []}', "stop")
+
+
+def test_explicit_token_limit_rejects_even_syntactically_complete_json() -> None:
+    class Provider:
+        @staticmethod
+        def _parse_json(value: str) -> dict:
+            raise AssertionError("Must not parse or repair an explicitly truncated reply")
+
+    with pytest.raises(WritingExtractionTruncated, match="截断"):
+        _parse_model_json(Provider(), '{"entities":[],"claims":[],"relations":[],"metrics":[],"sample_profile":null,"ambiguities":[]}', "length")
+
+
+def _install_budget_provider(monkeypatch, finish_reasons):
+    """Protocol-only provider, not evidence of a live model integration."""
+    import json
+    import sys
+    from types import SimpleNamespace
+
+    calls = []
+    result = {"entities": [], "claims": [], "relations": [], "metrics": [],
+              "sample_profile": None, "ambiguities": []}
+
+    class Provider:
+        def __init__(self, **_kwargs):
+            self.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=self.create)))
+
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            finish = finish_reasons[min(len(calls) - 1, len(finish_reasons) - 1)]
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=json.dumps(result)), finish_reason=finish,
+            )])
+
+        @staticmethod
+        def _parse_json(value):
+            return json.loads(value)
+
+    monkeypatch.setitem(sys.modules, "semantica.semantic_extract.providers", SimpleNamespace(OpenAIProvider=Provider))
+    return calls
+
+
+def test_truncation_retry_uses_configured_ceiling_not_same_short_source_estimate(monkeypatch) -> None:
+    calls = _install_budget_provider(monkeypatch, ["length", "stop"])
+    result = extract_writing_knowledge(EVIDENCE, material_role="task_data", api_key="unused",
+        model="test", base_url="https://provider.invalid/v1", max_tokens=8192, max_retries=1)
+    assert result == JointWritingExtraction()
+    assert len(calls) == 2
+    assert calls[0]["max_tokens"] < 2000
+    assert calls[1]["max_tokens"] == 8192
+    assert "纠错重试" in calls[1]["messages"][0]["content"]
+    assert "evidence-0001" in calls[1]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("ceiling,retries,expected_calls", [(1024, 1, 2), (8192, 0, 1), (8192, 9, 3)])
+def test_repeated_truncation_stays_failed_and_honors_ceiling_and_retry_bound(monkeypatch, ceiling, retries, expected_calls) -> None:
+    calls = _install_budget_provider(monkeypatch, ["length"])
+    with pytest.raises(WritingExtractionTruncated, match="截断"):
+        extract_writing_knowledge(EVIDENCE, material_role="task_data", api_key="unused",
+            model="test", base_url="https://provider.invalid/v1", max_tokens=ceiling, max_retries=retries)
+    assert len(calls) == expected_calls
+    assert all(call["max_tokens"] <= ceiling for call in calls)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import io
+import os
 import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -1516,9 +1517,12 @@ def test_input_change_accepts_bound_paragraphs_individually_without_overwriting_
 
 
 def test_real_customer_sample_profile_is_article_scoped_and_never_factual_evidence(monkeypatch) -> None:
-    sample_path = Path("/Users/tianqi/Desktop/积石山县6.2级地震_本体驱动应急智能推演系统_完整升级版/样稿.pdf")
+    configured_path = os.getenv("MIAOBI_CUSTOMER_SAMPLE_PDF", "").strip()
+    if not configured_path:
+        pytest.skip("MIAOBI_CUSTOMER_SAMPLE_PDF 未配置")
+    sample_path = Path(configured_path).expanduser()
     if not sample_path.exists():
-        pytest.skip("真实客户样稿未挂载")
+        pytest.skip("MIAOBI_CUSTOMER_SAMPLE_PDF 指向的样稿未挂载")
     sample_bytes = sample_path.read_bytes()
     monkeypatch.setattr("apps.api.writing.object_storage.get_bytes", lambda key: sample_bytes)
     with writing_client() as (client, db, release):
@@ -2290,6 +2294,79 @@ def test_input_change_rollback_creates_new_version_and_restores_authority() -> N
         assert len(facts_after_second_rollback) == len(by_key)
         assert by_key["rescue_available"]["value"]["number"] == 320
         assert by_key["rescue_gap"]["value"]["number"] == 180
+
+
+def test_amount_difference_requires_verified_same_unit_facts_and_persists_run() -> None:
+    with writing_client() as (client, _db, release):
+        project = _create_project(client, release.id)
+
+        def confirmed_fact(key: str, label: str, number: float, unit: str) -> dict:
+            created = client.post(f"/api/v1/writing/projects/{project['id']}/facts", json={
+                "fact_key": key,
+                "label": label,
+                "fact_type": "manual_input",
+                "value": {"number": number},
+                "unit": unit,
+                "source_type": "manual_input",
+                "source_id": "source-table-evidence",
+                "source_version": "source-version-1",
+                "source_locator": {"evidence_ids": ["source-table-evidence"]},
+                "verification_status": "unverified",
+            })
+            assert created.status_code == 200, created.text
+            confirmed = client.post(
+                f"/api/v1/writing/projects/{project['id']}/facts/{created.json()['id']}/confirm",
+                json={"decision": "confirm", "reason": "已核验源表及其单位"},
+            )
+            assert confirmed.status_code == 200, confirmed.text
+            return confirmed.json()
+
+        exact = confirmed_fact("construction_exact", "建安分项精确合计", 111_880_030, "元")
+        source_wan = confirmed_fact("construction_source_wan", "源表建安汇总（原显示）", 11_188, "万元")
+        factor = confirmed_fact("yuan_per_wanyuan", "万元折算元系数", 10_000, "元/万元")
+        normalized = client.post(f"/api/v1/writing/projects/{project['id']}/compute", json={
+            "operation": "quantity_amount",
+            "inputs": {"quantity": 11_188, "unit_price": 10_000},
+            "input_fact_ids": [source_wan["id"], factor["id"]],
+            "input_fact_map": {"quantity": source_wan["id"], "unit_price": factor["id"]},
+            "output_fact_key": "construction_source_yuan",
+            "output_label": "源表建安汇总（折算为元）",
+            "output_unit": "元",
+            "rounding": {"mode": "half_up", "digits": 2},
+        })
+        assert normalized.status_code == 200, normalized.text
+        rounded = normalized.json()["generated_fact"]
+        assert rounded["value"] == {"number": 111_880_000.0}
+        assert rounded["source_type"] == "computation"
+
+        computed = client.post(f"/api/v1/writing/projects/{project['id']}/compute", json={
+            "operation": "amount_difference",
+            "inputs": {"minuend": 111_880_030, "subtrahend": 111_880_000},
+            "input_fact_ids": [exact["id"], rounded["id"]],
+            "input_fact_map": {"minuend": exact["id"], "subtrahend": rounded["id"]},
+            "output_fact_key": "construction_rounding_difference",
+            "output_label": "建安汇总舍入差异",
+        })
+        assert computed.status_code == 200, computed.text
+        result = computed.json()
+        assert result["result"]["value"] == 30.0
+        assert result["result"]["rounding"] == {"mode": "half_up", "digits": 2}
+        assert set(result["input_fact_ids"]) == {exact["id"], rounded["id"]}
+        assert result["generated_fact"]["value"] == {"number": 30.0}
+        assert result["generated_fact"]["unit"] == "元"
+        assert result["generated_fact"]["source_type"] == "computation"
+        assert result["generated_fact"]["source_id"] == result["id"]
+
+        mismatched = client.post(f"/api/v1/writing/projects/{project['id']}/compute", json={
+            "operation": "amount_difference",
+            "inputs": {"minuend": 111_880_030, "subtrahend": 11_188},
+            "input_fact_ids": [exact["id"], source_wan["id"]],
+            "input_fact_map": {"minuend": exact["id"], "subtrahend": source_wan["id"]},
+            "output_fact_key": "invalid_difference",
+            "output_label": "错误单位差异",
+        })
+        assert mismatched.status_code == 422
+        assert "相同且明确的单位" in mismatched.text
 
 
 def test_feasibility_price_change_recomputes_full_investment_chain() -> None:

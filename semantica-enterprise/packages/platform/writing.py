@@ -89,6 +89,15 @@ BUILTIN_FORMULAS = {
         "expression": "part / total * 100",
         "unit": "%",
     },
+    "amount_difference": {
+        "name": "金额差异",
+        "expression": "minuend - subtrahend",
+        # Monetary inputs keep their canonical unit on ProjectFact.  The
+        # definition is therefore unit-neutral and the API inherits the
+        # verified common input unit for the generated Fact.
+        "unit": None,
+        "rounding": {"mode": "half_up", "digits": 2},
+    },
 }
 
 
@@ -278,15 +287,22 @@ def execute_formula(
         if total <= 0:
             raise ValueError("投资总额必须大于 0")
         result = _number(inputs, "part") / total * Decimal(100)
+    elif operation == "amount_difference":
+        # A difference is signed by design.  A negative result is meaningful
+        # (the subtrahend is larger) and must not be silently clamped to zero.
+        result = _number(inputs, "minuend") - _number(inputs, "subtrahend")
     else:
         raise ValueError(f"不支持的确定性公式：{operation}")
-    rounded = _round(result, rounding or {})
+    effective_rounding = rounding or BUILTIN_FORMULAS[operation].get(
+        "rounding", {"mode": "half_up", "digits": 0}
+    )
+    rounded = _round(result, effective_rounding)
     return {
         "operation": operation,
         "value": float(rounded) if isinstance(rounded, Decimal) else rounded,
         "inputs": inputs,
         "parameters": params,
-        "rounding": rounding or {"mode": "half_up", "digits": 0},
+        "rounding": effective_rounding,
     }
 
 

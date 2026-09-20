@@ -9,6 +9,7 @@ from apps.api.deps import get_current_user, has_space_permission
 from packages.platform.database import get_db
 from packages.platform.audit import audit
 from packages.platform.models import (AnalysisRule, AnalysisRuleSet, AnalysisRuleVersion,
+    Chunk, Document, DocumentVersion, ComputationDefinitionVersion, WritingGenerationRun,
     Ontology, OntologyVersion, ScenarioPackageVersion, WritingReasoningRun,
     WritingBlockBinding, WritingChunk, WritingChunkDependency, WritingDocument,
     WritingDocumentVersion, WritingGraphReleaseItem, ProjectFact, PublicReference, ComputationRun)
@@ -190,9 +191,10 @@ def evidence_source(project_id: str, chunk_id: str, user=Depends(get_current_use
 
 @router.get("/documents/{document_id}/paragraph-evidence")
 def paragraph_evidence(document_id: str, user=Depends(get_current_user), db=Depends(get_db)):
-    from apps.api.writing import _document, _release_scope
+    from apps.api.writing import _document, _release_scope, _writing_graph_release_for_user
     document, project = _document(db, document_id, user)
-    _release_scope(db, project, user)
+    if project.knowledge_product_release_id or project.knowledge_space_id:
+        _release_scope(db, project, user)
     version = db.get(WritingDocumentVersion, document.current_version_id)
     bindings = {b.block_id: b for b in db.scalars(select(WritingBlockBinding).where(WritingBlockBinding.document_id == document.id, WritingBlockBinding.deleted_at.is_(None)))}
     chunks = {
@@ -218,6 +220,7 @@ def paragraph_evidence(document_id: str, user=Depends(get_current_user), db=Depe
     graph_snapshots = {}
     graph_release_id = version.writing_graph_release_id if version else None
     if graph_release_id and graph_pairs:
+        _writing_graph_release_for_user(db, graph_release_id, user)
         object_ids = {object_id for _, object_id in graph_pairs}
         for item in db.scalars(select(WritingGraphReleaseItem).where(
             WritingGraphReleaseItem.release_id == graph_release_id,
@@ -243,6 +246,65 @@ def paragraph_evidence(document_id: str, user=Depends(get_current_user), db=Depe
                 "url": item.url, "publication_date": item.publication_date,
                 "excerpt": item.excerpt, "validity_status": item.validity_status,
             }
+    # Expose only the bound immutable authority version, never replace it with
+    # a newer current Fact or another project's source. A source permission may
+    # have been revoked since generation; in that case the snapshot stays empty.
+    native_source_snapshots = {}
+    for binding in bindings.values():
+        if (binding.metadata_json or {}).get("authoring_runtime") != "dsh_native":
+            continue
+        run = db.get(WritingGenerationRun, binding.source_id) if binding.source_id else None
+        if run and run.tenant_id == user.tenant_id and run.project_id == project.id and run.document_id == document.id:
+            for source in (run.input_snapshot or {}).get("evidence") or []:
+                native_source_snapshots[source["id"]] = source
+    authority_snapshots = {}
+    for values in chunk_dependencies.values():
+        for dependency in values:
+            key = (dependency.binding_type, dependency.binding_id)
+            if key in authority_snapshots:
+                continue
+            if dependency.binding_type == "source_chunk":
+                source = db.get(Chunk, dependency.binding_id)
+                source_document = db.get(Document, source.document_id) if source else None
+                source_version = db.get(DocumentVersion, source.version_id) if source else None
+                if (not source or not source_document or not source_version or source.deleted_at
+                        or source_document.deleted_at or source_version.deleted_at
+                        or source.tenant_id != user.tenant_id or source_document.tenant_id != user.tenant_id
+                        or not has_space_permission(db, user, source.space_id, "read")):
+                    continue
+                pinned = native_source_snapshots.get(source.id) or {}
+                authority_snapshots[key] = {"id": source.id, "document_id": source_document.id,
+                    "document_title": source_document.title, "document_version_id": source_version.id,
+                    "version_number": source_version.version_number, "filename": source_version.filename,
+                    "page_number": source.page_number, "structural_path": source.structural_path,
+                    "text": pinned.get("text", source.text), "content_hash": pinned.get("content_hash", source.content_hash),
+                    "current_version": source_document.current_version_id == source_version.id,
+                    "validity_status": source.status, "fragment_url": "/api/v1/fragments/" + source.id}
+            elif dependency.binding_type == "project_fact":
+                fact = db.get(ProjectFact, dependency.binding_id)
+                if not fact or fact.deleted_at or fact.project_id != project.id or fact.tenant_id != user.tenant_id:
+                    continue
+                locator = fact.source_locator or {}
+                source_document = db.get(Document, locator.get("document_id")) if locator.get("document_id") else None
+                if locator.get("document_id") and (not source_document or source_document.deleted_at
+                        or source_document.tenant_id != user.tenant_id
+                        or not has_space_permission(db, user, source_document.space_id, "read")):
+                    continue
+                authority_snapshots[key] = {"id": fact.id, "fact_key": fact.fact_key, "label": fact.label,
+                    "value": fact.value, "unit": fact.unit, "version": fact.version,
+                    "verification_status": fact.verification_status, "freshness_status": fact.freshness_status,
+                    "active": fact.active, "source_type": fact.source_type, "source_id": fact.source_id,
+                    "source_version": fact.source_version,
+                    "locator": {name: locator[name] for name in ("document_id", "document_version_id", "chunk_id", "structural_path", "page_number") if name in locator}}
+            elif dependency.binding_type == "computation_run":
+                run = db.get(ComputationRun, dependency.binding_id)
+                if not run or run.deleted_at or run.project_id != project.id or run.tenant_id != user.tenant_id:
+                    continue
+                definition = db.get(ComputationDefinitionVersion, run.definition_version_id)
+                authority_snapshots[key] = {"id": run.id, "label": ((run.result or {}).get("output_fact") or {}).get("label"),
+                    "inputs": run.inputs, "result": run.result, "status": run.status, "checksum": run.checksum,
+                    "formula": {"id": definition.id, "version": definition.version, "expression": definition.expression,
+                                "operation": definition.operation, "rounding": definition.rounding} if definition else None}
     result, title = [], "正文"
     for node in (version.content if version else []):
         text = "".join(str(n.get("text", "")) for n in walk_plate_nodes([node]))
@@ -273,7 +335,8 @@ def paragraph_evidence(document_id: str, user=Depends(get_current_user), db=Depe
                     "freshness": dependency.freshness_status,
                     "snapshot": public_snapshots.get(dependency.binding_id)
                     if dependency.binding_type == "public_reference"
-                    else graph_snapshots.get((object_type, dependency.binding_id)),
+                    else authority_snapshots.get((dependency.binding_type, dependency.binding_id),
+                        graph_snapshots.get((object_type, dependency.binding_id))),
                 })
             result.append({"block_id": node.get("id"), "section": title, "text": text[:180],
                            "status": "stale" if "stale" in statuses else "current" if evidence else "unverified",
