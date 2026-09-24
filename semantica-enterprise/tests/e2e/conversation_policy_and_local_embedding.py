@@ -55,7 +55,7 @@ def main() -> int:
         detail = request("GET", f"/conversations/{conversation_id}", token)
         direct_answer = [item for item in detail["messages"] if item["role"] == "assistant"][-1]
         assert direct_answer["status"] == "completed", direct_answer
-        assert "传神智库" in direct_answer["content"], direct_answer
+        assert "Nexus One" in direct_answer["content"], direct_answer
 
         knowledge_events = stream_turn(conversation_id, token, "该产品支持哪些数据源？")
         knowledge_terminal = [name for name, _ in knowledge_events if name.startswith("turn_")]

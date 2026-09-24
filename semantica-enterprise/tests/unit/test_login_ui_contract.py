@@ -7,12 +7,13 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_brand_and_password_toggle_are_present() -> None:
     html = (ROOT / "apps/api/static/index.html").read_text(encoding="utf-8")
 
-    assert "<title>传神智库</title>" in html
-    assert "<h1>传神智库</h1>" in html
+    assert "<title>Nexus One</title>" in html
+    assert "<h1>Nexus One</h1>" in html
     assert 'id="login-password"' in html
     assert 'id="password-toggle"' in html
     assert 'aria-label="显示密码"' in html
     assert 'class="brand-symbol"' in html
+    assert 'href="/assets/nexus-one-mark.svg"' in html
 
 
 def test_login_401_keeps_the_server_error_message() -> None:

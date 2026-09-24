@@ -179,7 +179,7 @@ case "$action" in
     fi
     curl --fail --silent --show-error --max-time 10 \
       "http://${API_HEALTH_HOST:-127.0.0.1}:${API_PUBLISHED_PORT:-8080}/health/ready" >/dev/null
-    echo "传神智库全部必需服务已就绪"
+    echo "Nexus One 全部必需服务已就绪"
     ;;
   stop)
     "${compose[@]}" stop

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-labelledby="title desc">
+  <title id="title">Nexus One</title>
+  <desc id="desc">由字母 N 和中央连接节点构成的 Nexus One 标志</desc>
+  <rect x="2" y="2" width="44" height="44" rx="13" fill="#F1F5FF"/>
+  <path d="M9 38V10h8l22 28h-9L17 21.45V38H9Z" fill="#2563EB"/>
+  <path d="M31 10h8v28h-8V10Z" fill="#14B8A6"/>
+  <path d="M16.4 17.2 31.7 36.7" fill="none" stroke="#FFFFFF" stroke-width="4.8" stroke-linecap="round"/>
+  <circle cx="24" cy="24" r="6" fill="#2563EB" stroke="#FFFFFF" stroke-width="3"/>
+</svg>

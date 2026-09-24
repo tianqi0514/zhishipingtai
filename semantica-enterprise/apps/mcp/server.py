@@ -32,8 +32,8 @@ ArgModelBase.model_config["extra"] = "forbid"
 ArgModelBase.model_rebuild(force=True)
 
 mcp = FastMCP(
-    "传神智库",
-    instructions="通过传神智库 FastAPI 的授权入口检索、对话、推理并安全查询结构化经营数据。",
+    "Nexus One",
+    instructions="通过 Nexus One FastAPI 的授权入口检索、对话、推理并安全查询结构化经营数据。",
     stateless_http=True,
     json_response=True,
     transport_security=TransportSecuritySettings(
@@ -63,7 +63,7 @@ class BearerContextMiddleware:
 def _headers() -> dict[str, str]:
     authorization = authorization_header.get()
     if not authorization or not authorization.lower().startswith("bearer "):
-        raise ValueError("MCP 请求必须携带传神智库 Bearer Token")
+        raise ValueError("MCP 请求必须携带 Nexus One Bearer Token")
     return {"Authorization": authorization}
 
 

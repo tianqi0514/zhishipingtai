@@ -10,7 +10,7 @@ import httpx
 import typer
 
 
-app = typer.Typer(name="chuanshen", no_args_is_help=True, help="传神智库命令行客户端")
+app = typer.Typer(name="chuanshen", no_args_is_help=True, help="Nexus One 命令行客户端")
 CONFIG_PATH = Path(os.getenv("CHUANSHEN_CONFIG", "~/.config/chuanshen/config.json")).expanduser()
 
 
@@ -50,7 +50,7 @@ def _request(method: str, path: str, *, payload=None) -> Any:
             timeout=600,
         )
     except httpx.HTTPError as exc:
-        raise typer.BadParameter(f"无法连接传神智库：{exc}") from exc
+        raise typer.BadParameter(f"无法连接 Nexus One：{exc}") from exc
     try:
         data = response.json()
     except ValueError:

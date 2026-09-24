@@ -1,6 +1,6 @@
-# 传神智库
+# Nexus One
 
-传神智库是基于 Semantica 0.6.6 源码增量开发的组织级知识平台。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理画像、OpenSearch/Qdrant/FalkorDB 三路检索、可编辑 3D 图谱、由 DeepSeek Harness 驱动的多轮知识问答，以及按“知识供给—能力场景—上线测试—接入发布—运行反馈”组织的应用构建闭环。当前交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
+Nexus One 是基于 Semantica 0.6.6 源码增量开发的组织级知识平台。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理画像、OpenSearch/Qdrant/FalkorDB 三路检索、可编辑 3D 图谱、由 DeepSeek Harness 驱动的多轮知识问答，以及按“知识供给—能力场景—上线测试—接入发布—运行反馈”组织的应用构建闭环。当前交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
 
 仓库附带可重复执行的验收数据脚本：`tests/e2e/seed_guolian_acceptance.py` 建立集团组织、角色、空间和 29 份真实业务多模态资料，`tests/e2e/seed_structured_acceptance.py` 建立 MySQL/PostgreSQL 经营数据、本体和激活映射，`tests/e2e/seed_source_acceptance.py` 用于协议数据源，`tests/e2e/seed_knowledge_analysis_acceptance.py` 建立带 100% 来源证据的制度适用与供应商风险推演空间。标准答案与使用顺序见 [集团验收数据集](docs/GUOLIAN_ACCEPTANCE_DATASET.md) 和 [集团业务旅程](docs/GROUP_BUSINESS_USER_JOURNEY.md)。
 

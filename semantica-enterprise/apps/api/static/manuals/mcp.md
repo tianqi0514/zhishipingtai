@@ -7,7 +7,7 @@
 - 鉴权：Authorization: Bearer ACCESS_TOKEN
 - 推荐超时：60 秒；知识问答建议 600 秒
 
-MCP Server 只调用传神智库 FastAPI，不直连 PostgreSQL、OpenSearch、Qdrant、FalkorDB 或 MinIO。
+MCP Server 只调用 Nexus One FastAPI，不直连 PostgreSQL、OpenSearch、Qdrant、FalkorDB 或 MinIO。
 
 ## 客户端配置示例
 

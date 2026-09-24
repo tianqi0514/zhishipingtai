@@ -16,7 +16,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "传神智库"
+    app_name: str = "Nexus One"
     environment: str = "development"
     api_prefix: str = "/api/v1"
     app_secret_key: str = "dev-only-change-this-secret-at-least-32-bytes"

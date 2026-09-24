@@ -1,6 +1,6 @@
-# 传神智库
+# Nexus One
 
-传神智库是一套基于 [Semantica](https://github.com/semantica-agi/semantica) 二次开发的组织级知识平台。仓库包含平台完整源码、所锁定的 Semantica 与 DeepSeek Harness 源码、Docker 构建文件、依赖清单、数据库迁移和部署脚本，可在一台新的 Linux 服务器上从源码构建并启动。
+Nexus One 是一套基于 [Semantica](https://github.com/semantica-agi/semantica) 二次开发的组织级知识平台。仓库包含平台完整源码、所锁定的 Semantica 与 DeepSeek Harness 源码、Docker 构建文件、依赖清单、数据库迁移和部署脚本，可在一台新的 Linux 服务器上从源码构建并启动。
 
 当前平台版本：`0.10.0`。
 
@@ -42,7 +42,7 @@ DeepSeek Harness 只通过内部知识工具 API 访问平台，不直接连接�
 
 | 目录 | 内容 | 锁定版本 |
 |---|---|---|
-| `semantica-enterprise/` | 传神智库业务后端、Web 前端、Worker、MCP、CLI、迁移和测试 | `0.10.0` |
+| `semantica-enterprise/` | Nexus One 业务后端、Web 前端、Worker、MCP、CLI、迁移和测试 | `0.10.0` |
 | `semantica/` | 完整内置的 Semantica 上游源码 | 基础提交 `cce5ea177cbac29a526effa546219c48f8ec36f4`，附 Explorer 依赖安全补丁 |
 | `deepseek-harness/` | 完整内置的 DeepSeek Harness 源码 | `cd5ef8148158c3a752a658978873241fdf8e2bbc` |
 | `semantica-enterprise/integrations/deepseek-harness/` | 低耦合知识工具插件与 Agent Runtime 适配 | 随平台版本 |
@@ -108,7 +108,7 @@ export KIMI_API_KEY='可选的 Kimi API Key'
 
 部署完成后访问：
 
-- 传神智库：<http://127.0.0.1:8080/>
+- Nexus One：<http://127.0.0.1:8080/>
 - OpenAPI：<http://127.0.0.1:8080/docs>
 - MCP Server：`http://127.0.0.1:8091/mcp`
 - RabbitMQ 管理页：<http://127.0.0.1:15672/>

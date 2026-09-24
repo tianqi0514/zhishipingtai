@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-DeepSeek Harness 是传神智库内置的对话 Agent Runtime。浏览器和外部系统只调用 FastAPI；不应直接访问 8090 端口。
+DeepSeek Harness 是 Nexus One 内置的对话 Agent Runtime。浏览器和外部系统只调用 FastAPI；不应直接访问 8090 端口。
 
 - 容器内地址：http://agent-runtime:8090
 - 平台入口：/api/v1/conversations
@@ -30,7 +30,7 @@ DeepSeek Harness 是传神智库内置的对话 Agent Runtime。浏览器和外�
 
 ## 模型与安全
 
-LLM、Base URL、参数和 API Key 全部来自传神智库“配置中心 / 模型服务”。API Key 不写入 Harness Session Event，也不通过浏览器下发。
+LLM、Base URL、参数和 API Key 全部来自 Nexus One“配置中心 / 模型服务”。API Key 不写入 Harness Session Event，也不通过浏览器下发。
 
 内部服务凭据从 /run/secrets/agent_service_secret 读取。凭据必须至少 32 字节，并由 Docker Secret 管理。禁止把 8090 端口直接暴露到公网。
 

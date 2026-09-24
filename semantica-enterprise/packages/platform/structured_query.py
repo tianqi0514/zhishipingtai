@@ -1319,7 +1319,7 @@ def generate_semantic_plan_ir(
         "plan": SemanticQueryPlan.model_json_schema(),
         "query_ir": SemanticQueryIR.model_json_schema(),
     }
-    prompt = f"""你是传神智库的结构化语义查询规划器。只输出一个 JSON 对象，键为 plan 和 query_ir，不要 Markdown。
+    prompt = f"""你是 Nexus One 的结构化语义查询规划器。只输出一个 JSON 对象，键为 plan 和 query_ir，不要 Markdown。
 只能使用下面语义目录中的 id；严禁输出 SQL、物理表名、物理字段名、未列出的函数或额外字段。
 Plan 版本为 chuanshen.semantic-query-plan/v1；IR 版本为 chuanshen.query-ir/v1。
 必须逐字段遵守下面的 JSON Schema，不能改名、缩写或沿用其他版本的字段。所有对象 extra=forbid。
@@ -1391,7 +1391,7 @@ Plan.entity_ids 必须包含 IR 主实体和所有 Join 实体；Plan.relationsh
             except Exception as exc:
                 validation_error = exc
         if attempt < 2 and governed is None:
-            repair_prompt = f"""上一次结构化查询计划不符合传神智库严格协议。只输出修正后的 JSON 对象，键必须是 plan 和 query_ir，不要解释、不要 Markdown、不要 SQL。
+            repair_prompt = f"""上一次结构化查询计划不符合 Nexus One 严格协议。只输出修正后的 JSON 对象，键必须是 plan 和 query_ir，不要解释、不要 Markdown、不要 SQL。
 校验错误：{str(validation_error)[:6000]}
 上一次输出：{json.dumps(raw, ensure_ascii=False)[:14000]}
 严格 Schema：{json.dumps(schema_contract, ensure_ascii=False)}

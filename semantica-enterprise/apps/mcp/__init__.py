@@ -1,2 +1,1 @@
-"""MCP facade for 传神智库."""
-
+"""MCP facade for Nexus One."""
