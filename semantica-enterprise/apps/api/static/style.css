@@ -297,3 +297,7 @@ dialog:has(.preview-policy-fields){width:min(880px,calc(100vw - 30px))}.preview-
 .writing-graph-legend em{margin-left:auto;color:#9aa2ae;font-size:9px;font-style:normal}
 @media(max-width:1180px){.writing-graph-body{grid-template-columns:minmax(0,1fr) 260px}.writing-graph-legend{width:205px}}
 @media(max-width:820px){.writing-graph-body{grid-template-columns:1fr;height:calc(100dvh - 265px);min-height:500px}.writing-graph-legend{top:10px;right:10px;width:190px;padding:9px}.writing-graph-legend span{font-size:9px}}
+
+/* Keep the source picker action explicit while its long catalog scrolls. */
+.source-picker-tip{margin:0;padding:8px 11px;border-radius:7px;background:#f2f6ff;color:#53647d;font-size:11px}
+.source-picker-modal .modal-actions{position:relative;z-index:2;box-shadow:0 -8px 18px rgba(31,46,69,.05)}

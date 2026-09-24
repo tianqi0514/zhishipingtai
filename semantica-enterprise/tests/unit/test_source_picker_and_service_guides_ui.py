@@ -18,6 +18,8 @@ def test_source_picker_lists_every_backend_source_type() -> None:
         assert f"'{source_type}'" in category_block
     assert "选择数据源类型" in APP
     assert "data-source-type-card" in APP
+    assert "确认并配置 · ${sourceTypeName(checked.value)}" in APP
+    assert "submit.disabled=!checked" in APP
     assert "配置 · ${sourceTypeName(record.source_type)}" in APP
 
 
