@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-UPSTREAM_COMMIT = "b5e380a4b98256d24afd5d7608bde3d9785f52bb"
+UPSTREAM_COMMIT = "6d7364df87226f88a24cf2eaab24ac68f980d7a5"
 
 
 def check_writing_ontology(ontology: dict[str, Any]) -> dict[str, Any]:

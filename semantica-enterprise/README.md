@@ -1,6 +1,6 @@
 # Nexus One
 
-Nexus One 是基于 Semantica 源码增量开发的组织级知识平台。当前开发分支已将内核更新到 0.7.0 及锁定的后续源码 `b5e380a4b98256d24afd5d7608bde3d9785f52bb`；这不表示测试服务器已升级，也不表示所有新增内核能力已经接入前端。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理、三路检索、知识图谱、规则推演、DeepSeek Harness 和 Plate 妙笔。既有交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
+Nexus One 是基于 Semantica 源码增量开发的组织级知识平台。当前开发分支已将内核更新到 0.7.0 及锁定的后续源码 `6d7364df87226f88a24cf2eaab24ac68f980d7a5`；这不表示测试服务器已升级，也不表示所有新增内核能力已经接入前端。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理、三路检索、知识图谱、规则推演、DeepSeek Harness 和 Plate 妙笔。既有交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
 
 本轮升级范围、16 类资产契约、HTML 参考审计及未完成项见 [升级设计与状态](docs/platform-upgrade/PLATFORM_WRITING_ASSETS_UPGRADE.md)；实际测试结果和操作步骤见 [验收记录](docs/platform-upgrade/VALIDATION.md)。历史定义不会自动成为本次项目事实，未经核验的公式或模型生成的工具代码不能执行。
 

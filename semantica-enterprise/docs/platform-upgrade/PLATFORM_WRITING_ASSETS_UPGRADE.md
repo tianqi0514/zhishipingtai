@@ -4,7 +4,7 @@
 
 ## 内核版本与接入范围
 
-原内核为 0.6.6，源码提交 `cce5ea177cbac29a526effa546219c48f8ec36f4`。新源码锁定为 `b5e380a4b98256d24afd5d7608bde3d9785f52bb`，包版本 0.7.0；它包含 [0.7.0 发布](https://github.com/semantica-agi/semantica/releases/tag/v0.7.0) 后尚未单独发布的变更，不应当称为纯 0.7.0 Tag 构建。
+原内核为 0.6.6，源码提交 `cce5ea177cbac29a526effa546219c48f8ec36f4`。新源码锁定为 `6d7364df87226f88a24cf2eaab24ac68f980d7a5`，包版本 0.7.0；它包含 [0.7.0 发布](https://github.com/semantica-agi/semantica/releases/tag/v0.7.0) 后尚未单独发布的变更，不应当称为纯 0.7.0 Tag 构建。最后核对上游时补入 LLM 溯源包装器导入、结构化输出与请求级用量元数据修复；没有复制上游 CI 的已知失败豁免配置。
 
 | 能力 | 内核源码 | 企业平台状态 |
 |---|---|---|
