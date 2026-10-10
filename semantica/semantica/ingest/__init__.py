@@ -130,7 +130,34 @@ Example Usage:
 from __future__ import annotations
 
 import importlib
-from typing import Any, Dict, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Tuple
+
+if TYPE_CHECKING:
+    from .bigquery_ingestor import (
+        BigQueryConnector,
+        BigQueryData,
+        BigQueryIngestor,
+    )
+    from .dynamics365_ingestor import (
+        Dynamics365Connector,
+        Dynamics365Data,
+        Dynamics365Ingestor,
+    )
+    from .powerbi_ingestor import (
+        PowerBIConnector,
+        PowerBIData,
+        PowerBIIngestor,
+    )
+    from .salesforce_ingestor import (
+        SalesforceConnector,
+        SalesforceData,
+        SalesforceIngestor,
+    )
+    from .servicenow_ingestor import (
+        ServiceNowConnector,
+        ServiceNowData,
+        ServiceNowIngestor,
+    )
 
 from .config import IngestConfig, ingest_config
 from .file_ingestor import (
@@ -139,6 +166,7 @@ from .file_ingestor import (
     FileObject,
     FileTypeDetector,
 )
+from ..utils.exceptions import PartialIngestionWarning
 from .methods import (
     get_ingest_method,
     ingest,
@@ -152,6 +180,7 @@ from .methods import (
     ingest_parquet,
     ingest_public_api,
     ingest_repository,
+    ingest_salesforce,
     ingest_stream,
     ingest_web,
     ingest_xml,
@@ -218,6 +247,18 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "SnowflakeIngestor": (".snowflake_ingestor", "SnowflakeIngestor"),
     "SnowflakeData": (".snowflake_ingestor", "SnowflakeData"),
     "SnowflakeConnector": (".snowflake_ingestor", "SnowflakeConnector"),
+    # SAP OData ingestion
+    "SAPIngestor": (".sap_ingestor", "SAPIngestor"),
+    "SAPODataEntity": (".sap_ingestor", "SAPODataEntity"),
+    "SAPODataConnector": (".sap_ingestor", "SAPODataConnector"),
+    # ServiceNow Table API ingestion
+    "ServiceNowIngestor": (".servicenow_ingestor", "ServiceNowIngestor"),
+    "ServiceNowData": (".servicenow_ingestor", "ServiceNowData"),
+    "ServiceNowConnector": (".servicenow_ingestor", "ServiceNowConnector"),
+    # Apache Airflow ingestion
+    "AirflowIngestor": (".airflow_ingestor", "AirflowIngestor"),
+    "AirflowData": (".airflow_ingestor", "AirflowData"),
+    "AirflowConnector": (".airflow_ingestor", "AirflowConnector"),
     # Databricks ingestion
     "DatabricksIngestor": (".databricks_ingestor", "DatabricksIngestor"),
     "DatabricksData": (".databricks_ingestor", "DatabricksData"),
@@ -231,35 +272,110 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     # XML ingestion
     "XMLIngestor": (".xml_ingestor", "XMLIngestor"),
     "XMLIngestionData": (".xml_ingestor", "XMLIngestionData"),
+    # Salesforce ingestion
+    "SalesforceIngestor": (".salesforce_ingestor", "SalesforceIngestor"),
+    "SalesforceData": (".salesforce_ingestor", "SalesforceData"),
+    "SalesforceConnector": (".salesforce_ingestor", "SalesforceConnector"),
+    # Tableau ingestion
+    "TableauIngestor": (".tableau_ingestor", "TableauIngestor"),
+    "TableauData": (".tableau_ingestor", "TableauData"),
+    "TableauConnector": (".tableau_ingestor", "TableauConnector"),
+    # Dynamics 365 ingestion
+    "Dynamics365Ingestor": (".dynamics365_ingestor", "Dynamics365Ingestor"),
+    "Dynamics365Data": (".dynamics365_ingestor", "Dynamics365Data"),
+    "Dynamics365Connector": (".dynamics365_ingestor", "Dynamics365Connector"),
+    # Redshift ingestion
+    "RedshiftIngestor": (".redshift_ingestor", "RedshiftIngestor"),
+    "RedshiftData": (".redshift_ingestor", "RedshiftData"),
+    "RedshiftConnector": (".redshift_ingestor", "RedshiftConnector"),
+    # Cassandra ingestion
+    "CassandraIngestor": (".cassandra_ingestor", "CassandraIngestor"),
+    "CassandraData": (".cassandra_ingestor", "CassandraData"),
+    "CassandraConnector": (".cassandra_ingestor", "CassandraConnector"),
+    # Power BI ingestion
+    "PowerBIIngestor": (".powerbi_ingestor", "PowerBIIngestor"),
+    "PowerBIData": (".powerbi_ingestor", "PowerBIData"),
+    "PowerBIConnector": (".powerbi_ingestor", "PowerBIConnector"),
+    # BigQuery ingestion
+    "BigQueryIngestor": (".bigquery_ingestor", "BigQueryIngestor"),
+    "BigQueryData": (".bigquery_ingestor", "BigQueryData"),
+    "BigQueryConnector": (".bigquery_ingestor", "BigQueryConnector"),
+    # Looker ingestion
+    "LookerIngestor": (".looker_ingestor", "LookerIngestor"),
+    "LookerData": (".looker_ingestor", "LookerData"),
+    "LookerConnector": (".looker_ingestor", "LookerConnector"),
 }
 
 _OPTIONAL_DEPENDENCY_MESSAGES = {
     ".repo_ingestor": (
         "Repository ingestion requires optional dependency 'GitPython'. "
-        "Install it before importing RepoIngestor or using ingest_repository()."
+        "Install it before importing RepoIngestor or using ingest_repository(). "
+        "Install it with: pip install 'semantica[ingest-git]'"
     ),
     ".web_ingestor": (
         "Web ingestion requires optional dependency 'beautifulsoup4'. "
-        "Install it before importing WebIngestor or using ingest_web()."
+        "Install it before importing WebIngestor or using ingest_web(). "
+        "Install it with: pip install 'semantica[documents]'"
     ),
     ".feed_ingestor": (
         "Feed ingestion requires optional dependency 'beautifulsoup4'. "
-        "Install it before importing FeedIngestor or using ingest_feed()."
+        "Install it before importing FeedIngestor or using ingest_feed(). "
+        "Install it with: pip install 'semantica[documents]'"
     ),
     ".email_ingestor": (
         "Email ingestion requires optional dependency 'beautifulsoup4'. "
-        "Install it before importing EmailIngestor or using ingest_email()."
+        "Install it before importing EmailIngestor or using ingest_email(). "
+        "Install it with: pip install 'semantica[documents]'"
+    ),
+    ".xml_ingestor": (
+        "XML ingestion requires optional dependency 'lxml'. "
+        "Install it before importing XMLIngestor or using ingest_xml(). "
+        "Install it with: pip install 'semantica[documents]'"
     ),
     ".parquet_ingestor": (
         "Parquet ingestion requires optional dependency 'pyarrow'. "
-        "Install it before importing ParquetIngestor or using ingest_parquet()."
+        "Install it before importing ParquetIngestor or using ingest_parquet(). "
+        "Install it with: pip install 'semantica[ingest-parquet]'"
     ),
     ".arrow_ingestor": (
         "Arrow ingestion requires optional dependency 'pyarrow'. "
-        "Install it before importing ArrowIngestor or using ingest_arrow()."
+        "Install it before importing ArrowIngestor or using ingest_arrow(). "
+        "Install it with: pip install 'semantica[ingest-arrow]'"
+    ),
+    ".salesforce_ingestor": (
+        "Salesforce ingestion requires optional dependency 'simple-salesforce'. "
+        "Install it with: pip install 'semantica[db-salesforce]'"
+    ),
+    ".airflow_ingestor": (
+        "Apache Airflow ingestion requires optional dependency 'requests'. "
+        "Install it with: "
+        'pip install \"semantica[ingest-airflow]\"'
+    ),
+    ".tableau_ingestor": (
+        "Tableau ingestion requires optional dependency 'tableauserverclient'. "
+        "Install it with: pip install 'semantica[ingest-tableau]'"
+    ),
+    ".dynamics365_ingestor": (
+        "Dynamics 365 ingestion requires optional dependency 'msal'. "
+        "Install it with: pip install 'semantica[ingest-dynamics365]'"
+    ),
+    ".redshift_ingestor": (
+        "Redshift ingestion requires optional dependency 'redshift-connector'. "
+        "Install it with: pip install 'semantica[db-redshift]'"
+    ),
+    ".cassandra_ingestor": (
+        "Cassandra ingestion requires optional dependency 'cassandra-driver'. "
+        "Install it with: pip install 'semantica[db-cassandra]'"
+    ),
+    ".bigquery_ingestor": (
+        "BigQuery ingestion requires optional dependency 'google-cloud-bigquery'. "
+        "Install it with: pip install 'semantica[db-bigquery]'"
+    ),
+    ".looker_ingestor": (
+        "Looker ingestion requires optional dependency 'looker-sdk'. "
+        "Install it with: pip install 'semantica[ingest-looker]'"
     ),
 }
-
 
 def __getattr__(name: str) -> Any:
     """Load optional ingestion backends only when callers request them."""
@@ -269,12 +385,118 @@ def __getattr__(name: str) -> Any:
     module_name, attr_name = _LAZY_EXPORTS[name]
     try:
         module = importlib.import_module(module_name, __name__)
-    except ModuleNotFoundError as exc:
+    except (ImportError, OSError) as exc:
         message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
         missing_name = getattr(exc, "name", None)
-        if message and missing_name in {"git", "bs4", "pyarrow"}:
+        if message and (
+            missing_name is None
+            or any(
+                pkg in missing_name
+                for pkg in (
+                    "git",
+                    "bs4",
+                    "pyarrow",
+                    "simple_salesforce",
+                    "lxml",
+                    "redshift_connector",
+                    "cassandra",
+                    "google",
+                    "looker_sdk",
+                )
+            )
+        ):
             raise ImportError(message) from exc
         raise
+
+    # Guard against backends whose modules imported cleanly with dependencies
+    # set to None; ensure probe imports (e.g. try: from semantica.ingest import ...)
+    # fail at import time rather than postponing failure to construction time.
+    if module_name == ".repo_ingestor" and name in {"RepoIngestor"}:
+        if getattr(module, "git", None) is None:
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".xml_ingestor" and name in {"XMLIngestor"}:
+        if getattr(module, "etree", None) is None:
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".parquet_ingestor" and name in {"ParquetIngestor"}:
+        if not getattr(module, "PARQUET_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".arrow_ingestor" and name in {"ArrowIngestor"}:
+        if not getattr(module, "ARROW_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".salesforce_ingestor" and name in {
+        "SalesforceIngestor",
+        "SalesforceConnector",
+    }:
+        if not getattr(module, "SALESFORCE_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".tableau_ingestor" and name in {
+        "TableauIngestor",
+        "TableauConnector",
+    }:
+        if not getattr(module, "TABLEAU_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".dynamics365_ingestor" and name in {
+        "Dynamics365Ingestor",
+        "Dynamics365Connector",
+    }:
+        if not getattr(module, "DYNAMICS_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".redshift_ingestor" and name in {
+        "RedshiftIngestor",
+        "RedshiftConnector",
+    }:
+        if not getattr(module, "REDSHIFT_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".cassandra_ingestor" and name in {
+        "CassandraIngestor",
+        "CassandraConnector",
+    }:
+        if not getattr(module, "CASSANDRA_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".bigquery_ingestor" and name in {
+        "BigQueryIngestor",
+        "BigQueryConnector",
+    }:
+        if not getattr(module, "BIGQUERY_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".looker_ingestor" and name in {
+        "LookerIngestor",
+        "LookerConnector",
+    }:
+        if not getattr(module, "LOOKER_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
 
     value = getattr(module, attr_name)
     globals()[name] = value
@@ -287,6 +509,7 @@ __all__ = [
     "FileObject",
     "FileTypeDetector",
     "CloudStorageIngestor",
+    "PartialIngestionWarning",
     # Web ingestion
     "WebIngestor",
     "WebContent",
@@ -345,6 +568,18 @@ __all__ = [
     "SnowflakeIngestor",
     "SnowflakeData",
     "SnowflakeConnector",
+    # SAP OData ingestion
+    "SAPIngestor",
+    "SAPODataEntity",
+    "SAPODataConnector",
+    # ServiceNow Table API ingestion
+    "ServiceNowIngestor",
+    "ServiceNowData",
+    "ServiceNowConnector",
+    # Apache Airflow ingestion
+    "AirflowIngestor",
+    "AirflowData",
+    "AirflowConnector",
     # Databricks ingestion
     "DatabricksIngestor",
     "DatabricksData",
@@ -358,6 +593,38 @@ __all__ = [
     # XML ingestion
     "XMLIngestor",
     "XMLIngestionData",
+    # Salesforce ingestion
+    "SalesforceIngestor",
+    "SalesforceData",
+    "SalesforceConnector",
+    # Tableau ingestion
+    "TableauIngestor",
+    "TableauData",
+    "TableauConnector",
+    # Dynamics 365 ingestion
+    "Dynamics365Ingestor",
+    "Dynamics365Data",
+    "Dynamics365Connector",
+    # Redshift ingestion
+    "RedshiftIngestor",
+    "RedshiftData",
+    "RedshiftConnector",
+    # Cassandra ingestion
+    "CassandraIngestor",
+    "CassandraData",
+    "CassandraConnector",
+    # Power BI ingestion
+    "PowerBIIngestor",
+    "PowerBIData",
+    "PowerBIConnector",
+    # BigQuery ingestion
+    "BigQueryIngestor",
+    "BigQueryData",
+    "BigQueryConnector",
+    # Looker ingestion
+    "LookerIngestor",
+    "LookerData",
+    "LookerConnector",
     # Registry and Methods
     "MethodRegistry",
     "method_registry",
@@ -369,6 +636,7 @@ __all__ = [
     "ingest_repository",
     "ingest_email",
     "ingest_database",
+    "ingest_salesforce",
     "ingest_ontology",
     "ingest_arrow",
     "ingest_parquet",

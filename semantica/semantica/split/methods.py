@@ -311,6 +311,9 @@ def split_by_tokens(
             )
         )
 
+        if end_idx >= len(tokens):
+            break
+
         # Move to next chunk with overlap
         start_idx = max(start_idx + 1, end_idx - chunk_overlap)
         text_start = text_end - chunk_overlap * 4  # Approximate
@@ -530,6 +533,9 @@ def split_by_characters(
             )
         )
 
+        if end >= text_length:
+            break
+
         start = max(start + 1, end - chunk_overlap)
 
     return chunks
@@ -579,6 +585,9 @@ def split_by_words(
                 },
             )
         )
+
+        if end_idx >= len(words):
+            break
 
         start_idx = max(start_idx + 1, end_idx - chunk_overlap)
 
@@ -1402,7 +1411,7 @@ def split_embedding_semantic(
 
 def split_hierarchical(
     text: str,
-    levels: List[str] = ["section", "paragraph", "sentence"],
+    levels: Optional[List[str]] = None,
     chunk_sizes: Optional[List[int]] = None,
     **kwargs,
 ) -> List[Chunk]:
@@ -1420,6 +1429,8 @@ def split_hierarchical(
     """
     if chunk_sizes is None:
         chunk_sizes = [2000, 1000, 500]
+    if levels is None:
+        levels = ["section", "paragraph", "sentence"]
 
     # Start with largest level
     if "section" in levels:

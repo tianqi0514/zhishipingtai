@@ -74,6 +74,7 @@ Production Use Cases:
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from ..utils.exceptions import ValidationError
 from ..utils.helpers import classify_path_distance
 from ..utils.logging import get_logger
 from .agent_memory import AgentMemory
@@ -134,6 +135,8 @@ class AgentContext:
         advanced_analytics: bool = True,
         kg_algorithms: bool = True,
         vector_store_features: bool = True,
+        evaluators: Optional[List[str]] = None,
+        eval_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
         """
@@ -152,6 +155,12 @@ class AgentContext:
             advanced_analytics: Enable advanced analytics (default: True)
             kg_algorithms: Enable KG algorithms integration (default: True)
             vector_store_features: Enable vector store features (default: True)
+            evaluators: Optional list of semantica.evals evaluator names run
+                automatically on every recorded decision (graph_store decision
+                backend only). Passed through to DecisionRecorder; see its
+                docstring. Omitting this leaves record_decision() unchanged.
+            eval_config: Optional semantica.evals config dict, keyed by
+                evaluator name, passed through to DecisionRecorder.
             **kwargs: Additional options passed to underlying components
 
         Raises:
@@ -170,7 +179,9 @@ class AgentContext:
         self.knowledge_graph = knowledge_graph
         self._checkpoints: Dict[str, Dict[str, Any]] = {}
         self._temporal_version_manager = kwargs.get("temporal_version_manager")
-        
+        self.evaluators = evaluators
+        self.eval_config = eval_config or {}
+
         # Store advanced feature flags
         self.config = {
             "decision_tracking": decision_tracking,
@@ -230,7 +241,11 @@ class AgentContext:
             if hasattr(knowledge_graph, "execute_query"):
                 self._decision_backend = "graph_store"
                 try:
-                    self._decision_recorder = DecisionRecorder(knowledge_graph)
+                    self._decision_recorder = DecisionRecorder(
+                        knowledge_graph,
+                        evaluators=self.evaluators,
+                        eval_config=self.eval_config,
+                    )
                     self._decision_query = DecisionQuery(
                         graph_store=knowledge_graph,
                         vector_store=vector_store if vector_store_features else None,
@@ -246,7 +261,11 @@ class AgentContext:
                     self.logger.warning(
                         f"Failed to initialize enhanced decision tracking ({type(e).__name__})"
                     )
-                    self._decision_recorder = DecisionRecorder(knowledge_graph)
+                    self._decision_recorder = DecisionRecorder(
+                        knowledge_graph,
+                        evaluators=self.evaluators,
+                        eval_config=self.eval_config,
+                    )
                     self._decision_query = DecisionQuery(knowledge_graph)
                     self._causal_analyzer = CausalChainAnalyzer(knowledge_graph)
                     self._policy_engine = PolicyEngine(knowledge_graph)
@@ -533,7 +552,8 @@ class AgentContext:
             include_relationships: Include relationships in results (default: False)
             expand_graph: Use graph expansion (default: True)
             deduplicate: Deduplicate results (default: True)
-            **kwargs: Additional filters (type, date_range, etc.)
+            **kwargs: Additional filters (type, date_range, etc.); ``truth_filter`` is
+                rejected here, use ``ContextRetriever.retrieve`` directly
 
         Returns:
             List of context dicts with content, score, source, and metadata
@@ -545,6 +565,14 @@ class AgentContext:
             >>> # Force vector-only retrieval
             >>> results = context.retrieve("Python", use_graph=False)
         """
+        if kwargs.get("truth_filter") is not None:
+            raise ValidationError(
+                "truth_filter is not supported on AgentContext.retrieve; use "
+                "ContextRetriever.retrieve(..., truth_filter=...) directly and "
+                "assemble the verified context yourself",
+                validation_context={"method": "AgentContext.retrieve"},
+            )
+
         # Auto-detect strategy
         if use_graph is None:
             use_graph = self.knowledge_graph is not None and self._retriever is not None
@@ -612,7 +640,8 @@ class AgentContext:
             llm_provider: LLM provider instance (from semantica.llms)
             max_results: Maximum context results to retrieve (default: 10)
             max_hops: Maximum graph traversal hops (default: 2)
-            **kwargs: Additional retrieval options
+            **kwargs: Additional retrieval options; ``truth_filter`` is rejected here,
+                use ``ContextRetriever.retrieve`` directly instead
 
         Returns:
             Dictionary with:
@@ -631,6 +660,17 @@ class AgentContext:
             ... )
             >>> print(result['response'])
         """
+        if kwargs.get("truth_filter") is not None:
+            raise ValidationError(
+                "truth_filter is not supported on "
+                "AgentContext.query_with_reasoning; use "
+                "ContextRetriever.retrieve(..., truth_filter=...) directly and "
+                "assemble the verified context before reasoning",
+                validation_context={
+                    "method": "AgentContext.query_with_reasoning"
+                },
+            )
+
         if not self._retriever:
             # Fallback if retriever not available
             return {
@@ -688,10 +728,12 @@ class AgentContext:
         if user_id:
             filter_dict["user_id"] = user_id
         if days_old:
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, timezone
 
-            filter_dict["start_date"] = (
-                datetime.now() - timedelta(days=days_old)
+            if days_old < 0:
+                raise ValueError("days_old must be non-negative")
+            filter_dict["end_date"] = (
+                datetime.now(timezone.utc) - timedelta(days=days_old)
             ).isoformat()
         filter_dict.update(filters)
 
@@ -1761,6 +1803,21 @@ class AgentContext:
         if not self._decision_backend:
             raise RuntimeError("Decision tracking is not enabled")
 
+        def _safe_parse_timestamp(value: Any) -> datetime:
+            if isinstance(value, datetime):
+                return value
+            if not value:
+                return datetime.now()
+            if isinstance(value, (int, float)):
+                try:
+                    return datetime.fromtimestamp(value)
+                except (OverflowError, OSError, ValueError):
+                    return datetime.now()
+            try:
+                return datetime.fromisoformat(str(value))
+            except Exception:
+                return datetime.now()
+
         # Delegate to ContextGraph if available
         if self._decision_backend == "context_graph" and hasattr(self.knowledge_graph, "find_precedents_by_scenario"):
             try:
@@ -1787,7 +1844,7 @@ class AgentContext:
                         reasoning=decision_data["reasoning"],
                         outcome=decision_data["outcome"],
                         confidence=decision_data["confidence"],
-                        timestamp=datetime.fromtimestamp(decision_data["timestamp"]),
+                        timestamp=_safe_parse_timestamp(decision_data["timestamp"]),
                         decision_maker=decision_data.get("decision_maker"),
                         valid_from=decision_data.get("valid_from"),
                         valid_until=decision_data.get("valid_until"),
@@ -1813,16 +1870,6 @@ class AgentContext:
             return self._decision_query._find_precedents_basic(scenario, category, limit)
 
         results: List[Decision] = []
-
-        def _safe_parse_timestamp(value: Any) -> datetime:
-            if isinstance(value, datetime):
-                return value
-            if not value:
-                return datetime.now()
-            try:
-                return datetime.fromisoformat(str(value))
-            except Exception:
-                return datetime.now()
 
         if use_hybrid_search and hasattr(self.vector_store, "search_decisions"):
             filters = {"category": category} if category else None

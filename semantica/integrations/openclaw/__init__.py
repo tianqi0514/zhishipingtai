@@ -6,7 +6,7 @@ First-class integration between the Semantica semantic intelligence stack and
 `OpenClaw <https://openclaw.ai>`_ — the open-source personal AI agent platform.
 
 OpenClaw connects to external tools via MCP (Model Context Protocol).  This
-integration exposes the full Semantica MCP surface (12 tools, 3 resources) to
+integration exposes the full Semantica MCP surface (15 tools, 3 resources) to
 any OpenClaw agent and also ships a lightweight ``OpenClawKGTool`` that can be
 dropped directly into an OpenClaw SOUL.md tool-list as a native tool.
 
@@ -37,11 +37,11 @@ restart the OpenClaw Gateway::
 
     openclaw gateway restart
 
-All 12 Semantica tools are then available as native OpenClaw agent tools.
+All 15 Semantica tools are then available as native OpenClaw agent tools.
 
 Compatibility
 -------------
-Requires ``semantica >= 0.3.0``.  The MCP path requires ``python >= 3.8`` and
+Requires ``semantica >= 0.3.0``.  The MCP path requires ``python >= 3.10`` and
 a running ``semantica.mcp_server`` instance.  The REST path requires a running
 ``semantica.server`` instance (``python -m semantica.server``, port 8000 by
 default).

@@ -8,8 +8,10 @@ import logging
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
-from typing import Any, Dict, Iterable, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, Iterator, List, Optional
+
+import networkx as nx
 
 from ..context.context_graph import ContextGraph, _resolve_edge_identity
 from .search_index import GraphSearchIndex
@@ -375,6 +377,52 @@ class GraphSession:
         )
         return page, total
 
+    def iter_nodes(self, node_type: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+        """Yield matching nodes one at a time, in the same order as ``paginate_nodes``.
+
+        ``paginate_nodes`` normalizes and holds the entire matching set before it
+        slices out a page, so a caller that filters the result down itself cannot
+        bound its cost by asking for smaller pages — it would re-pay that full
+        cost per page. Streaming lets such a caller retain only what it selects
+        and stop scanning as soon as it has enough.
+
+        Only the id list is snapshotted under the lock; nodes are read one at a
+        time, so a concurrent mutation can be observed mid-iteration and ids that
+        disappear are skipped. ``paginate_nodes`` is the atomic alternative.
+        """
+        with self._lock:
+            source_ids = (
+                self.graph.node_type_index.get(node_type, set())
+                if node_type
+                else self.graph.nodes.keys()
+            )
+            node_ids = sorted(
+                (node_id for node_id in source_ids if node_id is not None),
+                key=lambda value: str(value),
+            )
+        for node_id in node_ids:
+            with self._lock:
+                raw = self.graph.find_node(node_id)
+            if raw is None:
+                continue
+            yield self.normalize_node(raw)
+
+    def iter_edges(self, edge_type: Optional[str] = None) -> Iterator[Dict[str, Any]]:
+        """Yield matching edges one at a time, in raw graph order.
+
+        Same rationale as ``iter_nodes``. Edge normalization derives an identity
+        hash per edge, which ``paginate_edges`` pays for every matching edge (and
+        then sorts) before paging; a filtering caller only needs it for the edges
+        it keeps. Callers that need a stable order sort the subset they select.
+        """
+        with self._lock:
+            raw_edges = self.graph.find_edges(edge_type=edge_type)
+        for edge in raw_edges:
+            normalized = self.normalize_edge(edge)
+            if not normalized["source"] or not normalized["target"]:
+                continue
+            yield normalized
+
     def get_raw_counts(self) -> tuple[int, int]:
         """O(1) node/edge counts from the raw collections, with no per-item
         normalization.
@@ -554,7 +602,7 @@ class GraphSession:
                 except ValueError:
                     return None
             if parsed.tzinfo is not None:
-                parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
             return parsed
 
         with self._lock:
@@ -579,7 +627,7 @@ class GraphSession:
     def add_annotation(self, annotation: Dict[str, Any]) -> str:
         ann_id = str(uuid.uuid4())
         annotation["annotation_id"] = ann_id
-        annotation["created_at"] = datetime.now(UTC).isoformat()
+        annotation["created_at"] = datetime.now(timezone.utc).isoformat()
         with self._lock:
             self.annotations[ann_id] = annotation
         return ann_id
@@ -676,6 +724,44 @@ class GraphSession:
             self._cached_embeddings = None
             self._cached_graph_revision = -1
 
+    def build_nx_graph(self) -> nx.DiGraph:
+        """Build a NetworkX view of the session graph for PathFinder traversal.
+
+        ``build_graph_dict`` returns the ``{"entities", "relationships"}`` shape
+        that the KG analytics modules consume.  ``PathFinder`` cannot traverse
+        that shape — it duck-types against ``has_node``/``neighbors``/
+        ``get_edge_data``, and needs ``to_undirected`` for ``directed=False``
+        traversal — so path queries get this view instead (#1725).
+
+        Isolated nodes are preserved, and edge ``weight`` is carried over so
+        ``dijkstra_shortest_path`` sees real weights rather than defaults.
+        """
+        nodes, _ = self.get_nodes(skip=0, limit=999_999)
+        edges, _ = self.get_edges(skip=0, limit=999_999)
+
+        graph = nx.DiGraph()
+        for node in nodes:
+            node_id = node.get("id")
+            if node_id is not None:
+                graph.add_node(node_id)
+        for edge in edges:
+            source = edge.get("source")
+            target = edge.get("target")
+            if source is None or target is None:
+                continue
+            try:
+                weight = float(edge.get("weight", 1.0))
+            except (TypeError, ValueError):
+                weight = 1.0
+            # ContextGraph allows parallel edges between the same pair; a
+            # DiGraph holds one. Keep the lowest weight so the collapse is
+            # deterministic and matches how PathFinder reads weight (as cost).
+            existing = graph.get_edge_data(source, target)
+            if existing is not None:
+                weight = min(weight, existing.get("weight", weight))
+            graph.add_edge(source, target, weight=weight)
+        return graph
+
     def build_graph_dict(self, node_ids: Optional[list] = None) -> dict:
         nodes, _ = self.get_nodes(skip=0, limit=999_999)
         edges, _ = self.get_edges(skip=0, limit=999_999)
@@ -727,10 +813,20 @@ class GraphSession:
                     if edge.target_id == target_id
                 ]
                 if not candidates:
+                    # An undirected traversal can walk a stored edge backwards,
+                    # so a hop with no outgoing edge may still have an incoming
+                    # one to report (#1725).
+                    candidates = [
+                        edge for edge in self.graph._adjacency.get(target_id, [])
+                        if edge.target_id == source_id
+                    ]
+                if not candidates:
                     continue
+                # Lowest weight first, matching the edge build_nx_graph keeps
+                # and therefore the one the path was actually costed against.
                 candidates.sort(
                     key=lambda edge: (
-                        -float(edge.weight),
+                        float(edge.weight),
                         str(edge.edge_type),
                         str(edge.edge_id),
                     )

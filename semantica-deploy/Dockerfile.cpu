@@ -14,8 +14,8 @@ RUN mkdir -p /app/semantica && npm run build
 FROM python:3.13-slim AS runtime
 
 LABEL org.opencontainers.image.title="Semantica Local" \
-      org.opencontainers.image.version="0.6.6" \
-      org.opencontainers.image.revision="cce5ea177cbac29a526effa546219c48f8ec36f4"
+      org.opencontainers.image.version="0.7.0" \
+      org.opencontainers.image.revision="b5e380a4b98256d24afd5d7608bde3d9785f52bb"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

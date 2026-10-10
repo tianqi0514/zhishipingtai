@@ -145,6 +145,8 @@ from ..utils.logging import get_logger
 from ..utils.custom_methods import CUSTOM_METHOD_FELL_BACK, call_custom_method
 from .centrality_calculator import CentralityCalculator
 from .community_detector import CommunityDetector
+from .community_hierarchy import CommunityHierarchy, CommunityHierarchyBuilder
+from .community_summarizer import CommunityReport, CommunitySummarizer
 from .config import kg_config
 from .connectivity_analyzer import ConnectivityAnalyzer
 from .entity_resolver import EntityResolver
@@ -798,10 +800,10 @@ def calculate_pagerank(
     graph: Any,
     node_labels: Optional[List[str]] = None,
     relationship_types: Optional[List[str]] = None,
-    max_iterations: int = 20,
+    max_iterations: int = 100,
     damping_factor: float = 0.85,
     **kwargs
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """
     Calculate PageRank scores for nodes.
     
@@ -809,12 +811,20 @@ def calculate_pagerank(
         graph: Graph object (NetworkX or similar)
         node_labels: List of node labels to include
         relationship_types: List of relationship types to consider
-        max_iterations: Maximum number of iterations for convergence
+        max_iterations: Maximum power-iteration steps. 20 is enough for small
+            undirected graphs, but a directed graph with sink nodes needs far
+            more before the per-node values settle (at tolerance=1e-6 a
+            10-node directed chain needs ~33 steps and a 10-leaf directed star
+            ~85). The default of 100 lets those graphs converge without the
+            caller raising the cap. The scores always sum to 1 whether or not
+            convergence was reached.
         damping_factor: Probability of continuing random walk
         **kwargs: Additional parameters for PageRank calculation
         
     Returns:
-        Dictionary mapping node IDs to PageRank scores
+        Dictionary containing:
+            - centrality: Mapping of node IDs to PageRank scores
+            - rankings: List of ``(node_id, score)`` tuples sorted highest first
         
     Raises:
         ValueError: If graph is empty or parameters are invalid
@@ -822,11 +832,12 @@ def calculate_pagerank(
         
     Examples:
         >>> from semantica.kg.methods import calculate_pagerank
-        >>> scores = calculate_pagerank(
+        >>> result = calculate_pagerank(
         ...     graph,
         ...     node_labels=["Entity"],
         ...     max_iterations=30
         ... )
+        >>> result["rankings"][:3]
     """
     try:
         pass  # CentralityCalculator imported at module level
@@ -889,6 +900,230 @@ def detect_communities_label_propagation(
     except Exception as e:
         logger.error(f"Failed to detect communities: {e}")
         raise
+
+
+def build_community_hierarchy(
+    graph: Any,
+    method: str = "louvain",
+    resolution: Union[float, List[float]] = 1.0,
+    seed: Optional[int] = 42,
+    **kwargs: Any,
+) -> CommunityHierarchy:
+    """
+    Build a multi-level community hierarchy from a knowledge graph.
+
+    Args:
+        graph: Input graph (NetworkX Graph/DiGraph, Semantica dict,
+            or KnowledgeGraph)
+        method: Community detection algorithm ("louvain" or "leiden",
+            default: "louvain")
+        resolution: Modularity resolution parameter or list of resolutions
+        seed: Random seed for deterministic reproducibility (default: 42)
+        **kwargs: Additional options passed to CommunityHierarchyBuilder
+
+    Returns:
+        CommunityHierarchy container
+    """
+    custom_method = method_registry.get("community_hierarchy", method)
+    if custom_method and custom_method is not build_community_hierarchy:
+        fallback = kwargs.pop("fallback_on_custom_error", False)
+        result = call_custom_method(
+            logger,
+            method,
+            custom_method,
+            graph,
+            fallback_on_custom_error=fallback,
+            resolution=resolution,
+            seed=seed,
+            **kwargs,
+        )
+        if result is not CUSTOM_METHOD_FELL_BACK:
+            return result
+
+    try:
+        algo = (
+            "louvain"
+            if method.lower().strip() == "default"
+            else method.lower().strip()
+        )
+        builder = CommunityHierarchyBuilder(
+            algorithm=algo,
+            resolution=resolution,
+            seed=seed,
+            **kwargs,
+        )
+        return builder.build(graph)
+    except Exception as e:
+        logger.error(f"Failed to build community hierarchy: {e}")
+        raise
+
+
+method_registry.register(
+    "community_hierarchy", "default", build_community_hierarchy
+)
+method_registry.register(
+    "community_hierarchy", "louvain", build_community_hierarchy
+)
+method_registry.register(
+    "community_hierarchy", "leiden", build_community_hierarchy
+)
+
+
+def summarize_community(
+    community: Any,
+    graph: Optional[Any] = None,
+    llm: Optional[Any] = None,
+    method: str = "default",
+    max_tokens: int = 4000,
+    text_chunks: Optional[List[Any]] = None,
+    **kwargs: Any,
+) -> CommunityReport:
+    """
+    Generate a structured summary report for a knowledge graph community.
+
+    Args:
+        community: HierarchicalCommunity or dict representation
+        graph: Optional backing graph or CommunityHierarchy
+        llm: LLM provider instance, structured client, or callable
+        method: Community summary method ("default", "summarizer", "llm")
+        max_tokens: Maximum context token budget
+        text_chunks: Optional source text chunks or evidence
+        **kwargs: Extra options passed to CommunitySummarizer
+
+    Returns:
+        CommunityReport instance
+    """
+    custom_method = method_registry.get("community_summary", method)
+    if custom_method and custom_method is not summarize_community:
+        fallback = kwargs.pop("fallback_on_custom_error", False)
+        result = call_custom_method(
+            logger,
+            method,
+            custom_method,
+            community,
+            graph=graph,
+            llm=llm,
+            fallback_on_custom_error=fallback,
+            max_tokens=max_tokens,
+            text_chunks=text_chunks,
+            **kwargs,
+        )
+        if result is not CUSTOM_METHOD_FELL_BACK:
+            return result
+
+    try:
+        summarizer = CommunitySummarizer(
+            llm=llm, max_tokens=max_tokens, **kwargs
+        )
+        return summarizer.summarize_community(
+            community,
+            graph=graph,
+            max_tokens=max_tokens,
+            text_chunks=text_chunks,
+            **kwargs,
+        )
+    except Exception as e:
+        logger.error(f"Failed to summarize community: {e}")
+        raise
+
+
+def summarize_hierarchy(
+    hierarchy: Any,
+    graph: Optional[Any] = None,
+    llm: Optional[Any] = None,
+    method: str = "default",
+    max_tokens: int = 4000,
+    levels: Optional[List[int]] = None,
+    text_chunks: Optional[List[Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, CommunityReport]:
+    """
+    Synthesize community reports bottom-up across a multi-level hierarchy.
+
+    Args:
+        hierarchy: CommunityHierarchy instance
+        graph: Optional backing graph
+        llm: LLM provider instance, structured client, or callable
+        method: Community summary method ("default", "summarizer", "llm")
+        max_tokens: Maximum context token budget
+        levels: Optional subset of hierarchy levels to summarize
+        text_chunks: Optional source text chunks or evidence
+        **kwargs: Extra options passed to CommunitySummarizer
+
+    Returns:
+        Dictionary mapping community IDs to CommunityReport objects
+    """
+    custom_method = method_registry.get("community_summary", method)
+    if custom_method and custom_method not in (
+        summarize_community,
+        summarize_hierarchy,
+    ):
+        fallback = kwargs.pop("fallback_on_custom_error", False)
+        result = call_custom_method(
+            logger,
+            method,
+            custom_method,
+            hierarchy,
+            graph=graph,
+            llm=llm,
+            fallback_on_custom_error=fallback,
+            max_tokens=max_tokens,
+            levels=levels,
+            text_chunks=text_chunks,
+            **kwargs,
+        )
+        if result is not CUSTOM_METHOD_FELL_BACK:
+            return result
+
+    try:
+        summarizer = CommunitySummarizer(
+            llm=llm, max_tokens=max_tokens, **kwargs
+        )
+        return summarizer.summarize_hierarchy(
+            hierarchy,
+            graph=graph,
+            levels=levels,
+            max_tokens=max_tokens,
+            text_chunks=text_chunks,
+            **kwargs,
+        )
+    except Exception as e:
+        logger.error(f"Failed to summarize hierarchy: {e}")
+        raise
+
+
+method_registry.register(
+    "community_summary", "default", summarize_community
+)
+method_registry.register(
+    "community_summary", "summarizer", summarize_community
+)
+method_registry.register(
+    "community_summary", "llm", summarize_community
+)
+method_registry.register(
+    "community_summary", "hierarchy", summarize_hierarchy
+)
+method_registry.register(
+    "global_retrieval", "default", lambda *a, **kw: global_search(*a, **kw)
+)
+method_registry.register(
+    "drift_search", "default", lambda *a, **kw: drift_search(*a, **kw)
+)
+
+
+def global_search(query: str, **kwargs: Any) -> Any:
+    """Execute global hierarchical GraphRAG query search."""
+    from ..context.methods import retrieve_global
+
+    return retrieve_global(query, **kwargs)
+
+
+def drift_search(query: str, **kwargs: Any) -> Any:
+    """Execute DRIFT hybrid global-local search."""
+    from ..context.methods import retrieve_drift
+
+    return retrieve_drift(query, **kwargs)
 
 
 # Helper functions

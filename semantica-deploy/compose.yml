@@ -5,7 +5,7 @@ services:
     build:
       context: ../semantica
       dockerfile: ../semantica-deploy/Dockerfile.cpu
-    image: semantica-local:0.6.6-cce5ea1
+    image: semantica-local:0.7.0-b5e380a
     user: "0:0"
     command:
       - sh
@@ -18,7 +18,7 @@ services:
     restart: "no"
 
   explorer:
-    image: semantica-local:0.6.6-cce5ea1
+    image: semantica-local:0.7.0-b5e380a
     init: true
     environment:
       FALKORDB_HOST: falkordb

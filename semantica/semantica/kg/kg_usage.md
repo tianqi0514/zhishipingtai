@@ -132,6 +132,53 @@ kg1 = builder.build(initial_sources)
 kg2 = builder.build(additional_sources)
 ```
 
+### Unknown relation endpoints
+
+When a relationship endpoint names an entity that is absent from the extracted
+entity set (for example an LLM/HuggingFace extraction that synthesizes an
+endpoint), `GraphBuilder` promotes a synthetic `UNKNOWN` entity so the edge is
+not left dangling. This is the default (`"include"`). To drop such
+relationships instead, set `unknown_relation_endpoint="reject"`:
+
+```python
+builder = GraphBuilder(
+    unknown_relation_endpoint="reject",
+)
+kg = builder.build(sources)  # edges with unknown endpoints are dropped
+```
+
+Rejected relationships are observable at two levels:
+
+- A **`WARNING`-level log** is emitted for every dropped edge, including the
+  source/target and predicate, so it is visible without debug logging enabled.
+- `graph["metadata"]["rejected_relationships"]` holds the count of edges
+  dropped in that build call, giving callers a machine-readable signal:
+
+```python
+kg = builder.build(sources)
+if kg["metadata"]["rejected_relationships"]:
+    print(f"{kg['metadata']['rejected_relationships']} edge(s) were rejected "
+          f"because of unknown endpoints.")
+```
+
+The option can also be set process-wide via the module's build configuration,
+which is the documented home for it:
+
+```python
+from semantica.kg.config import kg_config
+
+kg_config.set_method_config("build", unknown_relation_endpoint="reject")
+# All subsequent GraphBuilder instances use "reject" as the default.
+```
+
+In a YAML/JSON/TOML config file, place it under the `kg_methods.build` key:
+
+```yaml
+kg_methods:
+  build:
+    unknown_relation_endpoint: reject
+```
+
 ## Graph Algorithms
 
 The knowledge graph module provides advanced algorithms for node embeddings, similarity calculations, path finding, link prediction, centrality measures, and community detection.
@@ -773,7 +820,7 @@ pagerank_scores = centrality_calc.calculate_pagerank(
 )
 
 print("PageRank scores:")
-for node_id, score in sorted(pagerank_scores.items(), key=lambda x: x[1], reverse=True)[:10]:
+for node_id, score in pagerank_scores["rankings"][:10]:
     print(f"  {node_id}: {score:.4f}")
 ```
 
@@ -799,11 +846,11 @@ low_damping = centrality_calc.calculate_pagerank(
 )
 
 print("High damping factor top nodes:")
-for node_id, score in sorted(high_damping.items(), key=lambda x: x[1], reverse=True)[:5]:
+for node_id, score in high_damping["rankings"][:5]:
     print(f"  {node_id}: {score:.4f}")
 
 print("Low damping factor top nodes:")
-for node_id, score in sorted(low_damping.items(), key=lambda x: x[1], reverse=True)[:5]:
+for node_id, score in low_damping["rankings"][:5]:
     print(f"  {node_id}: {score:.4f}")
 ```
 
@@ -846,7 +893,7 @@ pagerank_filtered = centrality_calc.calculate_pagerank(
 )
 
 print("PageRank for People and Organizations:")
-for node_id, score in sorted(pagerank_filtered.items(), key=lambda x: x[1], reverse=True)[:10]:
+for node_id, score in pagerank_filtered["rankings"][:10]:
     print(f"  {node_id}: {score:.4f}")
 ```
 
@@ -1539,7 +1586,7 @@ pagerank_scores = calculate_pagerank(
     max_iterations=100,
     damping_factor=0.85
 )
-print(f"PageRank calculated for {len(pagerank_scores)} nodes")
+print(f"PageRank calculated for {len(pagerank_scores['centrality'])} nodes")
 
 # Label Propagation community detection
 communities = detect_communities_label_propagation(
@@ -1799,7 +1846,7 @@ for ranking in degree_centrality["rankings"][:5]:
 # 6. Calculate PageRank centrality
 pagerank_scores = centrality_calc.calculate_pagerank(kg, max_iterations=100, damping_factor=0.85)
 print("Top 5 nodes by PageRank:")
-for node_id, score in sorted(pagerank_scores.items(), key=lambda x: x[1], reverse=True)[:5]:
+for node_id, score in pagerank_scores["rankings"][:5]:
     print(f"  {node_id}: {score:.4f}")
 
 # 7. Detect traditional communities
@@ -1935,7 +1982,7 @@ from semantica.kg import (
 centrality_calc = CentralityCalculator()
 pagerank_scores = centrality_calc.calculate_pagerank(kg, max_iterations=100)
 
-influential_entities = sorted(pagerank_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+influential_entities = pagerank_scores["rankings"][:10]
 print("Top 10 most influential entities:")
 for entity_id, score in influential_entities:
     print(f"  {entity_id}: {score:.4f}")
@@ -1993,4 +2040,3 @@ for source, target, length in sorted(optimal_paths, key=lambda x: x[2])[:10]:
 ```
 
 This comprehensive guide demonstrates how to use all the graph algorithms in the knowledge graph module, from basic usage to advanced real-world applications. Each algorithm is designed to work with the existing KG infrastructure and can be combined for powerful analytics workflows.
-

@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/semantica-agi/semantica",
+  "version": "0.7.0",
+  "source_commit": "b5e380a4b98256d24afd5d7608bde3d9785f52bb",
+  "baseline_commit": "cce5ea177cbac29a526effa546219c48f8ec36f4",
+  "release_tag_commit": "2a9afec685fe6f4a18350834caed3d6a9affb27a",
+  "source_scope": ["semantica/", "integrations/", "pyproject.toml", "README.md", "LICENSE", "MANIFEST.in"],
+  "preserved_scope": ["explorer/", "tests/", "docs/"],
+  "local_adjustments": ["Removed trailing whitespace only from context/decision_query.py, context/decision_recorder.py, explorer/routes/export_import.py and vector_store/vector_store.py; no logic changes."],
+  "note": "Pinned main includes unreleased changes after v0.7.0. Source availability does not mean enterprise UI integration or production verification."
+}

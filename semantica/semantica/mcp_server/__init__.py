@@ -72,19 +72,34 @@ os.environ["SEMANTICA_DISABLE_PROGRESS"] = "1"
 # ── lazy graph session ──────────────────────────────────────────────────────
 _graph: Any = None
 
+# Tracks whether the last _get_graph() call successfully loaded the configured
+# SEMANTICA_KG_PATH file.  When False (load failed) mutation handlers skip
+# save_to_file to avoid overwriting the original file with an empty graph.
+_kg_load_ok: bool = True
+
 
 def _get_graph():
-    global _graph
+    global _graph, _kg_load_ok
     if _graph is None:
         from semantica.context import ContextGraph
         _graph = ContextGraph(advanced_analytics=True)
+        _kg_load_ok = True  # default: safe to persist
         kg_path = os.environ.get("SEMANTICA_KG_PATH")
         if kg_path and os.path.exists(kg_path):
-            try:
-                _graph.load_from_file(kg_path)
-                log.info("Loaded graph from %s", kg_path)
-            except Exception as exc:
-                log.warning("Could not load graph from %s: %s", kg_path, exc)
+            # Only attempt to load if the file has content.  An empty file
+            # means the path was just created (fresh destination) and should
+            # be treated as "start with empty graph" not a corrupt-file failure.
+            if os.path.getsize(kg_path) > 0:
+                try:
+                    _graph.load_from_file(kg_path)
+                    log.info("Loaded graph from %s", kg_path)
+                except Exception as exc:
+                    log.warning(
+                        "Could not load graph from %s: %s — persistence disabled "
+                        "to protect existing data; restart the server to retry.",
+                        kg_path, exc,
+                    )
+                    _kg_load_ok = False  # do not overwrite the original file
     return _graph
 
 
@@ -179,6 +194,35 @@ def _tool_record_decision(args: dict) -> dict:
         valid_from=args.get("valid_from"),
         valid_until=args.get("valid_until"),
     )
+    # Persist back to disk so the decision survives server restarts.
+    kg_path = os.environ.get("SEMANTICA_KG_PATH")
+    if kg_path:
+        if not _kg_load_ok:
+            # Roll back to keep in-memory state consistent with persisted state.
+            if hasattr(graph, "_decisions") and decision_id in graph._decisions:
+                del graph._decisions[decision_id]
+                if hasattr(graph, "_decision_index"):
+                    cat = args.get("category", "")
+                    if cat in graph._decision_index:
+                        graph._decision_index[cat].discard(decision_id)
+            return {
+                "error": (
+                    "Persistence blocked: the configured SEMANTICA_KG_PATH "
+                    "could not be loaded at startup. Restart the server to retry."
+                )
+            }
+        try:
+            graph.save_to_file(kg_path)
+        except Exception as save_exc:
+            # Atomic write failed. Roll back to keep states consistent.
+            if hasattr(graph, "_decisions") and decision_id in graph._decisions:
+                del graph._decisions[decision_id]
+                if hasattr(graph, "_decision_index"):
+                    cat = args.get("category", "")
+                    if cat in graph._decision_index:
+                        graph._decision_index[cat].discard(decision_id)
+            log.exception("save_to_file failed after record_decision; mutation rolled back")
+            return {"error": f"Mutation rolled back: could not persist graph: {save_exc}"}
     return {"decision_id": decision_id, "status": "recorded"}
 
 
@@ -231,9 +275,39 @@ def _tool_get_causal_chain(args: dict) -> dict:
         from semantica.context.causal_analyzer import CausalChainAnalyzer
         analyzer = CausalChainAnalyzer(graph_store=graph)
         chain = analyzer.get_causal_chain(decision_id, direction=direction, max_depth=max_depth)
-        return {"chain": chain if isinstance(chain, list) else list(chain)}
+        # The analyzer returns Decision dataclasses, and tools/call json.dumps
+        # this result. serialize_decision applies the existing default=str
+        # policy, which also covers non-JSON values inside decision metadata.
+        from semantica.context.decision_models import serialize_decision
+        return {"chain": [json.loads(serialize_decision(d)) if hasattr(d, "to_dict") else d
+                          for d in chain]}
     except Exception as exc:
         return {"error": str(exc), "chain": []}
+
+
+def _tool_link_decisions(args: dict) -> dict:
+    """Create a typed causal relationship between two recorded decisions."""
+    source = str(args.get("source") or "").strip()
+    target = str(args.get("target") or "").strip()
+    relationship = str(args.get("relationship") or "").strip()
+    if not source or not target:
+        return {"error": "source and target are required"}
+    if not relationship:
+        return {"error": "relationship is required"}
+    graph = _get_graph()
+    try:
+        added = graph.add_causal_relationship(source, target, relationship)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        log.exception("link_decisions failed")
+        return {"error": str(exc)}
+    return {
+        "source": source,
+        "target": target,
+        "relationship": relationship,
+        "linked": added,
+    }
 
 
 def _tool_add_entity(args: dict) -> dict:
@@ -246,6 +320,31 @@ def _tool_add_entity(args: dict) -> dict:
     graph = _get_graph()
     graph.add_node(node_id=node_id, label=label, node_type=node_type,
                    metadata=args.get("metadata", {}))
+    # Persist back to disk so the entity survives server restarts.
+    kg_path = os.environ.get("SEMANTICA_KG_PATH")
+    if kg_path:
+        if not _kg_load_ok:
+            try:
+                with graph._lock:
+                    graph._drop_node_from_indexes(node_id)
+            except Exception:
+                pass
+            return {
+                "error": (
+                    "Persistence blocked: the configured SEMANTICA_KG_PATH "
+                    "could not be loaded at startup. Restart the server to retry."
+                )
+            }
+        try:
+            graph.save_to_file(kg_path)
+        except Exception as save_exc:
+            try:
+                with graph._lock:
+                    graph._drop_node_from_indexes(node_id)
+            except Exception:
+                pass
+            log.exception("save_to_file failed after add_entity; mutation rolled back")
+            return {"error": f"Mutation rolled back: could not persist graph: {save_exc}"}
     return {"status": "added", "id": node_id}
 
 
@@ -259,6 +358,41 @@ def _tool_add_relationship(args: dict) -> dict:
     graph = _get_graph()
     graph.add_edge(source_id=source, target_id=target, edge_type=rel_type,
                    metadata=args.get("metadata", {}))
+    # Persist back to disk so the relationship survives server restarts.
+    kg_path = os.environ.get("SEMANTICA_KG_PATH")
+    if kg_path:
+        if not _kg_load_ok:
+            try:
+                with graph._lock:
+                    for edge in reversed(list(graph.edges)):
+                        if (edge.source_id == source
+                                and edge.target_id == target
+                                and edge.edge_type == rel_type):
+                            graph._drop_edge_from_indexes(edge)
+                            break
+            except Exception:
+                pass
+            return {
+                "error": (
+                    "Persistence blocked: the configured SEMANTICA_KG_PATH "
+                    "could not be loaded at startup. Restart the server to retry."
+                )
+            }
+        try:
+            graph.save_to_file(kg_path)
+        except Exception as save_exc:
+            try:
+                with graph._lock:
+                    for edge in reversed(list(graph.edges)):
+                        if (edge.source_id == source
+                                and edge.target_id == target
+                                and edge.edge_type == rel_type):
+                            graph._drop_edge_from_indexes(edge)
+                            break
+            except Exception:
+                pass
+            log.exception("save_to_file failed after add_relationship; mutation rolled back")
+            return {"error": f"Mutation rolled back: could not persist graph: {save_exc}"}
     return {"status": "added", "source": source, "target": target, "type": rel_type}
 
 
@@ -276,6 +410,41 @@ def _tool_run_reasoning(args: dict) -> dict:
     return {"derived_facts": derived if isinstance(derived, list) else list(derived)}
 
 
+def _pagerank_rankings(result: object) -> list:
+    """Return the ranked ``(node, score)`` pairs of a PageRank result.
+
+    ``CentralityCalculator.calculate_pagerank`` returns
+    ``{"centrality": {node: score}, "rankings": [...]}`` rather than a flat
+    ``{node: score}`` mapping, and its rankings list is already ordered.
+    """
+    if not isinstance(result, dict):
+        return []
+    rankings = result.get("rankings")
+    if isinstance(rankings, list):
+        return rankings
+    scores = result.get("centrality")
+    if not isinstance(scores, dict):
+        return []
+    return sorted(scores.items(), key=lambda item: item[1], reverse=True)
+
+
+def _community_count(result: object) -> int:
+    """Return the number of communities in a ``detect_communities`` result.
+
+    ``CommunityDetector.detect_communities`` returns a wrapper dict
+    (``communities``, ``node_assignments``, ``modularity``, ``algorithm``), so
+    taking ``len()`` of the whole result gives the key count, which is 4 for
+    every graph and every algorithm. A bare list of groups is still accepted.
+    """
+    if isinstance(result, dict):
+        groups = result.get("communities")
+    elif isinstance(result, list):
+        groups = result
+    else:
+        return 0
+    return len(groups) if isinstance(groups, list) else 0
+
+
 def _tool_get_graph_analytics(args: dict) -> dict:
     """Compute graph analytics: centrality, community detection, metrics."""
     graph = _get_graph()
@@ -285,14 +454,13 @@ def _tool_get_graph_analytics(args: dict) -> dict:
         communities = CommunityDetector().detect_communities(graph)
         node_count = len(list(graph.find_nodes()))
         edge_count = getattr(graph, "edge_count", lambda: 0)()
+        if not hasattr(graph, "edge_count") and hasattr(graph, "stats"):
+            edge_count = graph.stats().get("edge_count", 0)
         return {
             "node_count": node_count,
             "edge_count": edge_count,
-            "top_nodes_by_pagerank": sorted(
-                centrality.items() if hasattr(centrality, "items") else [],
-                key=lambda x: x[1], reverse=True
-            )[:10],
-            "community_count": len(communities) if isinstance(communities, (list, dict)) else 0,
+            "top_nodes_by_pagerank": _pagerank_rankings(centrality)[:10],
+            "community_count": _community_count(communities),
         }
     except Exception as exc:
         return {"error": str(exc)}
@@ -588,6 +756,20 @@ TOOLS = [
             "required": ["decision_id"],
         },
         "_handler": _tool_get_causal_chain,
+    },
+    {
+        "name": "link_decisions",
+        "description": "Create a typed causal relationship between two recorded decisions (CAUSED, INFLUENCED, or PRECEDENT_FOR).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source":       {"type": "string", "description": "Source decision ID (the cause)"},
+                "target":       {"type": "string", "description": "Target decision ID (the effect)"},
+                "relationship": {"type": "string", "enum": ["CAUSED", "INFLUENCED", "PRECEDENT_FOR"], "description": "Causal relationship type"},
+            },
+            "required": ["source", "target", "relationship"],
+        },
+        "_handler": _tool_link_decisions,
     },
     {
         "name": "add_entity",

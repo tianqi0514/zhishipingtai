@@ -43,6 +43,11 @@ from .class_inferrer import ClassInferrer
 from .namespace_manager import NamespaceManager
 from .naming_conventions import NamingConventions
 from .property_generator import PropertyGenerator
+from .relationship_utils import (
+    build_entity_aliases,
+    get_relationship_endpoint,
+    resolve_relationship_endpoint_type,
+)
 from .ontology_validator import OntologyValidator
 
 
@@ -78,7 +83,10 @@ class OntologyGenerator:
             **kwargs: Additional configuration options:
                 - base_uri: Base URI for ontology (default: "https://semantica.dev/ontology/")
                 - namespace_manager: Optional namespace manager instance
-                - min_occurrences: Minimum occurrences for class inference (default: 2)
+                - min_occurrences: Minimum occurrences for a class or predicate to
+                  be inferred. Gates both entity-type (class) inference and
+                  relationship-type (object property) inference; types/predicates
+                  seen fewer times are omitted from the ontology (default: 2)
 
         Example:
             ```python
@@ -133,6 +141,8 @@ class OntologyGenerator:
                 - name: Ontology name (default: "GeneratedOntology")
                 - build_hierarchy: Whether to build class hierarchy (default: True)
                 - namespace_manager: Optional namespace manager instance
+                - min_occurrences: Frequency gate for classes and predicates
+                  (same semantics as __init__; default: 2)
 
         Returns:
             Generated ontology dictionary containing:
@@ -383,56 +393,18 @@ class OntologyGenerator:
     @staticmethod
     def _build_entity_aliases(entities: List[Dict[str, Any]]) -> Dict[str, set]:
         """Build an unambiguous alias-to-type index for relationship endpoints."""
-        aliases: Dict[str, set] = {}
-        for entity in entities:
-            entity_type = entity.get("type") or entity.get("entity_type")
-            if not entity_type:
-                continue
-
-            for key in ("id", "entity_id", "name", "text", "label"):
-                if key not in entity or entity[key] is None or entity[key] == "":
-                    continue
-                aliases.setdefault(str(entity[key]), set()).add(entity_type)
-
-        return aliases
+        return build_entity_aliases(entities)
 
     @staticmethod
     def _get_relationship_endpoint(rel: Dict[str, Any], endpoint: str) -> Any:
         """Return an endpoint value from either ID or legacy relationship fields."""
-        for key in (f"{endpoint}_id", endpoint):
-            if key not in rel:
-                continue
-
-            value = rel[key]
-            if value is None or value == "":
-                continue
-            if isinstance(value, dict):
-                for alias_key in ("id", "entity_id", "name", "text", "label"):
-                    if alias_key not in value:
-                        continue
-                    alias_value = value[alias_key]
-                    if alias_value is not None and alias_value != "":
-                        return alias_value
-                continue
-            return value
-
-        return None
+        return get_relationship_endpoint(rel, endpoint)
 
     def _resolve_relationship_endpoint_type(
         self, rel: Dict[str, Any], endpoint: str, aliases: Dict[str, set]
     ) -> Optional[str]:
         """Resolve an endpoint type without treating missing fields as aliases."""
-        explicit_type = rel.get(f"{endpoint}_type")
-        if explicit_type and explicit_type != "Entity":
-            return explicit_type
-
-        endpoint_value = self._get_relationship_endpoint(rel, endpoint)
-        if endpoint_value is not None:
-            candidates = aliases.get(str(endpoint_value), set())
-            if len(candidates) == 1:
-                return next(iter(candidates))
-
-        return explicit_type
+        return resolve_relationship_endpoint_type(rel, endpoint, aliases)
 
     def _stage2_yaml_to_definition(
         self, semantic_network: Dict[str, Any], **options
@@ -856,6 +828,12 @@ class SHACLGenerator:
         "uri": "xsd:anyURI", "anyuri": "xsd:anyURI",
     }
 
+    #: An IRI begins with a scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":".
+    #: Matching the scheme grammar (rather than looking for ``://``) also catches
+    #: absolute IRIs whose scheme is not followed by slashes, such as ``urn:``
+    #: and ``doi:``, and covers qualified names like ``xsd:string``.
+    _IRI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
     def __init__(
         self,
         base_uri: str = "https://semantica.dev/shapes/",
@@ -1265,6 +1243,25 @@ class SHACLGenerator:
             return f"<{resolved}>"
         return resolved
 
+    def _turtle_datatype(self, graph: SHACLGraph, datatype: str) -> str:
+        """
+        Turtle-facing datatype: angle brackets for IRIs, bare qname only if declared.
+
+        ``_resolve_xsd`` may hand back a declared prefix name (``xsd:string``) or
+        an absolute IRI, since #1788 leaves anything already qualified alone.
+        Interpolating the latter produced ``sh:datatype http://...#string ;``,
+        which RDFLib rejects as BadSyntax, and ``urn:`` / ``doi:`` came out as
+        undeclared prefixed names for the same reason. Turtle only allows a
+        prefix name when ``@prefix`` declared it, so anything else is bracketed.
+        """
+        value = datatype.strip()
+        prefix, separator, _ = value.partition(":")
+        if separator and prefix in graph.prefixes:
+            return value
+        if self._IRI_SCHEME_RE.match(value):
+            return f"<{value}>"
+        return value
+
     def _serialize_turtle(self, graph: SHACLGraph) -> str:
         lines = [self._prefix_decls(graph), ""]
         lines.append(f"<{graph.shapes_uri}> a owl:Ontology .")
@@ -1292,7 +1289,7 @@ class SHACLGenerator:
                 parts = ["    sh:property ["]
                 parts.append(f'        sh:path {self._uri(graph, ps.path, "property")} ;')
                 if ps.datatype:
-                    parts.append(f"        sh:datatype {ps.datatype} ;")
+                    parts.append(f"        sh:datatype {self._turtle_datatype(graph, ps.datatype)} ;")
                 if ps.class_:
                     parts.append(f'        sh:class {self._uri(graph, ps.class_, "class")} ;')
                 if ps.min_count is not None:
@@ -1422,6 +1419,14 @@ class SHACLGenerator:
     # ── Helper ────────────────────────────────────────────────────────────────
 
     def _resolve_xsd(self, range_str: str) -> str:
-        """Map ontology range strings to xsd:-prefixed datatypes."""
-        key = range_str.lower().strip()
-        return self._XSD_ALIASES.get(key, f"xsd:{range_str}")
+        """Map ontology range strings to xsd:-prefixed datatypes.
+
+        A range that is already an IRI is returned unchanged, so the prefix is
+        never doubled (#1788). That covers both qualified names (``xsd:string``)
+        and absolute IRIs, including schemes that carry no slashes such as
+        ``urn:example:datatype``. Only a bare name such as ``string`` is mapped
+        through the alias table.
+        """
+        if self._IRI_SCHEME_RE.match(range_str.strip()):
+            return range_str
+        return self._XSD_ALIASES.get(range_str.lower().strip(), f"xsd:{range_str}")

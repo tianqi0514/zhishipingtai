@@ -54,7 +54,7 @@ Example Usage:
     >>> precedents = store.search_decisions("Credit approval", limit=10)
     >>> store.update_vectors(vector_ids, new_vectors)
     >>> store.delete_vectors(vector_ids)
-    >>> 
+    >>>
     >>> from semantica.vector_store import VectorIndexer, VectorRetriever
     >>> indexer = VectorIndexer(backend="faiss", dimension=768)
     >>> index = indexer.create_index(vectors, ids)
@@ -68,6 +68,8 @@ License: MIT
 from typing import Any, Dict, List, Optional, Tuple, TypedDict, Union, cast
 import concurrent.futures
 import inspect
+import threading
+import uuid
 
 import numpy as np
 
@@ -138,10 +140,13 @@ class VectorStore:
             self._init_backend_store()
 
         # For in-memory backend, initialize local storage
-        if self.backend == "inmemory":
-            self.vectors: Dict[str, np.ndarray] = {}
-            self.metadata: Dict[str, Dict[str, Any]] = {}
+        self.vectors: Dict[str, np.ndarray] = {}
+        self.metadata: Dict[str, Dict[str, Any]] = {}
+        self._next_id: int = 0
+        self._inmemory_lock = threading.RLock()
 
+        if self.backend == "inmemory":
+            # self.vectors is now initialized universally
             # Initialize backend-specific indexer
             # Avoid duplicate dimension argument
             indexer_config = self.config.copy()
@@ -168,31 +173,31 @@ class VectorStore:
             if self.backend == "pgvector":
                 # Import PgVectorStore
                 from .pgvector_store import PgVectorStore
-                
+
                 # Required parameters for PgVectorStore
                 connection_string = self.config.get("connection_string")
                 table_name = self.config.get("table_name", "vectors")
                 dimension = self.config.get("dimension", 768)
                 distance_metric = self.config.get("distance_metric", "cosine")
-                
+
                 if not connection_string:
                     raise ValueError(
                         "pgvector backend requires 'connection_string' in config. "
                         "Example: VectorStore(backend='pgvector', config={"
                         "'connection_string': 'postgresql://user:pass@localhost/db'})"
                     )
-                
+
                 # Initialize PgVectorStore
                 self._backend_store = PgVectorStore(
                     connection_string=connection_string,
                     table_name=table_name,
                     dimension=dimension,
                     distance_metric=distance_metric,
-                    **{k: v for k, v in self.config.items() 
+                    **{k: v for k, v in self.config.items()
                        if k not in ['connection_string', 'table_name', 'dimension', 'distance_metric']}
                 )
                 self.logger.info(f"Initialized PgVectorStore backend")
-                
+
             elif self.backend == "faiss":
                 from .faiss_store import FAISSStore
                 self._backend_store = FAISSStore(
@@ -200,35 +205,35 @@ class VectorStore:
                     **{k: v for k, v in self.config.items() if k != 'dimension'}
                 )
                 self.logger.info(f"Initialized FAISSStore backend")
-                
+
             elif self.backend == "weaviate":
                 from .weaviate_store import WeaviateStore
                 self._backend_store = WeaviateStore(
                     **self.config
                 )
                 self.logger.info(f"Initialized WeaviateStore backend")
-                
+
             elif self.backend == "qdrant":
                 from .qdrant_store import QdrantStore
                 self._backend_store = QdrantStore(
                     **self.config
                 )
                 self.logger.info(f"Initialized QdrantStore backend")
-                
+
             elif self.backend == "pinecone":
                 from .pinecone_store import PineconeStore
                 self._backend_store = PineconeStore(
                     **self.config
                 )
                 self.logger.info(f"Initialized PineconeStore backend")
-                
+
             elif self.backend == "milvus":
                 from .milvus_store import MilvusStore
                 self._backend_store = MilvusStore(
                     **self.config
                 )
                 self.logger.info(f"Initialized MilvusStore backend")
-                
+
             elif self.backend == "sqlite":
                 from .sqlite_vec_store import SQLiteVecStore
                 db_path = self.config.get("db_path") or self.config.get("sqlite_path")
@@ -237,28 +242,28 @@ class VectorStore:
                         "sqlite backend requires 'db_path' in config. "
                         "Example: VectorStore(backend='sqlite', config={'db_path': 'vectors.db'})"
                     )
-                
+
                 table_name = self.config.get("table_name", "vectors")
                 dimension = self.config.get("dimension", 768)
                 distance_metric = self.config.get("distance_metric", "cosine")
                 read_only = self.config.get("read_only", False)
-                
+
                 self._backend_store = SQLiteVecStore(
                     db_path=db_path,
                     table_name=table_name,
                     dimension=dimension,
                     distance_metric=distance_metric,
                     read_only=read_only,
-                    **{k: v for k, v in self.config.items() 
+                    **{k: v for k, v in self.config.items()
                        if k not in ['db_path', 'sqlite_path', 'table_name', 'dimension', 'distance_metric', 'read_only']}
                 )
                 self.logger.info(f"Initialized SQLite backend")
-                
+
             else:
                 # Fallback to in-memory for unknown backends
                 self.logger.warning(f"Backend '{self.backend}' not implemented, using in-memory")
                 self.backend = "inmemory"
-                
+
         except ImportError as e:
             raise ImportError(f"Backend '{self.backend}' not available: {e}. Please install required dependencies.") from e
         except Exception as e:
@@ -287,10 +292,10 @@ class VectorStore:
     def embed(self, text: str) -> np.ndarray:
         """
         Generate embedding for text using the internal embedder.
-        
+
         Args:
             text: Text to embed
-            
+
         Returns:
             Numpy array of embedding
         """
@@ -299,7 +304,7 @@ class VectorStore:
                 return self.embedder.generate_embeddings(text)
             except Exception as e:
                 self.logger.warning(f"Embedding generation failed: {e}")
-        
+
         # Fallback or raise? AgentMemory expects None or valid embedding.
         # Returning random vector as fallback for now (matches DemoVectorStore behavior)
         # to prevent crashes, but logging warning.
@@ -309,10 +314,10 @@ class VectorStore:
     def embed_batch(self, texts: List[str]) -> List[np.ndarray]:
         """
         Generate embeddings for a list of texts using the internal embedder.
-        
+
         Args:
             texts: List of texts to embed
-            
+
         Returns:
             List of numpy arrays
         """
@@ -326,7 +331,7 @@ class VectorStore:
                 return embeddings
             except Exception as e:
                 self.logger.warning(f"Batch embedding generation failed: {e}")
-        
+
         # Fallback
         self.logger.warning("Using random fallback embeddings for batch")
         return [np.random.rand(self.dimension).astype(np.float32) for _ in texts]
@@ -341,28 +346,28 @@ class VectorStore:
     ) -> List[str]:
         """
         Add multiple documents to the store with parallel embedding generation.
-        
+
         Args:
             documents: List of document texts
             metadata: List of metadata dictionaries
             batch_size: Number of documents to process in one batch
             parallel: Whether to use parallel processing for embeddings
             **options: Additional options
-            
+
         Returns:
             List[str]: Vector IDs
         """
         if not documents:
             return []
-            
+
         num_docs = len(documents)
         metadata = metadata or [{} for _ in range(num_docs)]
-        
+
         if len(metadata) != num_docs:
             raise ValueError("Metadata list length must match documents length")
-            
+
         all_vectors = [None] * num_docs
-        
+
         # Helper for processing a batch
         def process_batch(start_idx: int, end_idx: int):
             batch_texts = documents[start_idx:end_idx]
@@ -373,7 +378,7 @@ class VectorStore:
         batches = []
         for i in range(0, num_docs, batch_size):
             batches.append((i, min(i + batch_size, num_docs)))
-            
+
         tracking_id = self.progress_tracker.start_tracking(
             module="vector_store",
             submodule="VectorStore",
@@ -390,18 +395,18 @@ class VectorStore:
                         executor.submit(process_batch, start, end)
                         for start, end in batches
                     ]
-                    
+
                     completed = 0
                     for future in concurrent.futures.as_completed(futures):
                         start_idx, embeddings = future.result()
                         # Place results in correct order
                         for i, emb in enumerate(embeddings):
                             all_vectors[start_idx + i] = emb
-                        
+
                         completed += 1
                         if completed % 5 == 0:  # Update progress periodically
                             self.progress_tracker.update_tracking(
-                                tracking_id, 
+                                tracking_id,
                                 message=f"Embedded batch {completed}/{len(batches)}"
                             )
             else:
@@ -413,28 +418,28 @@ class VectorStore:
                     _, embeddings = process_batch(start, end)
                     for j, emb in enumerate(embeddings):
                         all_vectors[start + j] = emb
-                    
+
                     if i % 5 == 0:
                         self.progress_tracker.update_tracking(
-                            tracking_id, 
+                            tracking_id,
                             message=f"Embedded batch {i+1}/{len(batches)}"
                         )
-                        
+
             # Verify all embeddings generated
             if any(v is None for v in all_vectors):
                 raise ProcessingError("Failed to generate all embeddings")
-                
+
             # Store all vectors in one go
             self.progress_tracker.update_tracking(tracking_id, message="Storing vectors...")
             vector_ids = self.store_vectors(all_vectors, metadata=metadata, **options)
-            
+
             self.progress_tracker.stop_tracking(
                 tracking_id,
                 status="completed",
                 message=f"Added {len(vector_ids)} documents",
             )
             return vector_ids
-            
+
         except Exception as e:
             self.progress_tracker.stop_tracking(
                 tracking_id, status="failed", message=str(e)
@@ -482,9 +487,13 @@ class VectorStore:
                     doc_meta = doc.metadata
                 elif isinstance(doc, dict):
                     doc_meta = doc.get("metadata", {})
-                
+                elif isinstance(doc, str):
+                    # Plain-text documents: keep the text itself in the
+                    # payload, otherwise it is silently dropped.
+                    doc_meta = {"document": doc}
+
                 final_metadata[i].update(doc_meta)
-        
+
         return self.store_vectors(vectors, metadata=final_metadata, **options)
 
     def store_vectors(
@@ -507,13 +516,14 @@ class VectorStore:
         # Delegate to backend store if available
         if self._backend_store:
             # Handle different method names across backend stores
+            ids = None
             if hasattr(self._backend_store, 'add'):
-                return self._backend_store.add(vectors, metadata, **options)
+                ids = self._backend_store.add(vectors, metadata, **options)
             elif hasattr(self._backend_store, 'add_vectors'):
                 # FAISSStore and others use add_vectors with different signature
                 if hasattr(self._backend_store, 'store_vectors'):
                     # Some stores have store_vectors method
-                    return self._backend_store.store_vectors(vectors, metadata=metadata, **options)
+                    ids = self._backend_store.store_vectors(vectors, metadata=metadata, **options)
                 else:
                     try:
                         add_vectors_params = inspect.signature(self._backend_store.add_vectors).parameters
@@ -523,11 +533,28 @@ class VectorStore:
                     except (ValueError, TypeError):
                         supports_metadata = True
                     if supports_metadata:
-                        return self._backend_store.add_vectors(vectors, metadata=metadata, **options)
-                    return self._backend_store.add_vectors(vectors, **options)
+                        ids = self._backend_store.add_vectors(vectors, metadata=metadata, **options)
+                    else:
+                        ids = self._backend_store.add_vectors(vectors, **options)
+            elif hasattr(self._backend_store, 'insert_vectors'):
+                # QdrantStore: insert_vectors(vectors, ids, payloads=None)
+                ids = options.pop('ids', None) or [str(uuid.uuid4()) for _ in range(len(vectors))]
+                self._backend_store.insert_vectors(vectors, ids, payloads=metadata, **options)
             else:
                 raise NotImplementedError(f"Backend store {type(self._backend_store).__name__} does not have add or add_vectors method")
-        
+
+            if ids is None:
+                ids = [str(uuid.uuid4()) for _ in range(len(vectors))]
+            elif len(ids) != len(vectors):
+                raise ProcessingError(f"Backend store returned {len(ids)} IDs for {len(vectors)} vectors")
+
+            metadata = metadata or [{}] * len(vectors)
+            with self._inmemory_lock:
+                for i, vid in enumerate(ids):
+                    self.vectors[vid] = vectors[i]
+                    self.metadata[vid] = metadata[i]
+            return ids
+
         # Use in-memory implementation
         tracking_id = self.progress_tracker.start_tracking(
             module="vector_store",
@@ -542,18 +569,47 @@ class VectorStore:
             self.progress_tracker.update_tracking(
                 tracking_id, message="Storing vectors..."
             )
-            start_idx = len(self.vectors)
-            for i, (vector, meta) in enumerate(zip(vectors, metadata)):
-                vector_id = f"vec_{start_idx + i}"
-                self.vectors[vector_id] = vector
-                self.metadata[vector_id] = meta
-                vector_ids.append(vector_id)
+            # Hold the lock for the entire ID-allocation → dict-write →
+            # index-rebuild sequence so concurrent callers cannot observe
+            # half-written state or generate the same candidate ID.
+            with self._inmemory_lock:
+                # Snapshot the live key-set at lock-entry so the generator
+                # and the within-batch de-dupe use a consistent view.
+                pre_existing = set(self.vectors)
+                # within_batch tracks IDs chosen during *this* call so the
+                # same candidate is never returned twice in one batch.
+                within_batch: set = set()
 
-            # Update index
-            self.progress_tracker.update_tracking(
-                tracking_id, message="Updating vector index..."
-            )
-            self.indexer.create_index(list(self.vectors.values()), vector_ids)
+                for vector, meta in zip(vectors, metadata):
+                    # Advance the monotonic counter until we find a candidate
+                    # that is free both in the live store and in this batch.
+                    #
+                    # The counter is never decremented on deletion, so under
+                    # normal operation every candidate it produces is genuinely
+                    # fresh.  The only reason a candidate can be occupied is
+                    # that a caller pre-inserted a ``vec_N`` key ahead of the
+                    # counter (e.g. manually writing to self.vectors).  Skipping
+                    # over such keys is intentional and matches FAISSStore's
+                    # identical behaviour.  Nothing is overwritten: the loop
+                    # breaks only on a candidate that is absent from both
+                    # pre_existing and within_batch.
+                    while True:
+                        candidate = f"vec_{self._next_id}"
+                        self._next_id += 1
+                        if candidate not in pre_existing and candidate not in within_batch:
+                            break
+
+                    within_batch.add(candidate)
+                    self.vectors[candidate] = vector
+                    self.metadata[candidate] = meta
+                    vector_ids.append(candidate)
+
+                # Update index inside the lock so readers always see a
+                # consistent (vectors, index) pair.
+                self.progress_tracker.update_tracking(
+                    tracking_id, message="Updating vector index..."
+                )
+                self.indexer.create_index(list(self.vectors.values()), list(self.vectors.keys()))
 
             self.progress_tracker.stop_tracking(
                 tracking_id,
@@ -569,13 +625,13 @@ class VectorStore:
     def save(self, path: str) -> None:
         """
         Save vector store to disk.
-        
+
         Args:
             path: Directory path to save to
         """
         import json
         import os
-        
+
         os.makedirs(path, exist_ok=True)
 
         # Save metadata and vectors (generic fallback)
@@ -595,30 +651,34 @@ class VectorStore:
             "metadata": getattr(self, "metadata", {}),
             "config": self.config,
             "backend": self.backend,
-            "dimension": self.dimension
+            "dimension": self.dimension,
+            # Persist the monotonic counter so that load() can restore it
+            # rather than re-deriving it from len(vectors), which would be
+            # too small after a deletion and cause ID collisions (issue #1029).
+            "next_id": getattr(self, "_next_id", None),
         }
-        
+
         with open(os.path.join(path, "store_data.json"), "w", encoding="utf-8") as f:
             json.dump(data, f)
-            
+
         self.logger.info(f"Saved vector store to {path}")
 
     def load(self, path: str) -> None:
         """
         Load vector store from disk.
-        
+
         Args:
             path: Directory path to load from
-            
+
         Raises:
             RuntimeError: If only a legacy pickle file is found (security risk).
         """
         import json
         import os
-        
+
         json_path = os.path.join(path, "store_data.json")
         legacy_pkl_path = os.path.join(path, "store_data.pkl")
-        
+
         if os.path.exists(json_path):
             data_path = json_path
         elif os.path.exists(legacy_pkl_path):
@@ -633,16 +693,38 @@ class VectorStore:
         else:
             self.logger.warning(f"Store data not found in: {path}")
             return
-            
+
         with open(data_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
-        self.vectors = data.get("vectors", {})
+
+        vectors_raw = data.get("vectors", {})
+        self.vectors = {k: np.array(v, dtype=np.float32) for k, v in vectors_raw.items()}
         self.metadata = data.get("metadata", {})
         self.config = data.get("config", {})
         self.backend = data.get("backend", "faiss")
         self.dimension = data.get("dimension", 768)
-        
+
+        if not hasattr(self, "_inmemory_lock"):
+            self._inmemory_lock = threading.RLock()
+
+        # Restore the monotonic ID counter.  Always clamp to at least
+        # max(vec_N suffix)+1 so a stale or missing persisted value (e.g.
+        # written before this field was added, or written before a deletion
+        # that lowered the count) cannot produce IDs that collide with
+        # existing vectors (issue #1029).
+        _vec_nums = [
+            int(v[4:]) + 1
+            for v in self.vectors
+            if v.startswith("vec_") and v[4:].isdigit()
+        ]
+        _inferred = max(_vec_nums) if _vec_nums else 0
+        persisted_next_id = data.get("next_id")
+        if persisted_next_id is not None:
+            self._next_id = max(int(persisted_next_id), _inferred)
+        else:
+            # Older store files lack this field; use the safe inferred value.
+            self._next_id = _inferred
+
         # Restore backend-specific index
         indexer = getattr(self, "indexer", None)
         index_path = os.path.join(path, "index.bin")
@@ -707,7 +789,7 @@ class VectorStore:
                 return self._backend_store.search_vectors(query_vector, k, **options)
             else:
                 raise NotImplementedError(f"Backend store {type(self._backend_store).__name__} does not have search, search_similar, or search_vectors method")
-        
+
         # Use in-memory implementation
         tracking_id = self.progress_tracker.start_tracking(
             module="vector_store",
@@ -722,14 +804,25 @@ class VectorStore:
                 )
                 return []
 
+            # Snapshot vectors and metadata together under the lock so a
+            # concurrent delete_vectors / store_vectors cannot cause
+            # "RuntimeError: dictionary changed size during iteration" and
+            # cannot produce an inconsistent (values, keys) pair where one
+            # list is shorter than the other.  The lock is released before
+            # the (potentially slow) similarity computation.
+            with self._inmemory_lock:
+                snapshot_vectors = list(self.vectors.values())
+                snapshot_keys = list(self.vectors.keys())
+                snapshot_metadata = dict(self.metadata)
+
             # Use retriever for similarity search
             self.progress_tracker.update_tracking(
                 tracking_id, message="Performing similarity search..."
             )
             results = self.retriever.search_similar(
                 query_vector,
-                list(self.vectors.values()),
-                list(self.vectors.keys()),
+                snapshot_vectors,
+                snapshot_keys,
                 k=k,
                 **options,
             )
@@ -737,8 +830,8 @@ class VectorStore:
             # Add metadata to results; guarantee the key always exists.
             for result in results:
                 vector_id = result.get("id")
-                if vector_id and vector_id in self.metadata:
-                    result["metadata"] = self.metadata[vector_id]
+                if vector_id and vector_id in snapshot_metadata:
+                    result["metadata"] = snapshot_metadata[vector_id]
                 elif "metadata" not in result:
                     result["metadata"] = {}
 
@@ -761,25 +854,44 @@ class VectorStore:
         # Delegate to backend store if available
         if self._backend_store:
             if hasattr(self._backend_store, 'update'):
-                return self._backend_store.update(ids=vector_ids, vectors=new_vectors, metadata=metadata, **options)
+                result = self._backend_store.update(ids=vector_ids, vectors=new_vectors, metadata=metadata, **options)
             elif hasattr(self._backend_store, 'update_vectors'):
-                return self._backend_store.update_vectors(vector_ids, new_vectors, **options)
+                result = self._backend_store.update_vectors(vector_ids, new_vectors, **options)
             else:
                 raise NotImplementedError(f"Backend store {type(self._backend_store).__name__} does not have update or update_vectors method")
 
-        for vec_id, new_vec in zip(vector_ids, new_vectors):
-            if vec_id in self.vectors:
-                self.vectors[vec_id] = new_vec
+            # A backend that rejects the update keeps its old values, so
+            # leave the mirror untouched and pass the result through.
+            if result is False:
+                return result
 
-        if metadata:
-            for vec_id, meta in zip(vector_ids, metadata):
-                if vec_id in self.metadata:
-                    self.metadata[vec_id] = meta
+            # Keep the facade mirror in step with the backend, as
+            # delete_vectors does, so save() persists the updated values.
+            with self._inmemory_lock:
+                for vec_id, new_vec in zip(vector_ids, new_vectors):
+                    if vec_id in self.vectors:
+                        self.vectors[vec_id] = new_vec
+                if metadata:
+                    for vec_id, meta in zip(vector_ids, metadata):
+                        if vec_id in self.metadata:
+                            self.metadata[vec_id] = meta
+            return result
 
-        # Rebuild index
-        self.indexer.create_index(
-            list(self.vectors.values()), list(self.vectors.keys())
-        )
+        with self._inmemory_lock:
+            for vec_id, new_vec in zip(vector_ids, new_vectors):
+                if vec_id in self.vectors:
+                    self.vectors[vec_id] = new_vec
+
+            if metadata:
+                for vec_id, meta in zip(vector_ids, metadata):
+                    if vec_id in self.metadata:
+                        self.metadata[vec_id] = meta
+
+            # Rebuild index under the lock so readers see a consistent
+            # (vectors, index) pair, matching store_vectors and delete_vectors.
+            self.indexer.create_index(
+                list(self.vectors.values()), list(self.vectors.keys())
+            )
 
         return True
 
@@ -787,22 +899,31 @@ class VectorStore:
         """Delete vectors from store."""
         # Delegate to backend store if available
         if self._backend_store:
+            success = False
             if hasattr(self._backend_store, 'delete'):
-                return self._backend_store.delete(ids=vector_ids, **options)
+                success = self._backend_store.delete(ids=vector_ids, **options)
             elif hasattr(self._backend_store, 'delete_vectors'):
-                return self._backend_store.delete_vectors(vector_ids, **options)
+                success = self._backend_store.delete_vectors(vector_ids, **options)
             else:
                 raise NotImplementedError(f"Backend store {type(self._backend_store).__name__} does not have delete or delete_vectors method")
 
-        for vec_id in vector_ids:
-            self.vectors.pop(vec_id, None)
-            self.metadata.pop(vec_id, None)
+            with self._inmemory_lock:
+                for vec_id in vector_ids:
+                    self.vectors.pop(vec_id, None)
+                    self.metadata.pop(vec_id, None)
+            return success
 
-        # Rebuild index
-        if self.vectors:
-            self.indexer.create_index(
-                list(self.vectors.values()), list(self.vectors.keys())
-            )
+        with self._inmemory_lock:
+            for vec_id in vector_ids:
+                self.vectors.pop(vec_id, None)
+                self.metadata.pop(vec_id, None)
+
+            # Rebuild index under the lock so a concurrent search cannot
+            # see vectors without a corresponding index entry.
+            if self.vectors:
+                self.indexer.create_index(
+                    list(self.vectors.values()), list(self.vectors.keys())
+                )
 
         return True
 
@@ -823,6 +944,74 @@ class VectorStore:
             return self._backend_store.get_metadata(vector_id)
         else:
             raise NotImplementedError(f"Backend store {type(self._backend_store).__name__} does not implement get_metadata")
+
+    def scan_vectors(self, offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Page through stored vectors, backend-agnostic.
+
+        Follows the get_vector()/get_metadata() precedent (#843): the inmemory
+        backend pages its local dict directly, a persistent backend delegates
+        to a scan_vectors() on the wrapped store when available, and one that
+        cannot enumerate its contents raises NotImplementedError rather than
+        silently returning an empty page.
+
+        Args:
+            offset: Number of vectors to skip
+            limit: Maximum number of vectors to return
+
+        Returns:
+            List of result dicts with 'id', 'metadata', and 'vector'
+        """
+        if limit <= 0:
+            return []
+
+        if self.backend == "inmemory":
+            ids_page = list(self.vectors.keys())[offset:offset + limit]
+            return [
+                {
+                    "id": vec_id,
+                    "metadata": self.metadata.get(vec_id, {}),
+                    "vector": self.vectors.get(vec_id),
+                }
+                for vec_id in ids_page
+            ]
+        elif self._backend_store and hasattr(self._backend_store, "scan_vectors"):
+            return self._backend_store.scan_vectors(offset=offset, limit=limit)
+        else:
+            raise NotImplementedError(
+                f"Backend store {type(self._backend_store).__name__} does not "
+                "implement scan_vectors(). Add a scan_vectors() method to the "
+                "backend store adapter to enable enumeration for this backend."
+            )
+
+    def iter_vectors(self, batch_size: int = 500):
+        """
+        Iterate over every stored vector, one page at a time.
+
+        Cursor-based backends expose iter_all() because they cannot support a
+        positional offset; it takes precedence when present. Everything else
+        falls through to the scan_vectors() offset loop.
+
+        Args:
+            batch_size: Number of vectors to fetch per underlying call
+
+        Yields:
+            Result dicts with 'id', 'metadata', and 'vector', in scan order
+        """
+        if self.backend != "inmemory" and self._backend_store is not None:
+            iter_all = getattr(self._backend_store, "iter_all", None)
+            if callable(iter_all):
+                yield from iter_all(batch_size=batch_size)
+                return
+
+        offset = 0
+        while True:
+            page = self.scan_vectors(offset=offset, limit=batch_size)
+            if not page:
+                return
+            for item in page:
+                yield item
+            offset += len(page)
 
     def count(self) -> int:
         """Return the number of vectors in the store, backend-agnostic.
@@ -860,7 +1049,7 @@ class VectorStore:
     ) -> None:
         """
         Initialize decision embedding pipeline.
-        
+
         Args:
             graph_store: Graph store for structural embeddings
             **pipeline_kwargs: Additional pipeline configuration
@@ -884,7 +1073,7 @@ class VectorStore:
     ) -> str:
         """
         Store a decision with automatic embedding generation.
-        
+
         Args:
             scenario: Decision scenario description
             reasoning: Decision reasoning
@@ -893,7 +1082,7 @@ class VectorStore:
             entities: List of entities involved
             category: Decision category
             **additional_metadata: Additional metadata
-            
+
         Returns:
             Decision vector ID
         """
@@ -906,7 +1095,7 @@ class VectorStore:
             "category": category or "general",
             **additional_metadata
         }
-        
+
         if self.decision_pipeline:
             result = self.decision_pipeline.process_decision(decision_data)
             return result["vector_id"]
@@ -924,11 +1113,11 @@ class VectorStore:
     ) -> List[Dict[str, Any]]:
         """
         Process multiple decisions in batch.
-        
+
         Args:
             decisions: List of decision data dictionaries
             batch_size: Batch size for processing
-            
+
         Returns:
             List of processed decision results
         """
@@ -959,7 +1148,7 @@ class VectorStore:
     ) -> List[Dict[str, Any]]:
         """
         Search for similar decisions with hybrid similarity.
-        
+
         Args:
             query: Search query
             semantic_weight: Weight for semantic similarity
@@ -967,14 +1156,14 @@ class VectorStore:
             filters: Metadata filters
             limit: Number of results
             use_hybrid_search: Whether to use hybrid search
-            
+
         Returns:
             List of similar decisions with scores
         """
         if not self.decision_pipeline:
             # Fallback to semantic search only
             return self.search(query, limit=limit, **(filters or {}))
-        
+
         # Create query decision
         query_decision = {
             "scenario": query,
@@ -982,7 +1171,7 @@ class VectorStore:
             "outcome": "search_query",
             "category": "search"
         }
-        
+
         return self.decision_pipeline.find_similar_decisions(
             query_decision=query_decision,
             limit=limit,
@@ -1005,7 +1194,7 @@ class VectorStore:
     ) -> List[Dict[str, Any]]:
         """
         Filter decisions with natural language queries.
-        
+
         Args:
             query: Natural language query
             time_range: Time range filter (e.g., "last_30_days")
@@ -1015,25 +1204,25 @@ class VectorStore:
             entities: List of entities to filter by
             limit: Maximum number of results
             **kwargs: Additional metadata filters (e.g., loan_amount_min=100000)
-            
+
         Returns:
             Filtered decisions
         """
         # Build filters
         filters = {}
-        
+
         if confidence_min is not None:
             filters["confidence"] = {"min": confidence_min}
-        
+
         if category is not None:
             filters["category"] = category
-        
+
         if outcome is not None:
             filters["outcome"] = outcome
-        
+
         if entities is not None:
             filters["entities"] = entities
-        
+
         # Process additional kwargs as metadata filters
         for key, value in kwargs.items():
             if key.endswith('_min'):
@@ -1051,11 +1240,11 @@ class VectorStore:
             else:
                 # Handle exact match filters
                 filters[key] = value
-        
+
         # Apply time range filter
         if time_range:
             filters = self._apply_time_range_filter(filters, time_range)
-        
+
         # Search with query if provided
         if query:
             return self.search_decisions(
@@ -1099,7 +1288,7 @@ class VectorStore:
         decision_metadata = self.get_metadata(decision_id)
         if not decision_metadata:
             raise ValueError(f"Decision {decision_id} not found")
-        
+
         context = {
             "decision_id": decision_id,
             "decision_metadata": decision_metadata,
@@ -1111,16 +1300,16 @@ class VectorStore:
                 "edges": []
             }
         }
-        
+
         # Add entities
         if include_entities and "entities" in decision_metadata:
             context["entities"] = decision_metadata["entities"]
-        
+
         # Add related decisions based on similarity
         query_vector = self.get_vector(decision_id)
         if query_vector is not None:
             similar_decisions = self.search_vectors(query_vector, k=depth * 5)
-            
+
             for result in similar_decisions:
                 if result["id"] != decision_id:
                     context["related_decisions"].append({
@@ -1135,7 +1324,7 @@ class VectorStore:
                 decision_id,
             )
             context["similarity_unavailable"] = True
-        
+
         return context
 
     def explain_decision(
@@ -1165,7 +1354,7 @@ class VectorStore:
         decision_metadata = self.get_metadata(decision_id)
         if not decision_metadata:
             raise ValueError(f"Decision {decision_id} not found")
-        
+
         explanation = {
             "decision_id": decision_id,
             "scenario": decision_metadata.get("scenario", ""),
@@ -1173,14 +1362,14 @@ class VectorStore:
             "outcome": decision_metadata.get("outcome", ""),
             "timestamp": decision_metadata.get("timestamp", "")
         }
-        
+
         if include_confidence:
             explanation["confidence"] = decision_metadata.get("confidence", 0.5)
-        
+
         if include_weights:
             explanation["semantic_weight"] = decision_metadata.get("semantic_weight", 0.7)
             explanation["structural_weight"] = decision_metadata.get("structural_weight", 0.3)
-        
+
         if include_paths:
             # Find similar decisions for reasoning paths
             query_vector = self.get_vector(decision_id)
@@ -1195,7 +1384,7 @@ class VectorStore:
                 )
                 explanation["similarity_unavailable"] = True
                 explanation["similar_decisions"] = []
-        
+
         return explanation
 
     def _apply_time_range_filter(
@@ -1230,7 +1419,7 @@ class VectorStore:
             )
 
         results = []
-        
+
         for vector_id, metadata in self.metadata.items():
             if _matches_filter(metadata, filters):
                 results.append({
@@ -1238,10 +1427,10 @@ class VectorStore:
                     "metadata": metadata,
                     "vector": self.vectors.get(vector_id)
                 })
-                
+
                 if len(results) >= limit:
                     break
-        
+
         return results
 
 
@@ -1296,12 +1485,12 @@ class VectorIndexer:
     def create_index(self, vectors: List[np.ndarray], ids: Optional[List[str]] = None, **options) -> Any:
         """
         Create search index for vectors.
-        
+
         Args:
             vectors: List of vectors to index
             ids: Optional vector IDs
             **options: Additional indexing options
-            
+
         Returns:
             Index object
         """
@@ -1311,12 +1500,12 @@ class VectorIndexer:
         # Convert to numpy array with consistent dimensions
         if isinstance(vectors[0], list):
             vectors = [np.array(v) for v in vectors]
-        
+
         # Ensure all vectors have same dimension
         if vectors:
             target_dim = len(vectors[0])
             vectors = [v if len(v) == target_dim else np.pad(v, (0, max(0, target_dim - len(v))))[:target_dim] for v in vectors]
-        
+
         vectors = np.vstack(vectors)
 
         # Simple in-memory index (would use FAISS, etc. in production)
@@ -1373,12 +1562,12 @@ class VectorRetriever:
         # Convert to numpy with consistent dimensions
         if isinstance(vectors[0], list):
             vectors = [np.array(v) for v in vectors]
-        
+
         # Ensure all vectors have same dimension as query
         query_dim = len(query_vector) if isinstance(query_vector, (list, np.ndarray)) else 0
         if query_dim > 0:
             vectors = [v if len(v) == query_dim else np.pad(v, (0, max(0, query_dim - len(v))))[:query_dim] for v in vectors]
-        
+
         vectors = np.vstack(vectors)
 
         if isinstance(query_vector, list):

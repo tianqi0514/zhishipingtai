@@ -72,6 +72,7 @@ Production Use Cases:
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
+import json
 import uuid
 
 from ..embeddings import EmbeddingGenerator
@@ -79,7 +80,7 @@ from ..graph_store import GraphStore
 from ..provenance import ProvenanceManager
 from ..utils.logging import get_logger
 from .decision_models import (
-    Decision, DecisionContext, Policy, PolicyException, 
+    Decision, DecisionContext, Policy, PolicyException,
     Precedent, ApprovalChain
 )
 from .context_graph import ContextGraph
@@ -88,30 +89,110 @@ from .context_graph import ContextGraph
 class DecisionRecorder:
     """
     Records decisions with full context, policy applications, and provenance.
-    
+
     This class handles the recording of decisions, linking them to entities,
     applying policies, recording exceptions, and tracking provenance.
     """
-    
+
     def __init__(
         self,
         graph_store: GraphStore,
         embedding_generator: Optional[EmbeddingGenerator] = None,
-        provenance_manager: Optional[ProvenanceManager] = None
+        provenance_manager: Optional[ProvenanceManager] = None,
+        evaluators: Optional[List[str]] = None,
+        eval_config: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize DecisionRecorder.
-        
+
         Args:
             graph_store: Graph database instance for storing decisions
             embedding_generator: Optional embedding generator for semantic embeddings
             provenance_manager: Optional provenance manager for W3C PROV-O tracking
+            evaluators: Optional list of semantica.evals evaluator names to run
+                automatically on every recorded decision (e.g. ["decision_scores"]).
+                When omitted, record_decision() behaves exactly as before.
+            eval_config: Optional config dict passed to semantica.evals.evaluate(),
+                keyed by evaluator name
+                (e.g. {"decision_scores": {"policy_engine": pe}})
+
+        Example Usage:
+            >>> recorder = DecisionRecorder(
+            ...     graph_store=graph,
+            ...     evaluators=["decision_scores"],
+            ...     eval_config={"decision_scores": {"expected_outcome": "approved"}},
+            ... )
+            >>> recorder.record_decision(decision, entities=[], source_documents=[])
+            >>> decision.metadata["eval_score"], decision.metadata["eval_passed"]
         """
         self.graph_store = graph_store
         self.embedding_generator = embedding_generator
         self.provenance_manager = provenance_manager
+        self.evaluators = evaluators
+        self.eval_config = eval_config or {}
         self.logger = get_logger(__name__)
-    
+
+    def _evaluate_and_enrich_decision(self, decision: Decision) -> None:
+        """
+        Run configured semantica.evals evaluators over a decision and store the
+        result in its metadata. No-op when no evaluators are configured.
+
+        Args:
+            decision: Decision to evaluate; mutated in place (decision.metadata).
+        """
+        if not self.evaluators:
+            return
+
+        # Decision.metadata defaults to {} but callers may pass metadata=None
+        # explicitly; normalize before writing eval_* keys below so recording
+        # never crashes on that (mirrors record_decision()'s own tolerance
+        # for a missing metadata dict).
+        if decision.metadata is None:
+            decision.metadata = {}
+
+        case = {"id": decision.decision_id, "actual": decision}
+        try:
+            # Lazy import: semantica.evals is only exercised when evaluators=
+            # is configured, and resolving it here (rather than at module
+            # import time) lets callers/tests monkeypatch semantica.evals.evaluate.
+            from ..evals import evaluate
+
+            summary = evaluate(
+                [case], evaluators=self.evaluators, config=self.eval_config
+            )
+        except Exception as exc:
+            # Deliberate, narrow exception to just the evaluate() call: this
+            # hook is an optional quality check, and a broken evaluator must
+            # never prevent the decision itself from being recorded. Logs and
+            # returns (does not re-raise). Per-evaluator failures are already
+            # converted to CaseResult(status="error") inside evaluate();
+            # reaching here means evaluate() itself failed outright.
+            self.logger.warning(
+                f"Decision evaluation failed for {decision.decision_id}: {exc}",
+                exc_info=True,
+            )
+            return
+
+        # Outside the try: a summary-shape change here is a bug in this hook,
+        # not an evaluator failure, and must not be swallowed as one.
+        case_result = summary.cases[0]
+        if case_result.status == "error":
+            # A named evaluator itself errored (unknown name, or it raised) --
+            # evaluate() already downgraded that to CaseResult(status="error")
+            # instead of propagating, so without this log the only trace is
+            # eval_details on the stored decision.
+            self.logger.warning(
+                f"Decision evaluator(s) errored for {decision.decision_id}: "
+                f"{case_result.details}"
+            )
+        scores = [metric.score for metric in case_result.metrics.values()]
+        decision.metadata["eval_score"] = sum(scores) / len(scores) if scores else 0.0
+        decision.metadata["eval_passed"] = case_result.status == "pass"
+        decision.metadata["eval_details"] = {
+            name: {"score": metric.score, "passed": metric.passed, "meta": metric.meta}
+            for name, metric in case_result.metrics.items()
+        }
+
     def record_decision(
         self,
         decision: Decision,
@@ -120,12 +201,12 @@ class DecisionRecorder:
     ) -> str:
         """
         Record decision with full context.
-        
+
         Args:
             decision: Decision object to record
             entities: List of entity IDs linked to this decision
             source_documents: List of source document identifiers
-            
+
         Returns:
             Decision ID
         """
@@ -135,28 +216,33 @@ class DecisionRecorder:
                 decision.reasoning_embedding = self.embedding_generator.generate(
                     decision.reasoning
                 )
-            
+
+            # Run configured evaluators (opt-in) before persisting, so
+            # eval_score/eval_passed/eval_details are stored with the decision.
+            if self.evaluators:
+                self._evaluate_and_enrich_decision(decision)
+
             # Store decision in graph database
             self._store_decision_node(decision)
-            
+
             # Link to entities
             self.link_entities(decision.decision_id, entities)
-            
+
             # Track provenance
             if self.provenance_manager:
                 self._track_decision_provenance(decision, source_documents)
-            
+
             self.logger.info(f"Recorded decision: {decision.decision_id} | Actor: {decision.decision_maker} | Timestamp: {decision.timestamp} | Outcome: {decision.outcome} | Category: {decision.category}")
             return decision.decision_id
-            
+
         except Exception as e:
             self.logger.exception("Failed to record decision")
             raise
-    
+
     def link_entities(self, decision_id: str, entities: List[str]) -> None:
         """
         Link decision to entities.
-        
+
         Args:
             decision_id: Decision ID
             entities: List of entity IDs to link
@@ -180,13 +266,13 @@ class DecisionRecorder:
                     "decision_id": decision_id,
                     "entity_id": entity_id
                 })
-            
+
             self.logger.info(f"Linked decision {decision_id} to {len(entities)} entities")
-            
+
         except Exception as e:
             self.logger.exception("Failed to link entities")
             raise
-    
+
     def apply_policies(
         self,
         decision_id: str,
@@ -194,7 +280,7 @@ class DecisionRecorder:
     ) -> List[Dict[str, str]]:
         """
         Track policy applications for a decision.
-        
+
         Args:
             decision_id: Decision ID
             policy_ids: List of policy IDs or policy refs with explicit version
@@ -260,14 +346,14 @@ class DecisionRecorder:
                         f"No policy match found for {policy_id}"
                         + (f" version {policy_version}" if policy_version else "")
                     )
-            
+
             self.logger.info(f"Applied {len(applied)} policies to decision {decision_id}")
             return applied
-            
+
         except Exception as e:
             self.logger.exception("Failed to apply policies")
             raise
-    
+
     def record_exception(
         self,
         decision_id: str,
@@ -279,7 +365,7 @@ class DecisionRecorder:
     ) -> str:
         """
         Record policy exception with approval chain.
-        
+
         Args:
             decision_id: Decision ID
             policy_id: Policy ID that was excepted
@@ -287,7 +373,7 @@ class DecisionRecorder:
             approver: Person who approved exception
             approval_method: Method of approval (slack_dm, zoom_call, email, system)
             justification: Justification for the exception
-            
+
         Returns:
             Exception ID
         """
@@ -301,10 +387,10 @@ class DecisionRecorder:
                 approval_timestamp=datetime.now(),
                 justification=justification
             )
-            
+
             # Store exception in graph
             self._store_exception_node(exception)
-            
+
             if type(self.graph_store) is ContextGraph:
                 self.graph_store.add_node(node_id=policy_id, node_type="Policy")
                 self.graph_store.add_edge(source_id=decision_id, target_id=exception.exception_id, edge_type="GRANTED_EXCEPTION")
@@ -325,14 +411,14 @@ class DecisionRecorder:
                 "policy_id": policy_id,
                 "exception_id": exception.exception_id
             })
-            
+
             self.logger.info(f"Recorded exception: {exception.exception_id}")
             return exception.exception_id
-            
+
         except Exception as e:
             self.logger.exception("Failed to record exception")
             raise
-    
+
     def capture_cross_system_context(
         self,
         decision_id: str,
@@ -340,7 +426,7 @@ class DecisionRecorder:
     ) -> None:
         """
         Capture cross-system context synthesis.
-        
+
         Args:
             decision_id: Decision ID
             system_inputs: Dictionary of system inputs and their contexts
@@ -366,13 +452,13 @@ class DecisionRecorder:
                     "context_data": context_data,
                     "decision_id": decision_id
                 })
-            
+
             self.logger.info(f"Captured cross-system context for decision {decision_id}")
-            
+
         except Exception as e:
             self.logger.exception("Failed to capture cross-system context")
             raise
-    
+
     def record_approval_chain(
         self,
         decision_id: str,
@@ -382,7 +468,7 @@ class DecisionRecorder:
     ) -> None:
         """
         Record approval chains that happen outside systems.
-        
+
         Args:
             decision_id: Decision ID
             approvers: List of approver names
@@ -392,7 +478,7 @@ class DecisionRecorder:
         try:
             if len(approvers) != len(methods) or len(approvers) != len(contexts):
                 raise ValueError("Approvers, methods, and contexts must have same length")
-            
+
             for i, (approver, method, context) in enumerate(zip(approvers, methods, contexts)):
                 approval = ApprovalChain(
                     approval_id=str(uuid.uuid4()),
@@ -402,10 +488,10 @@ class DecisionRecorder:
                     approval_context=context,
                     timestamp=datetime.now()
                 )
-                
+
                 # Store approval node
                 self._store_approval_node(approval)
-                
+
                 # Create relationship
                 query = """
                 MATCH (d:Decision {decision_id: $decision_id})
@@ -416,13 +502,13 @@ class DecisionRecorder:
                     "decision_id": decision_id,
                     "approval_id": approval.approval_id
                 })
-            
+
             self.logger.info(f"Recorded approval chain with {len(approvers)} approvers")
-            
+
         except Exception as e:
             self.logger.exception("Failed to record approval chain")
             raise
-    
+
     def link_precedents(
         self,
         decision_id: str,
@@ -431,7 +517,7 @@ class DecisionRecorder:
     ) -> None:
         """
         Link decision to precedents.
-        
+
         Args:
             decision_id: Decision ID
             precedent_ids: List of precedent decision IDs
@@ -440,7 +526,7 @@ class DecisionRecorder:
         try:
             if len(precedent_ids) != len(relationship_types):
                 raise ValueError("Precedent IDs and relationship types must have same length")
-            
+
             if type(self.graph_store) is ContextGraph:
                 for precedent_id, relationship_type in zip(precedent_ids, relationship_types):
                     self.graph_store.add_edge(source_id=decision_id, target_id=precedent_id, edge_type=relationship_type)
@@ -459,13 +545,32 @@ class DecisionRecorder:
                     "precedent_id": precedent_id,
                     "relationship_type": relationship_type
                 })
-            
+
             self.logger.info(f"Linked {len(precedent_ids)} precedents to decision {decision_id}")
-            
+
         except Exception as e:
             self.logger.exception("Failed to link precedents")
             raise
-    
+
+    @staticmethod
+    def _serialize_graph_metadata(metadata: Any) -> str:
+        """Serialize metadata to a JSON string for property-graph stores (e.g. Neo4j).
+
+        Neo4j property values must be primitives or arrays thereof — dictionary/map
+        properties raise Neo.ClientError.Statement.TypeError (Encountered: Map{}).
+        Uses default=str so datetimes, UUIDs, and custom types serialize safely.
+        """
+        if isinstance(metadata, dict):
+            return json.dumps(metadata, default=str)
+        if metadata is None:
+            return "{}"
+        if isinstance(metadata, str):
+            return metadata
+        try:
+            return json.dumps(metadata, default=str)
+        except Exception:
+            return str(metadata)
+
     def _store_decision_node(self, decision: Decision) -> None:
         """Store decision node in graph database."""
         metadata = decision.metadata.copy() if decision.metadata else {}
@@ -480,7 +585,7 @@ class DecisionRecorder:
             "reasoning_embedding": decision.reasoning_embedding,
             "node2vec_embedding": decision.node2vec_embedding
         })
-        
+
         if type(self.graph_store) is ContextGraph:
             self.graph_store.add_node(
                 node_id=decision.decision_id,
@@ -515,9 +620,9 @@ class DecisionRecorder:
             "decision_maker": decision.decision_maker,
             "reasoning_embedding": decision.reasoning_embedding,
             "node2vec_embedding": decision.node2vec_embedding,
-            "metadata": decision.metadata
+            "metadata": self._serialize_graph_metadata(decision.metadata)
         })
-    
+
     def _store_exception_node(self, exception: PolicyException) -> None:
         """Store exception node in graph database."""
         metadata = exception.metadata.copy() if exception.metadata else {}
@@ -529,7 +634,7 @@ class DecisionRecorder:
             "approval_timestamp": exception.approval_timestamp.isoformat() if exception.approval_timestamp else None,
             "justification": exception.justification
         })
-        
+
         if type(self.graph_store) is ContextGraph:
             self.graph_store.add_node(
                 node_id=exception.exception_id,
@@ -558,11 +663,18 @@ class DecisionRecorder:
             "approver": exception.approver,
             "approval_timestamp": exception.approval_timestamp,
             "justification": exception.justification,
-            "metadata": exception.metadata
+            "metadata": self._serialize_graph_metadata(exception.metadata)
         })
-    
+
     def _store_approval_node(self, approval: ApprovalChain) -> None:
         """Store approval node in graph database."""
+        approval_context = approval.approval_context
+        if isinstance(approval_context, (dict, list)):
+            try:
+                approval_context = json.dumps(approval_context, default=str)
+            except Exception:
+                approval_context = str(approval_context)
+
         query = """
         CREATE (a:ApprovalChain {
             approval_id: $approval_id,
@@ -579,11 +691,11 @@ class DecisionRecorder:
             "decision_id": approval.decision_id,
             "approver": approval.approver,
             "approval_method": approval.approval_method,
-            "approval_context": approval.approval_context,
+            "approval_context": approval_context,
             "timestamp": approval.timestamp,
-            "metadata": approval.metadata
+            "metadata": self._serialize_graph_metadata(approval.metadata)
         })
-    
+
     def _track_decision_provenance(
         self,
         decision: Decision,
@@ -592,7 +704,7 @@ class DecisionRecorder:
         """Track decision provenance using ProvenanceManager."""
         if not self.provenance_manager:
             return
-        
+
         try:
             # Track decision as entity
             self.provenance_manager.track_entity(
@@ -603,7 +715,7 @@ class DecisionRecorder:
                 source_documents=source_documents,
                 confidence=decision.confidence
             )
-            
+
             # Track decision-making activity
             self.provenance_manager.track_activity(
                 activity_id=f"decision_{decision.decision_id}",
@@ -613,6 +725,6 @@ class DecisionRecorder:
                 started_at=decision.timestamp,
                 ended_at=decision.timestamp
             )
-            
+
         except Exception as e:
             self.logger.exception("Failed to track provenance")

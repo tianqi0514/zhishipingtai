@@ -76,11 +76,11 @@ Production Use Cases:
     - Insurance: Claim decisions, underwriting assessments
 """
 
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional
 import json
 import uuid
+from dataclasses import InitVar, dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -100,8 +100,9 @@ class Decision:
     valid_from: Optional[str] = None
     valid_until: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    auto_generate_id: InitVar[bool] = True
     
-    def __post_init__(self, auto_generate_id: bool = True):
+    def __post_init__(self, auto_generate_id: bool) -> None:
         """Validate decision data."""
         if auto_generate_id and not self.decision_id:  # Handle both None and empty string
             self.decision_id = str(uuid.uuid4())
@@ -131,8 +132,18 @@ class Decision:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Decision":
         """Create decision from dictionary."""
+        data = data.copy()
         if isinstance(data.get("timestamp"), str):
             data["timestamp"] = datetime.fromisoformat(data["timestamp"])
+        metadata = data.get("metadata")
+        if isinstance(metadata, str):
+            try:
+                parsed = json.loads(metadata)
+                data["metadata"] = parsed if isinstance(parsed, dict) else {"raw": metadata}
+            except (TypeError, ValueError):
+                data["metadata"] = {"raw": metadata} if metadata else {}
+        elif not isinstance(metadata, dict) and metadata is not None:
+            data["metadata"] = {}
         return cls(**data)
 
 
@@ -146,8 +157,9 @@ class DecisionContext:
     risk_factors: List[str]
     cross_system_inputs: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    auto_generate_id: InitVar[bool] = True
     
-    def __post_init__(self, auto_generate_id: bool = True):
+    def __post_init__(self, auto_generate_id: bool) -> None:
         """Validate decision context data."""
         if auto_generate_id and not self.context_id:  # Handle both None and empty string
             self.context_id = str(uuid.uuid4())
@@ -184,8 +196,9 @@ class Policy:
     created_at: datetime
     updated_at: datetime
     metadata: Dict[str, Any] = field(default_factory=dict)
+    auto_generate_id: InitVar[bool] = True
     
-    def __post_init__(self, auto_generate_id: bool = True):
+    def __post_init__(self, auto_generate_id: bool) -> None:
         """Validate policy data."""
         if auto_generate_id and not self.policy_id:  # Handle both None and empty string
             self.policy_id = str(uuid.uuid4())
@@ -227,8 +240,9 @@ class PolicyException:
     approval_timestamp: datetime
     justification: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+    auto_generate_id: InitVar[bool] = True
     
-    def __post_init__(self, auto_generate_id: bool = True):
+    def __post_init__(self, auto_generate_id: bool) -> None:
         """Validate policy exception data."""
         if auto_generate_id and not self.exception_id:  # Handle both None and empty string
             self.exception_id = str(uuid.uuid4())
@@ -251,8 +265,18 @@ class PolicyException:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PolicyException":
         """Create exception from dictionary."""
+        data = data.copy()
         if isinstance(data.get("approval_timestamp"), str):
             data["approval_timestamp"] = datetime.fromisoformat(data["approval_timestamp"])
+        metadata = data.get("metadata")
+        if isinstance(metadata, str):
+            try:
+                parsed = json.loads(metadata)
+                data["metadata"] = parsed if isinstance(parsed, dict) else {"raw": metadata}
+            except (TypeError, ValueError):
+                data["metadata"] = {"raw": metadata} if metadata else {}
+        elif not isinstance(metadata, dict) and metadata is not None:
+            data["metadata"] = {}
         return cls(**data)
 
 
@@ -265,8 +289,9 @@ class Precedent:
     similarity_score: float
     relationship_type: str  # "similar_scenario", "same_policy", "exception_precedent"
     metadata: Dict[str, Any] = field(default_factory=dict)
+    auto_generate_id: InitVar[bool] = True
     
-    def __post_init__(self, auto_generate_id: bool = True):
+    def __post_init__(self, auto_generate_id: bool) -> None:
         """Validate precedent data."""
         if auto_generate_id and not self.precedent_id:  # Handle both None and empty string
             self.precedent_id = str(uuid.uuid4())
@@ -305,8 +330,9 @@ class ApprovalChain:
     approval_context: str
     timestamp: datetime
     metadata: Dict[str, Any] = field(default_factory=dict)
+    auto_generate_id: InitVar[bool] = True
     
-    def __post_init__(self, auto_generate_id: bool = True):
+    def __post_init__(self, auto_generate_id: bool) -> None:
         """Validate approval chain data."""
         if auto_generate_id and not self.approval_id:  # Handle both None and empty string
             self.approval_id = str(uuid.uuid4())
