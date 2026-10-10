@@ -13,6 +13,10 @@ from .extract import _effective_temperature
 SCHEMA_VERSION = "writing-assets-v1"
 
 
+class WritingAssetCoverageIncomplete(WritingExtractionTruncated):
+    """A complete response declared incomplete source coverage; may be corrected."""
+
+
 def _strict_json(content: str) -> dict:
     raw = content.strip()
     if raw.startswith("```"):
@@ -40,6 +44,7 @@ origin只能是 extracted_explicit（原文明示）、inferred_from_sources（�
 例：inputs的key为required和available时，expression为required-available；多个步骤应拆成多个computation_method，下一步骤把上一输出key列为输入，dependencies注明上一方法的key。所有输入必须实际用于表达式。
 每项必须引用本次 Evidence ID，完整保留适用范围及用于哪些章节。
 processed_evidence_ids 列出实际读过的全部输入ID；未完成时 continuation_needed=true，不得报完整成功。
+continuation_needed仅指因输出额度等原因未能读完本次输入，不是“还需要后续章节”“本批没有资产”或“需要人工核验”。读完本批后即使assets=[]、原文模糊或信息不足，也应为false；资料缺失或OCR质量问题写入unresolved_items，不编造资产。
 顶层：assets、processed_evidence_ids、unresolved_items、continuation_needed。
 每个asset字段：kind、key(英文语义键)、title、purpose、origin、evidence_ids、used_in_sections、dependencies(其他资产key)、scope、payload。
 顶层和asset都禁止增加字段，尤其不要输出type、schema_version、id、name、status等未定义字段。
@@ -97,7 +102,7 @@ def extract_assets(evidence: list[WritingEvidenceInput], *, material_role: str,
         except ValueError as exc:
             errors = [{"location": list(item["loc"]), "message": item["msg"]} for item in exc.errors()][:12] if hasattr(exc, "errors") else [{"message": str(exc)[:300]}]
             if on_attempt: on_attempt({"prompt": prompt, "status": "rejected", "error_type": type(exc).__name__, "errors": errors})
-            if attempt == 1 or isinstance(exc, WritingExtractionTruncated): raise
+            if attempt == 1 or (isinstance(exc, WritingExtractionTruncated) and not isinstance(exc, WritingAssetCoverageIncomplete)): raise
             prompt += "\n纠错重试：上一轮输出未通过严格结构校验。只输出完整JSON对象，逐项核对kind对应payload，不要Markdown或额外字段；不要虚构资产或来源。错误位置：" + json.dumps(errors, ensure_ascii=False)
     raise AssertionError("unreachable")
 
@@ -106,7 +111,7 @@ def _validate_coverage(result: AssetExtraction, evidence: list[WritingEvidenceIn
     signed = {item.evidence_id for item in evidence}
     processed = set(result.processed_evidence_ids)
     if processed != signed or len(processed) != len(result.processed_evidence_ids) or result.continuation_needed:
-        raise WritingExtractionTruncated("资产抽取未完整覆盖本批 Evidence，不能标记成功")
+        raise WritingAssetCoverageIncomplete("processed_evidence_ids必须完整列出本批已阅读的全部ID；continuation_needed只表示本批尚未读完，不表示没有资产或缺少后续章节。读完本批但无资产时返回assets=[]、continuation_needed=false；不得补造资产。")
     for asset in result.assets:
         if set(asset.evidence_ids) - signed:
             raise ValueError("资产引用未签发的 Evidence ID")

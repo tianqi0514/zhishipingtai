@@ -220,3 +220,15 @@ def test_single_source_invalid_output_still_fails_and_prompt_has_wrapper_enum():
     assert db.scalar(select(WritingAssetVersion)) is None
     assert db.scalar(select(WritingExtractionRun)).status == "failed"
     db.close()
+
+
+def test_empty_cover_is_valid_but_continuation_flag_must_be_corrected_by_model():
+    evidence = [WritingEvidenceInput(evidence_id="evidence-1", text="前言")]
+    calls = []
+    def generate(prompt):
+        calls.append(prompt)
+        return {"assets": [], "processed_evidence_ids": ["evidence-1"],
+                "unresolved_items": ["本批只有标题"], "continuation_needed": len(calls) == 1}
+    result, _ = extract_assets(evidence, material_role="reference", api_key="", model="test", base_url=None, generator=generate)
+    assert result.assets == [] and not result.continuation_needed and len(calls) == 2
+    assert "不是“还需要后续章节”" in calls[0]

@@ -22,14 +22,13 @@ COPY semantica/integrations ./integrations
 RUN pip install --no-deps --no-build-isolation . && python -m pip check
 WORKDIR /app
 COPY semantica-enterprise/pyproject.toml ./pyproject.toml
-COPY semantica-enterprise/apps ./apps
-COPY --from=miaobi-web-builder /frontend/dist /app/apps/miaobi-web/dist
-COPY semantica-enterprise/packages ./packages
-COPY semantica-enterprise/scripts ./scripts
-COPY semantica-enterprise/demo ./demo
+COPY --chown=app:app semantica-enterprise/apps ./apps
+COPY --chown=app:app --from=miaobi-web-builder /frontend/dist /app/apps/miaobi-web/dist
+COPY --chown=app:app semantica-enterprise/packages ./packages
+COPY --chown=app:app semantica-enterprise/scripts ./scripts
+COPY --chown=app:app semantica-enterprise/demo ./demo
 RUN pip install --no-deps --no-build-isolation -e . && python -m pip check \
-    && python -c "import semantica; assert semantica.__version__ == '0.7.0'" \
-    && chown -R app:app /app/apps /app/packages /app/scripts
+    && python -c "import semantica; assert semantica.__version__ == '0.7.0'"
 USER app
 EXPOSE 8080
 CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
