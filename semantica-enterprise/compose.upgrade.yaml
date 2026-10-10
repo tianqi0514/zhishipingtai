@@ -1,0 +1,9 @@
+# Optional incremental build against an explicitly backed-up server image.
+# Runtime configuration and persistent data continue to come from production.
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: semantica-enterprise/Dockerfile.upgrade
+      args:
+        BASE_IMAGE: ${UPGRADE_BASE_IMAGE:?Select a verified backup runtime image}
