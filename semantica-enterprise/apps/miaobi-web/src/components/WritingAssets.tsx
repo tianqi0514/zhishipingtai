@@ -11,6 +11,7 @@ type Asset = {
 type Release = { id: string; release_number: number; snapshot: { assets: Array<{ id: string }> } };
 type Trace = { input: unknown[]; runtime_prompt: string; output: unknown; process: { status: string; metrics: { coverage?: string } } };
 type Kinds = { kinds: Array<{ key: string; label: string }>; engine: { version: string } };
+type Summary = { total: number; kinds: Record<string, { total: number; candidate: number; reviewed: number; rejected: number }> };
 const statusLabels: Record<string, string> = { candidate: '待确认', reviewed: '已确认', rejected: '已拒绝' };
 
 const fieldLabels: Record<string, string> = {
@@ -56,6 +57,9 @@ export function WritingAssets({ projectId, spaceId, document, materials, onChang
   const [kinds, setKinds] = useState<Kinds | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [filter, setFilter] = useState('');
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [offset, setOffset] = useState(0);
+  const pageSize = 100;
   const [busy, setBusy] = useState(false);
   const [detail, setDetail] = useState<Asset | null>(null);
   const [trace, setTrace] = useState<Trace | null>(null);
@@ -75,15 +79,17 @@ export function WritingAssets({ projectId, spaceId, document, materials, onChang
 
   async function load() {
     const requestId = ++loadId.current;
-    const [rows, catalog, published] = await Promise.all([
-      api<Asset[]>(`/writing-assets?project_id=${encodeURIComponent(projectId)}`),
+    const [rows, catalog, published, inventory] = await Promise.all([
+      api<Asset[]>(`/writing-assets?project_id=${encodeURIComponent(projectId)}&offset=${offset}&limit=${pageSize}${filter ? `&kind=${encodeURIComponent(filter)}` : ''}`),
       api<Kinds>('/writing-assets/kinds'),
       spaceId ? api<Release[]>(`/writing-assets/releases?space_id=${encodeURIComponent(spaceId)}`) : Promise.resolve([]),
+      api<Summary>(`/writing-assets/summary?project_id=${encodeURIComponent(projectId)}`),
     ]);
-    if (requestId === loadId.current) { setAssets(rows); setKinds(catalog); setReleases(published); }
+    if (requestId === loadId.current) { setAssets(rows); setKinds(catalog); setReleases(published); setSummary(inventory); }
   }
-  useEffect(() => { setSelected([]); setDetail(null); setJob(null); setMaterialId(''); detailId.current = ''; void load().catch((error) => onError(error.message)); return () => { loadId.current++; detailId.current = ''; }; }, [projectId, spaceId, materials.length]);
+  useEffect(() => { setFilter(''); setOffset(0); setSelected([]); setDetail(null); setJob(null); setMaterialId(''); detailId.current = ''; void load().catch((error) => onError(error.message)); return () => { loadId.current++; detailId.current = ''; }; }, [projectId, spaceId, materials.length]);
   useEffect(() => { setAdoption(null); setCalculated([]); }, [projectId, document?.id]);
+  useEffect(() => { setSelected([]); void load().catch((error) => onError(error.message)); }, [filter, offset]);
   useEffect(() => {
     if (!job || !['queued', 'running'].includes(job.status)) return;
     let active = true;
@@ -118,7 +124,9 @@ export function WritingAssets({ projectId, spaceId, document, materials, onChang
   const release = releases.find((item) => selected.every((id) => item.snapshot.assets.some((asset) => asset.id === id)));
   const adoptedBundle = document?.applicability?.asset_bundle as { release_id: string; checksum: string; assets?: Array<{ id: string; definition: { kind: string } }> } | undefined;
   const adoptedMethods = (adoptedBundle?.assets || []).filter((item) => item.definition?.kind === 'computation_method');
-  const rows = filter ? assets.filter((asset) => asset.kind === filter) : assets;
+  const rows = assets;
+  const total = filter ? summary?.kinds[filter]?.total || 0 : summary?.total || 0;
+  function selectKind(kind: string) { setFilter(kind); setOffset(0); setSelected([]); }
   const labels = Object.fromEntries(kinds?.kinds.map((item) => [item.key, item.label]) || []);
   const formulaInputs = (detail?.definition.payload.inputs || []) as Array<{ key: string; name: string; unit: string }>;
   if (!spaceId) return null;
@@ -130,8 +138,14 @@ export function WritingAssets({ projectId, spaceId, document, materials, onChang
         const material = materials.find((item) => item.id === materialId)!;
         setJob(await api('/writing-assets/extract', { method: 'POST', body: { version_id: material.version_id, material_role: material.material_role, request_id: createClientId() } }));
       })}>提炼可复用内容</button>
-      <select aria-label="资产类型" value={filter} onChange={(event) => setFilter(event.target.value)}><option value="">全部资产类型</option>{kinds?.kinds.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select>
+      <select aria-label="资产类型" value={filter} onChange={(event) => selectKind(event.target.value)}><option value="">全部资产类型</option>{kinds?.kinds.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select>
     </div>
+    <div className="asset-kind-grid" aria-label="16类写作资产总览">{kinds?.kinds.map((item) => {
+      const count = summary?.kinds[item.key];
+      return <button type="button" key={item.key} aria-pressed={filter === item.key} className={filter === item.key ? 'active' : ''}
+        title={count?.total ? `待确认 ${count.candidate} · 已确认 ${count.reviewed} · 已拒绝 ${count.rejected}` : '当前材料未抽取到此类资产，不自动补造'}
+        onClick={() => selectKind(filter === item.key ? '' : item.key)}><span>{item.label}</span><b>{count?.total || 0}</b></button>;
+    })}</div>
     {job && <p role="status">{job.status === 'succeeded' ? '提炼完成' : job.status === 'failed' ? job.error_message : '正在提炼已解析资料'}{job.status === 'succeeded' ? '' : ` · ${job.progress}%`}</p>}
     {document && adoptedMethods.length > 0 && <div className="asset-actions"><button type="button" className="secondary" disabled={busy || document.status === 'published'} onClick={() => void action(async () => {
       const originalContext = contextId.current;
@@ -148,7 +162,10 @@ export function WritingAssets({ projectId, spaceId, document, materials, onChang
       <input type="checkbox" aria-label={`选择${asset.title}`} checked={selected.includes(asset.id)} onChange={(event) => setSelected((items) => event.target.checked ? [...items, asset.id] : items.filter((id) => id !== asset.id))} />
       <button type="button" className="asset-open" onClick={() => void open(asset)}><b>{asset.title}</b><small>{labels[asset.kind]} · V{asset.version} · {statusLabels[asset.status] || asset.status}</small><span>{asset.definition.purpose}</span></button>
     </article>)}</div>
-    {assets.length >= 500 && <small>当前显示最近500个版本，请使用类型筛选。</small>}
+    {total > 0 && <div className="asset-actions"><small>共 {total} 个资产版本 · 当前 {offset + 1}—{Math.min(offset + pageSize, total)}</small>
+      <button type="button" className="secondary compact" disabled={busy || offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>上一页</button>
+      <button type="button" className="secondary compact" disabled={busy || offset + pageSize >= total} onClick={() => setOffset(offset + pageSize)}>下一页</button>
+    </div>}
     {chosen.length > 0 && <div className="asset-actions"><span>已选 {chosen.length} 项</span>
       <button type="button" className="secondary" disabled={busy || chosen.some((item) => item.status !== 'reviewed')} onClick={() => void action(() => api('/writing-assets/releases', { method: 'POST', body: { space_id: spaceId, asset_ids: selected } }))}>发布选中资产</button>
       {document && <button type="button" className="primary" disabled={busy || !release} onClick={() => {

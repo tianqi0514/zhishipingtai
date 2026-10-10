@@ -481,3 +481,7 @@
 .asset-formula-tests { display: flex; gap: 12px; flex-wrap: wrap; }
 .asset-formula-tests fieldset { flex: 1 1 240px; min-width: 0; border: 1px solid var(--border, #e4e9f2); border-radius: 12px; padding: 12px; }
 .asset-formula-tests label { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; }
+.asset-kind-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; margin:12px 0; }
+.asset-kind-grid button { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; border:1px solid #e0e6ef; border-radius:10px; background:#fff; padding:10px 12px; text-align:left; color:#475467; font-size:12px; }
+.asset-kind-grid button b { border-radius:6px; background:#f2f4f7; padding:3px 7px; color:#344054; }
+.asset-kind-grid button.active { border-color:#80a7e9; color:#245fb7; background:#f2f7ff; }

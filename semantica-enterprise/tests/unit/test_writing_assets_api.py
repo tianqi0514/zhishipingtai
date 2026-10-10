@@ -59,6 +59,27 @@ def review(client, row, **extra):
         "checksum": row.checksum, "action": "accept", "reason": "已核对原文与当前适用性", **extra})
 
 
+def test_inventory_has_all_sixteen_kinds_and_real_pagination():
+    with writing_client() as (client, db, release):
+        client.app.include_router(router, prefix="/api/v1")
+        project = _create_project(client, release.id)
+        space, rows = seed_assets(db, project["id"])
+        summary = checked(client.get(f"/api/v1/writing-assets/summary?project_id={project['id']}"))
+        assert len(summary["kinds"]) == 16
+        assert summary["total"] == 3
+        assert summary["kinds"]["variable"]["total"] == 0
+        assert summary["kinds"]["skill"]["candidate"] == 1
+        first = checked(client.get(f"/api/v1/writing-assets?space_id={space.id}&limit=1"))
+        second = checked(client.get(f"/api/v1/writing-assets?space_id={space.id}&offset=1&limit=1"))
+        assert len(first) == len(second) == 1 and first[0]["id"] != second[0]["id"]
+        only = checked(client.get(f"/api/v1/writing-assets?space_id={space.id}&kind=skill&limit=1"))
+        assert only[0]["id"] == rows[-1].id
+        checked(client.get(f"/api/v1/writing-assets?space_id={space.id}&offset=-1"), 422)
+        checked(client.get(f"/api/v1/writing-assets?space_id={space.id}&kind=invented"), 422)
+        # The shared space permission guard deliberately conceals unknown spaces.
+        checked(client.get("/api/v1/writing-assets/summary?space_id=missing"), 403)
+
+
 @pytest.mark.parametrize("metric_text", ["资源缺口180人。", ""])
 def test_asset_review_publish_adopt_compute_and_exact_bound_impact(metric_text):
     with writing_client() as (client, db, release):

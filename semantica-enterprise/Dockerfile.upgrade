@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+# Incremental delivery onto an explicitly verified, backed-up server runtime.
+# A new host still uses Dockerfile.production. No local host service is needed.
+ARG BASE_IMAGE
+FROM node:24-alpine AS miaobi-web-builder
+WORKDIR /frontend
+RUN corepack enable && corepack prepare pnpm@11.19.0 --activate
+COPY semantica-enterprise/apps/miaobi-web/package.json semantica-enterprise/apps/miaobi-web/pnpm-lock.yaml semantica-enterprise/apps/miaobi-web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY semantica-enterprise/apps/miaobi-web/index.html semantica-enterprise/apps/miaobi-web/tsconfig.json semantica-enterprise/apps/miaobi-web/vite.config.ts ./
+COPY semantica-enterprise/apps/miaobi-web/src ./src
+RUN pnpm build
+
+FROM ${BASE_IMAGE} AS runtime
+USER root
+WORKDIR /opt/semantica
+COPY semantica/pyproject.toml semantica/README.md semantica/LICENSE semantica/MANIFEST.in ./
+COPY semantica/semantica ./semantica
+COPY semantica/integrations ./integrations
+# The baseline already contains the production dependency set. Fail the build
+# if the new source's metadata requires an unmet dependency; never ignore it.
+RUN pip install --no-deps --no-build-isolation . && python -m pip check
+WORKDIR /app
+COPY semantica-enterprise/pyproject.toml ./pyproject.toml
+COPY semantica-enterprise/apps ./apps
+COPY --from=miaobi-web-builder /frontend/dist /app/apps/miaobi-web/dist
+COPY semantica-enterprise/packages ./packages
+COPY semantica-enterprise/scripts ./scripts
+COPY semantica-enterprise/demo ./demo
+RUN pip install --no-deps --no-build-isolation -e . && python -m pip check \
+    && python -c "import semantica; assert semantica.__version__ == '0.7.0'" \
+    && chown -R app:app /app/apps /app/packages /app/scripts
+USER app
+EXPOSE 8080
+CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -94,7 +94,9 @@ def kinds(user: User = Depends(get_current_user)):
 
 @router.get("")
 def list_assets(space_id: str | None = None, project_id: str | None = None,
-                kind: str | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+                kind: str | None = None, offset: int = Query(0, ge=0),
+                limit: int = Query(500, ge=1, le=500),
+                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if project_id:
         from apps.api.writing import _project
         space_id = _project(db, project_id, user).knowledge_space_id
@@ -105,9 +107,32 @@ def list_assets(space_id: str | None = None, project_id: str | None = None,
         WritingAssetVersion.tenant_id == user.tenant_id, WritingAssetVersion.space_id == space_id,
         WritingAssetVersion.deleted_at.is_(None),
     ).order_by(WritingAssetVersion.created_at.desc())
-    if kind: query = query.where(WritingAssetVersion.kind == kind)
-    # Explicit pagination prevents a misleading all-results view on large corpora.
-    return [serialize_row(row) for row in db.scalars(query.limit(500))]
+    if kind:
+        if kind not in ASSET_KINDS: raise HTTPException(422, "不支持的资产类型")
+        query = query.where(WritingAssetVersion.kind == kind)
+    query = query.order_by(WritingAssetVersion.id.desc())
+    return [serialize_row(row) for row in db.scalars(query.offset(offset).limit(limit))]
+
+
+@router.get("/summary")
+def asset_summary(space_id: str | None = None, project_id: str | None = None,
+                  user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if project_id:
+        from apps.api.writing import _project
+        space_id = _project(db, project_id, user).knowledge_space_id
+    if not space_id: raise HTTPException(422, "请选择知识空间")
+    require_space_permission(db, user, space_id, "read")
+    groups = list(db.execute(select(WritingAssetVersion.kind, WritingAssetVersion.status, func.count()).where(
+        WritingAssetVersion.tenant_id == user.tenant_id, WritingAssetVersion.space_id == space_id,
+        WritingAssetVersion.deleted_at.is_(None),
+    ).group_by(WritingAssetVersion.kind, WritingAssetVersion.status)))
+    counts = {kind: {"total": 0, "candidate": 0, "reviewed": 0, "rejected": 0} for kind in ASSET_KINDS}
+    for kind, status, count in groups:
+        if kind in counts:
+            counts[kind]["total"] += count
+            counts[kind][status] = count
+    return {"space_id": space_id, "total": sum(item["total"] for item in counts.values()), "kinds": counts,
+            "count_basis": "asset_versions"}
 
 
 @router.get("/releases")

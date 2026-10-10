@@ -18,6 +18,7 @@ function setup(row = asset, currentArticle = article) {
     const url = String(input);
     if (url.includes('/trace')) return json({ input: [{ filename: '历史方案.md', file_version: 1, text: '原文依据', locator: { page: 1 } }], runtime_prompt: '真实留存的提示词', output: { assets: [row] }, process: { status: 'succeeded', metrics: { coverage: 'complete' } } });
     if (url.endsWith('/kinds')) return json({ kinds: [{ key: row.kind, label: '报告结构' }], engine: { version: '0.7.0' } });
+    if (url.includes('/summary?')) return json({ total: 1, kinds: { [row.kind]: { total: 1, candidate: row.status === 'candidate' ? 1 : 0, reviewed: row.status === 'reviewed' ? 1 : 0, rejected: 0 } } });
     if (url.includes('/releases?')) return json([{ id: 'release', release_number: 1, snapshot: { assets: [{ id: row.id }] } }]);
     if (url.endsWith('/compute')) return json({ items: [{ fact: { label: '资源缺口', value: { number: 180 }, unit: '人' }, reused: true }] });
     if (init?.method === 'POST') return json({ id: 'new', status: 'queued', progress: 0 });
@@ -29,6 +30,14 @@ function setup(row = asset, currentArticle = article) {
 }
 
 describe('历史结构与方法', () => {
+  it('资产数量来自后端，类型按钮触发真实服务端过滤', async () => {
+    const requests = setup();
+    const kind = await screen.findByRole('button', { name: /报告结构\s*1/ });
+    fireEvent.click(kind);
+    await waitFor(() => expect(requests.mock.calls.some(([url]) => String(url).includes('&kind=report_structure'))).toBe(true));
+    expect(kind).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/共 1 个资产版本/)).toBeInTheDocument();
+  });
   it('采用必须确认，取消不会请求；只发送发布资产版本而不是历史数字', async () => {
     const requests = setup();
     await screen.findByText('保障方案章节');
