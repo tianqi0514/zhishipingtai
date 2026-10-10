@@ -214,8 +214,10 @@ const BlockList: RenderNodeWrapper = (props) => {
   return (next) => {
     const style = String(next.element.listStyleType);
     if (style === 'todo') return <TodoListItem {...next} />;
-    const Tag = isOrderedList(next.element) ? 'ol' : 'ul';
-    return <Tag className="plate-list" style={{ listStyleType: style }}><li>{next.children}</li></Tag>;
+    const ordered = isOrderedList(next.element);
+    const Tag = ordered ? 'ol' : 'ul';
+    const start = ordered && typeof next.element.listStart === 'number' ? next.element.listStart : undefined;
+    return <Tag className="plate-list" start={start} style={{ listStyleType: style }}><li>{next.children}</li></Tag>;
   };
 };
 
@@ -265,7 +267,9 @@ export const EditorKit = [
   FootnoteReferencePlugin.withComponent(FootnoteReference), FootnoteDefinitionPlugin.withComponent(FootnoteDefinition),
   ListPlugin.configure({
     inputRules: [BulletedListRules.markdown({ variant: '-' }), OrderedListRules.markdown({ variant: '.' }), TaskListRules.markdown({ checked: false }), TaskListRules.markdown({ checked: true })],
-    inject: { nodeProps: { nodeKey: KEYS.listType, query: ({ nodeProps }) => Boolean(nodeProps.element?.listStyleType && !isOrderedList(nodeProps.element)), transformProps: ({ props }) => ({ ...props, role: 'listitem', style: { ...props.style, display: 'list-item' } }) }, targetPlugins: [...KEYS.heading, KEYS.p, KEYS.blockquote, KEYS.codeBlock, KEYS.toggle, KEYS.img] },
+    // The wrapper owns list semantics and markers; making the Slate block a
+    // second list item draws a duplicate bullet around the same content.
+    inject: { targetPlugins: [...KEYS.heading, KEYS.p, KEYS.blockquote, KEYS.codeBlock, KEYS.toggle, KEYS.img] },
     render: { belowNodes: BlockList },
   }),
   SlashPlugin.configure({
@@ -819,7 +823,7 @@ export function MiaobiEditor({ document, onSaved, onDirtyChange, onRequestSource
             saveTimer.current = window.setTimeout(() => void save(), 1800);
           }}
         >
-          {editorReady ? <><FloatingFormatToolbar readOnly={collaboration?.read_only} /><PlateContent onMouseUp={() => { const index = editor.selection?.anchor.path[0]; const node = index === undefined ? null : editor.children[index]; if (node?.id) window.dispatchEvent(new CustomEvent('miaobi:paragraph-selected', { detail: String(node.id) })); }} className="editor-page" readOnly={collaboration?.read_only} onContextMenu={openAgentContextMenu} placeholder="开始撰写方案…… 输入 / 可打开完整指令菜单；选中文字后右键可扩写、改写或缩写" /></> : <div className="editor-collaboration-loading">正在恢复协同文稿…</div>}
+          {editorReady ? <><FloatingFormatToolbar readOnly={collaboration?.read_only} /><PlateContent onMouseUp={() => { const index = editor.selection?.anchor.path[0]; const node = index === undefined ? null : editor.children[index]; if (node?.id) window.dispatchEvent(new CustomEvent('miaobi:paragraph-selected', { detail: String(node.id) })); }} className="editor-page" lang="zh-CN" style={{ lineBreak: 'strict' }} readOnly={collaboration?.read_only} onContextMenu={openAgentContextMenu} placeholder="开始撰写方案…… 输入 / 可打开完整指令菜单；选中文字后右键可扩写、改写或缩写" /></> : <div className="editor-collaboration-loading">正在恢复协同文稿…</div>}
           {collaboration && <CollaborationStatus />}
         </Plate>
       </div>

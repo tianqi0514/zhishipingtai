@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { createPlateEditor } from 'platejs/react';
+import { createPlateEditor, Plate, PlateContent } from 'platejs/react';
 import type { Operation } from 'platejs';
 
 vi.mock('../src/api', () => ({
@@ -24,6 +24,27 @@ import { createFrameDeltaBuffer } from '../src/streaming';
 import type { PlateNode } from '../src/types/domain';
 
 describe('妙笔 Plate 编辑器', () => {
+  it('列表只渲染一个标记并保留有序列表起始编号', () => {
+    const editor = createPlateEditor({
+      plugins: EditorKit,
+      value: [
+        { id: 'bullet', type: 'p', indent: 1, listStyleType: 'disc', children: [{ text: '科研用房建设条件' }] },
+        { id: 'ordered', type: 'p', indent: 1, listStyleType: 'decimal', listStart: 4, listRestart: 4, children: [{ text: '核实建设边界' }] },
+      ],
+    });
+    const { container } = render(<Plate editor={editor}><PlateContent /></Plate>);
+    const lists = container.querySelectorAll('.plate-list');
+    expect(lists).toHaveLength(2);
+    expect(container.querySelectorAll('li')).toHaveLength(2);
+    expect(container.querySelectorAll('[role="listitem"]')).toHaveLength(0);
+    for (const list of lists) {
+      expect(list.parentElement?.style.display).not.toBe('list-item');
+      expect(list.querySelectorAll('li')).toHaveLength(1);
+    }
+    expect(container.querySelector('ol')).toHaveAttribute('start', '4');
+    expect(editor.children[0].indent).toBe(1);
+    expect(container.textContent?.match(/科研用房建设条件/g)).toHaveLength(1);
+  });
   it('只让正式生成和局部重算版本覆盖旧协同快照', () => {
     expect(serverVersionOwnsCollaborativeState('输入确认、分析计算与知识约束的一键生成')).toBe(true);
     expect(serverVersionOwnsCollaborativeState('应用输入变化并局部更新受影响测算')).toBe(true);
