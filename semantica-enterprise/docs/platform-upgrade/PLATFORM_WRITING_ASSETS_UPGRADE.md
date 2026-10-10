@@ -46,7 +46,9 @@ Evidence、Entity、Claim、Fact、Relation 继续记录来源和当前知识。
 
 真实解析元素或已发布 Chunk → 稳定 Evidence → 分批联合抽取 → 严格 Schema 与来源校验 → 待确认资产版本 → 人工核验 → 不可变资产发布版本。
 
-一次合理大小的 Evidence 批次联合抽取，而不是对十六种资产分别调用十六次模型。每批目标约 3500 字、最多 12 个来源。使用现有 `semantic_extract` 模型路由；所有资产和子结构 `extra=forbid`。无效 Evidence ID、未处理输入、截断输出均拒绝完整成功。最多两次有错误位置的结构修正，原始响应、实际提示词、输入、尝试和校验结果均留痕。Key 不进入留痕。
+一次合理大小的 Evidence 批次联合抽取，而不是对十六种资产分别调用十六次模型。每批目标约 3500 字、最多 50 个来源；模型输入仅含原文与签发 ID，完整定位保留在数据库。使用现有 `semantic_extract` 模型路由；所有资产和子结构 `extra=forbid`。无效 Evidence ID、未处理输入、截断输出均拒绝完整成功。最多两次有错误位置的结构修正；仍未通过的多来源批次自适应二分，单来源或网络错误仍真实失败。成功子批可重试复用，原始响应、实际提示词、输入、尝试和校验结果均留痕。Key 不进入留痕。
+
+模型必须区分“已读完但本批没有可提炼资产”和“尚未读完本批”。封面、前言和缺少技术内容的片段可以合法输出空资产；缺失或 OCR 疑点保留在 unresolved_items。不得自动将不完整结果改成成功。线上官方 DeepSeek Flash 的资产抽取默认使用官方支持的非思考模式，避免隐式思考挤占结构化输出额度；不修改其他模型或其他写作场景的配置。参数依据：[DeepSeek Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/)。
 
 未发布索引的文档可以使用真实 ContentElement 提炼定义，生成的来源保留真实 element ID 和字符位置，不伪造 Chunk 或知识发布记录。空解析文本必须失败。原四路加工目标保持兼容，本轮可复用资产采用解析后的显式“提炼可复用内容”，尚未变成上传时自动第五路。
 
@@ -91,7 +93,7 @@ Evidence、Entity、Claim、Fact、Relation 继续记录来源和当前知识。
 | POST `/writing-assets/documents/{id}/compute` | 一次执行已采用公式链，检查发布校验码及文章基础版本 |
 | POST `/writing-assets/documents/{id}/compute/{asset_id}` | 执行已采用方法，保存计算与 Fact 依赖 |
 
-原有 `input-changes/preview`、`input-changes/apply`、文稿版本及导出接口继续复用。定义修订、采用和确认携带 checksum 或 base_version_id；后台拒绝过期版本。当前列表有 500 项上限，尚无完整翻页式资产管理。
+原有 `input-changes/preview`、`input-changes/apply`、文稿版本及导出接口继续复用。定义修订、采用和确认携带 checksum 或 base_version_id；后台拒绝过期版本。列表支持 kind、offset 和 limit 服务端分页，单页最多 500 项；前端按 100 项加载。summary 从真实资产版本分组统计，不用当前页数量冒充总数。
 
 ## 版本安全与后续工作
 

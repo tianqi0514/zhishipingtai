@@ -54,6 +54,7 @@ def main():
         print(json.dumps({"space": space["name"], "space_id": space["id"]}, ensure_ascii=False), flush=True)
         project = None
         attached = []
+        prepared = []
 
         def prepare_project():
             projects = call("GET", "writing/projects")
@@ -119,6 +120,12 @@ def main():
                     "document_id": previous["document_id"], "version_id": previous["version_id"],
                     "material_role": item["role"], "usage_scope": "space_asset"})
                 attached.append(material)
+            prepared.append((previous, item))
+            print(f"{source.name}: parsed, linked", flush=True)
+        # Publish every new source before scheduling long model jobs. Otherwise
+        # this import's own extraction requests can occupy all shared workers
+        # while the next source is still waiting to parse.
+        for previous, item in prepared:
             retry_failed = False
             if args.extract and args.retry_failed and previous.get("extraction_job_id"):
                 existing_job = call("GET", f"jobs/{previous['extraction_job_id']}")
@@ -128,7 +135,8 @@ def main():
                            "material_role": item["role"], "request_id": str(uuid.uuid4())})
                 previous["extraction_job_id"] = job["id"]
                 save()
-            print(f"{source.name}: parsed, linked" + (", real extraction queued" if previous.get("extraction_job_id") else ""), flush=True)
+            if previous.get("extraction_job_id"):
+                print(f"{previous['filename']}: extraction job recorded", flush=True)
         print("Import complete; extraction jobs may still be running. Check real job states before declaring extraction complete.", flush=True)
 
 
