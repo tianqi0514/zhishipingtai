@@ -127,6 +127,33 @@ def bindings_for_content(content: list[dict[str, Any]], bindings: dict[str, dict
     return {key: binding for key, binding in bindings.items() if key in visible}
 
 
+def bound_authority_ids(content: list[dict[str, Any]], bindings: dict[str, dict[str, Any]]) -> tuple[set[str], set[str]]:
+    """Export the authorities actually adopted by this document, not the latest
+    calculation in another article sharing its project. Include leaf/table
+    occurrences and paragraph-level provenance as well as legacy metric blocks.
+    Source permission/validity remains the API's responsibility.
+    """
+    from .writing_occurrences import iter_numeric_occurrences
+    facts: set[str] = set()
+    computations: set[str] = set()
+    for binding in bindings_for_content(content, bindings).values():
+        metadata = binding.get("metadata_json") or {}
+        if binding.get("fact_id"):
+            facts.add(str(binding["fact_id"]))
+        if binding.get("computation_run_id"):
+            computations.add(str(binding["computation_run_id"]))
+        facts.update(str(value) for value in metadata.get("input_fact_ids") or [] if value)
+        computations.update(str(value) for value in metadata.get("computation_run_ids") or [] if value)
+    for node in content:
+        for leaf, _ in iter_numeric_occurrences(node):
+            item = leaf["writing_binding"]
+            if item.get("fact_id"):
+                facts.add(str(item["fact_id"]))
+            if item.get("computation_run_id"):
+                computations.add(str(item["computation_run_id"]))
+    return facts, computations
+
+
 def _set_run_font(run, size: float = 11, bold: bool = False) -> None:
     font_name = _docx_font_name()
     run.font.name = font_name

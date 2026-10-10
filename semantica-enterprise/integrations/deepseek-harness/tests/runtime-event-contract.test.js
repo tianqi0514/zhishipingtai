@@ -73,6 +73,14 @@ test('runtime gives formal-writing compaction a bounded non-truncating budget', 
   assert.match(patch, /maxTokens: !!js Number\(process\.env\.DSH_COMPACTION_MAX_TOKENS \|\| 2048\)/)
 })
 
+test('knowledge plugin uses a relocatable identifier rather than a config expression', () => {
+  const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  assert.match(patch, /id: chuanshen-knowledge-tools\s+(?:#[^\n]*\n\s*)*name: \.\/index\.js/)
+  assert.doesNotMatch(patch.split('id: chuanshen-knowledge-tools')[1], /name: !!js/)
+  const runtime = readFileSync(new URL('../runtime.js', import.meta.url), 'utf8')
+  assert.match(runtime, /KNOWLEDGE_API_BASE: process\.env\.KNOWLEDGE_API_BASE \|\| PLATFORM_API/)
+})
+
 test('formal report final render keeps the section envelope strict', () => {
   const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
   assert.match(source, /章节对象只允许 section_key、title、content_nodes、citation_refs、metric_refs、inference_refs、warnings/)

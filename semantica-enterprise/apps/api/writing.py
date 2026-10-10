@@ -341,7 +341,7 @@ def _release_scope_from_release(
     }
 
 
-def _release_for_space(db: Session, space_id: str, user: User) -> KnowledgeProductRelease:
+def _release_for_space(db: Session, space_id: str, user: User, *, allow_unpublished: bool = False) -> KnowledgeProductRelease | None:
     """Resolve a space to an immutable internal snapshot for writing.
 
     Users work with knowledge spaces; the existing product-release tables stay
@@ -419,6 +419,10 @@ def _release_for_space(db: Session, space_id: str, user: User) -> KnowledgeProdu
             graph_release=graph, index_release=latest_index,
         )
     if knowledge_release is None:
+        if allow_unpublished:
+            # Source preparation must be possible before the first release.
+            # Never invent a published index/graph to unblock the upload UI.
+            return None
         raise HTTPException(status_code=409, detail="该知识空间尚未完成知识加工")
 
     code = f"writing-{space.id.replace('-', '')[:24]}"
@@ -890,7 +894,9 @@ def _article_sample_body_lengths(
     return sample_main_body_lengths(text, list(profile.get("chapters") or []))
 
 
-def _latest_computation_rows(db: Session, project_id: str) -> list[ComputationRun]:
+def _latest_computation_rows(
+    db: Session, project_id: str, *, asset_checksums: set[str] | None = None,
+) -> list[ComputationRun]:
     active_facts = {
         row.fact_key: row
         for row in db.scalars(
@@ -913,6 +919,11 @@ def _latest_computation_rows(db: Session, project_id: str) -> list[ComputationRu
     )
     latest: dict[str, ComputationRun] = {}
     for row in rows:
+        if asset_checksums is not None:
+            definition = db.get(ComputationDefinitionVersion, row.definition_version_id)
+            if (definition is None or definition.operation != "writing_asset_expression"
+                    or definition.checksum not in asset_checksums):
+                continue
         result = dict(row.result or {})
         key = str((result.get("output_fact") or {}).get("fact_key") or row.id)
         dependencies = dict(result.get("dependencies") or {})
@@ -941,6 +952,23 @@ def _latest_computation_rows(db: Session, project_id: str) -> list[ComputationRu
                 continue
         latest.setdefault(key, row)
     return list(latest.values())
+
+
+def _article_computation_rows(
+    db: Session, project: WritingProject, document: WritingDocument | None, user: User,
+    *, legacy_enabled: bool,
+) -> list[ComputationRun]:
+    bundle = (document.applicability or {}).get("asset_bundle") if document else None
+    if not bundle:
+        return _latest_computation_rows(db, project.id) if legacy_enabled else []
+    from apps.api.writing_assets import _adopted_assets
+    assets = _adopted_assets(db, document, project, user)
+    checksums = {item["checksum"] for item in assets
+        if item["definition"]["kind"] == "computation_method" and item["validation"].get("execution") == "passed"}
+    # Filter the adopted formula versions before selecting the latest output.
+    # Another article in this project can use a different method for the same
+    # output key; its newer run must not hide this article's valid result.
+    return _latest_computation_rows(db, project.id, asset_checksums=checksums)
 
 
 def _scenario_runtime_settings(
@@ -1041,7 +1069,8 @@ def _strict_report_quality(
 ) -> dict[str, Any]:
     scenario, scenario_config, writing_policy = _scenario_runtime_settings(db, project, document)
     toolbox = dict(scenario_config.get("toolbox") or {})
-    computations = _latest_computation_rows(db, project.id) if toolbox.get("calculation_enabled", True) else []
+    computations = _article_computation_rows(db, project, document, user,
+        legacy_enabled=toolbox.get("calculation_enabled", True))
     inference_count = 0
     if toolbox.get("reasoning_enabled", True):
         inference_count = int(
@@ -1061,7 +1090,8 @@ def _strict_report_quality(
         # A reference sample defines article form, not this project's factual
         # calculations or inferred conclusions.  Only adopted results can be
         # required by the article-specific quality gate.
-        computations = []
+        if not document or not (document.applicability or {}).get("asset_bundle"):
+            computations = []
         inference_count = 0
     reference_characters = (
         (sample_profile.get("style") or {}).get("reference_characters")
@@ -1090,6 +1120,8 @@ def _strict_report_quality(
         section_plan=effective_section_plan,
         bindings=bindings,
         expected_computation_count=0 if native_authoring else len(computations),
+        expected_computation_ids={row.id for row in computations}
+        if document and (document.applicability or {}).get("asset_bundle") else None,
         expected_inference_count=0 if native_authoring else inference_count,
         reference_characters=int(reference_characters) if reference_characters else None,
         require_citations=not native_authoring and bool(writing_policy.get("require_citations", True)),
@@ -1802,7 +1834,7 @@ def create_project(
         )
         selected_space_id = writing_graph_release.space_id
     if payload.space_id:
-        release = _release_for_space(db, payload.space_id, user)
+        release = _release_for_space(db, payload.space_id, user, allow_unpublished=True)
         writing_graph_release = writing_graph_release or _latest_writing_graph_release(db, payload.space_id, user)
     elif selected_space_id:
         release = _release_for_space(db, selected_space_id, user)
@@ -2421,7 +2453,10 @@ def add_project_material(
     document = _tenant_row(db, Document, payload.document_id, user.tenant_id, "材料")
     if not has_space_permission(db, user, document.space_id, "read"):
         raise HTTPException(status_code=403, detail="无权使用该材料")
-    allowed_spaces, _ = _release_scope(db, project, user)
+    # Materials can be prepared before any index release exists. Retrieval
+    # still requires a published snapshot through its own _release_scope guard.
+    allowed_spaces = ([project.knowledge_space_id] if not project.knowledge_product_release_id and project.knowledge_space_id
+                      else _release_scope(db, project, user)[0])
     if document.space_id not in allowed_spaces:
         raise HTTPException(status_code=409, detail="材料不属于当前项目选择的知识空间")
     version_id = payload.version_id or document.current_version_id
@@ -3370,6 +3405,15 @@ def start_report_generation(
             computation_result = run_project_baseline_computations(project.id, user=user, db=db)
         except HTTPException:
             computation_result = {"items": [], "skipped": True, "reason": "inputs_not_ready"}
+    bundle = (document.applicability or {}).get("asset_bundle") or {}
+    if any(item["definition"]["kind"] == "computation_method" for item in bundle.get("assets") or []):
+        # Adopted, independently verified methods belong to this article,
+        # not to the legacy disaster scenario's calculation switch.
+        from apps.api.writing_assets import ComputeAll, compute_all
+        computation_result = compute_all(document.id, ComputeAll(
+            base_version_id=document.current_version_id, release_id=bundle["release_id"],
+            checksum=bundle["checksum"],
+        ), user=user, db=db)
     current_selected = db.scalar(
         select(AlternativePlan).where(
             AlternativePlan.project_id == project.id,
@@ -3822,6 +3866,7 @@ def stream_report_generation_agent(
         reference_characters = int(revision_draft["target_characters"])
     prompt = build_generation_prompt(
         project_name=project.name,
+        reusable_assets=((document.applicability or {}).get("asset_bundle") or {}).get("assets", []),
         section_plan=section_plan,
         reference_characters=int(reference_characters) if reference_characters else None,
         document_brief={
@@ -4181,11 +4226,8 @@ def finalize_report_generation(
             db.commit()
             raise HTTPException(status_code=422, detail=run.quality_report) from exc
     toolbox_config = dict((scenario.config or {}).get("toolbox") or {})
-    computations = (
-        [serialize_row(row) for row in _latest_computation_rows(db, project.id)]
-        if toolbox_config.get("calculation_enabled", True)
-        else []
-    )
+    computations = [serialize_row(row) for row in _article_computation_rows(
+        db, project, document, user, legacy_enabled=toolbox_config.get("calculation_enabled", True))]
     inference_facts = [
         serialize_row(row)
         for row in db.scalars(
@@ -4206,19 +4248,35 @@ def finalize_report_generation(
     )
     if ((run.input_snapshot or {}).get("chapter_evidence") or {}).get("run_id") != (applied_packet(db, project) or {}).get("run_id"):
         raise HTTPException(409, "生成期间章节依据发生变化，请重新生成；现有正文未覆盖")
-    content, new_bindings = _assemble_checked(
-        run_id=run.id,
-        title=document.title,
-        section_plan=run.section_plan or [],
-        agent_sections=sections,
-        citations=citations,
-        computations=computations,
-        inference_facts=inference_facts,
-        selected_plan=serialize_row(selected_plan) if selected_plan else None,
-        target_sections=dict(toolbox_config.get("target_sections") or {}),
-        knowledge_packet=(run.input_snapshot or {}).get("chapter_evidence"),
-        input_facts=[serialize_row(f) for f in db.scalars(select(ProjectFact).where(ProjectFact.project_id == project.id, ProjectFact.active.is_(True), _active(ProjectFact)))],
-    )
+    try:
+        content, new_bindings = _assemble_checked(
+            run_id=run.id,
+            title=document.title,
+            section_plan=run.section_plan or [],
+            agent_sections=sections,
+            citations=citations,
+            computations=computations,
+            inference_facts=inference_facts,
+            selected_plan=serialize_row(selected_plan) if selected_plan else None,
+            target_sections=dict(toolbox_config.get("target_sections") or {}),
+            knowledge_packet=(run.input_snapshot or {}).get("chapter_evidence"),
+            input_facts=[serialize_row(f) for f in db.scalars(select(ProjectFact).where(ProjectFact.project_id == project.id, ProjectFact.active.is_(True), _active(ProjectFact)))],
+            compact_metrics=bool((document.applicability or {}).get("asset_bundle")),
+        )
+    except HTTPException as exc:
+        if exc.status_code != 422:
+            raise
+        run.status = "quality_failed"
+        run.stage = "binding_validation"
+        run.progress = 100
+        run.error_code = "INVALID_AGENT_BINDINGS"
+        run.error_message = "章节引用的输入或计算结果不符合本次文章约束，未覆盖正文"
+        run.quality_report = {"ok": False, "issues": [{
+            "code": "invalid_agent_bindings", "severity": "error", "message": str(exc.detail),
+        }]}
+        run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        raise HTTPException(422, run.quality_report) from exc
     binding_map = {item["block_id"]: item for item in new_bindings}
     quality = _strict_report_quality(
         db,
@@ -4489,8 +4547,16 @@ def attach_project_knowledge_space(
 ):
     """Attach a business-facing knowledge space to a blank writing project."""
     row = _project(db, project_id, user, "owner")
-    release = _release_for_space(db, payload.space_id, user)
+    release = _release_for_space(db, payload.space_id, user, allow_unpublished=True)
     graph_release = _latest_writing_graph_release(db, payload.space_id, user)
+    if release is None:
+        if row.knowledge_product_release_id or row.status == "published":
+            raise HTTPException(409, "已有知识基线的项目不能切换到未加工空间")
+        row.knowledge_space_id = payload.space_id
+        audit(db, user.tenant_id, user.id, "writing.project.source.prepare", "writing_project", row.id,
+              {"space_id": payload.space_id, "published_snapshot": False})
+        _commit(db)
+        return {**serialize_row(row), "source_preparation_only": True}
     return _rebase_project_to_release(
         db, row=row, release=release, user=user, reason=payload.reason,
         space_id=payload.space_id, writing_graph_release=graph_release,
@@ -4803,6 +4869,13 @@ def confirm_fact(
     row = _tenant_row(db, ProjectFact, fact_id, user.tenant_id, "事实")
     if row.project_id != project_id or not row.active:
         raise HTTPException(status_code=404, detail="事实不存在")
+    value_to_confirm = payload.new_value if payload.decision == "override" else row.value
+    if payload.decision != "reject" and not any(
+        value is not None and (not isinstance(value, str) or bool(value.strip()))
+        for key, value in (value_to_confirm or {}).items()
+        if key in {"number", "value", "text", "boolean"}
+    ):
+        raise HTTPException(status_code=422, detail="请先填写当前值，空输入不能确认")
     if payload.decision == "override":
         _, _, writing_policy = _scenario_runtime_settings(db, project)
         if writing_policy.get("allow_manual_override", True) is False:
@@ -4841,7 +4914,7 @@ def confirm_fact(
             source_type="manual_override",
             source_id=previous.id,
             source_version=str(previous.version),
-            source_locator={"supersedes_fact_id": previous.id, "reason": payload.reason},
+            source_locator={**(previous.source_locator or {}), "supersedes_fact_id": previous.id, "reason": payload.reason},
             confidence=1.0,
             verification_status="verified",
             freshness_status="manual_override",
@@ -5118,8 +5191,15 @@ def preview_input_changes(
                 old_text = "".join(str(child.get("text") or "") for child in node.get("children") or [] if isinstance(child, dict))
                 label = str(calculation.get("label") or node.get("label") or "测算结果")
                 unit = str(calculation.get("unit") or node.get("unit") or "")
+                # Plate renders a typed metric from its value, not necessarily
+                # from child text. An empty leaf does not mean a missing block.
+                if not old_text.strip():
+                    old_value = node.get("value")
+                    if old_value is None:
+                        old_value = calculation["old_value"]
+                    old_text = f"{label}：{old_value}{unit}"
                 content_proposals.append({
-                    "block_id": block_id, "section": section, "kind": "computed_metric", "selectable": True,
+                    "block_id": block_id, "section": f"{section} · {label}", "kind": "computed_metric", "selectable": True,
                     "old_text": old_text, "new_text": f"经核验与测算，{label}为{calculation['new_value']}{unit}。",
                     "reason": "确定性公式已重新预览；选择是否更新正文中的测算结果",
                     "impact_type": "definite",
@@ -6263,13 +6343,18 @@ def collaboration_token(
 ):
     document, project = _document(db, document_id, user, "viewer")
     role = _project_role(db, project, user) or "viewer"
-    token, room, expires_at = create_collaboration_access_token(
-        document_id=document.id,
-        project_id=project.id,
-        user_id=user.id,
-        tenant_id=user.tenant_id,
-        role=role,
-    )
+    try:
+        token, room, expires_at = create_collaboration_access_token(
+            document_id=document.id,
+            project_id=project.id,
+            user_id=user.id,
+            tenant_id=user.tenant_id,
+            role=role,
+        )
+    except RuntimeError as exc:
+        # Missing/invalid server credentials must not produce a traceback or
+        # leak a server path to the author. Never issue an insecure fallback.
+        raise HTTPException(status_code=503, detail="协同编辑服务尚未就绪，请联系管理员检查配置后重新连接") from exc
     audit(
         db,
         user.tenant_id,
@@ -7113,22 +7198,20 @@ def create_export(
         template_version = _tenant_row(db, ExportTemplateVersion, payload.template_version_id, user.tenant_id, "导出模板版本")
         if template_version.status != "active":
             raise HTTPException(status_code=409, detail="导出模板版本未激活")
+    from packages.platform.writing_export import bound_authority_ids
+    bound_fact_ids, bound_computation_ids = bound_authority_ids(version.content or [], bindings)
+    fact_scope = ProjectFact.id.in_(bound_fact_ids) if bound_fact_ids else ProjectFact.active.is_(True)
     facts = [
         serialize_row(row)
         for row in db.scalars(
             select(ProjectFact).where(
                 ProjectFact.project_id == project.id,
-                ProjectFact.active.is_(True),
+                fact_scope,
                 ProjectFact.verification_status == "verified",
                 _active(ProjectFact),
             ).order_by(ProjectFact.fact_key)
         )
     ]
-    bound_computation_ids = {
-        str(item.get("computation_run_id"))
-        for item in bindings.values()
-        if item.get("computation_run_id")
-    }
     computation_rows = (
         list(
             db.scalars(

@@ -230,6 +230,13 @@ def execute_formula(
 ) -> dict[str, Any]:
     """Execute a whitelisted deterministic formula; expressions are never evaluated."""
     params = parameters or {}
+    if operation == "writing_asset_expression":
+        from .writing_assets_schema import ComputationMethod, compute_method
+        method = ComputationMethod.model_validate(params.get("asset_method"))
+        value = compute_method(method, inputs)
+        return {"operation": operation, "value": float(value), "decimal_value": value,
+                "inputs": inputs, "parameters": params,
+                "rounding": {"mode": "half_up", "digits": method.precision}}
     if operation == "resource_gap":
         result = max(Decimal(0), _number(inputs, "required") - _number(inputs, "available"))
     elif operation == "shelter_gap":

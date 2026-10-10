@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ReportGenerationPanel } from '../src/App';
+import { hasWrittenContent, writingContextReady, ReportGenerationPanel } from '../src/App';
 import type { Project, WritingDocument, WritingGenerationRun } from '../src/types/domain';
 
 const request = vi.fn();
@@ -43,6 +43,28 @@ afterEach(() => {
 });
 
 describe('报告生成失败恢复', () => {
+  it('不要求普通文章求解无关方案或推演，进度不夹带测试宣传文案', async () => {
+    request.mockResolvedValueOnce(json([]));
+    renderPanel();
+    await waitFor(() => expect(request).toHaveBeenCalledOnce());
+    expect(screen.queryByText('规则结论')).not.toBeInTheDocument();
+    expect(screen.queryByText('采用方案')).not.toBeInTheDocument();
+    expect(screen.queryByText(/固定动画/)).not.toBeInTheDocument();
+  });
+  it('项目切换期间旧文章不能启动新项目的助手会话', () => {
+    const oldDocument = { id: 'old-article', project_id: 'old-project', title: '旧文稿', status: 'draft' };
+    expect(writingContextReady(project.id, null, oldDocument)).toBe(false);
+    expect(writingContextReady(project.id, project, oldDocument)).toBe(false);
+    expect(writingContextReady(project.id, { ...project, id: 'old-project' }, null)).toBe(false);
+    expect(writingContextReady(project.id, project, { ...oldDocument, project_id: project.id })).toBe(true);
+    expect(writingContextReady(project.id, project, null)).toBe(true);
+  });
+  it('创建版本和采用目录不冒充初稿已生成，表格内真实文字算正文', () => {
+    expect(hasWrittenContent([])).toBe(false);
+    expect(hasWrittenContent([{ type: 'p', children: [{ text: '  ' }] }])).toBe(false);
+    expect(hasWrittenContent([{ type: 'table', children: [{ type: 'tr', children: [{ type: 'td', children: [{ text: '投资估算' }] }] }] }])).toBe(true);
+    expect(hasWrittenContent([{ type: 'img', url: '/api/v1/files/project-image' }])).toBe(true);
+  });
   it('长样稿按章节连续执行真实 SSE，并在全部章节检查完成后打开 Plate', async () => {
     request.mockResolvedValueOnce(json([]))
       .mockResolvedValueOnce(json(created))

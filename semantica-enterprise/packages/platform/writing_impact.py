@@ -43,7 +43,10 @@ def _text_leaves(node: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _number_pattern(value: str) -> re.Pattern[str]:
-    return re.compile(r"(?<![\d.])" + re.escape(value) + r"(?![\d.])")
+    # Equivalent integer displays also count as occurrences. Ignoring 10000.00
+    # while matching a conversion constant 10000 is not a unique safe match.
+    suffix = r"(?:\.0+)?" if "." not in value else ""
+    return re.compile(r"(?<![\d.])" + re.escape(value) + suffix + r"(?![\d.])")
 
 
 def propose_bound_text_change(
@@ -68,6 +71,13 @@ def propose_bound_text_change(
     old_text = "".join(leaf["text"] for leaf in original_leaves)
     if not changes:
         return {"selectable": False, "reason": "没有可验证的数值变化", "old_text": old_text}
+    if node.get("numeric_binding_version") == 1:
+        # New report output has passed position registration. Unbound literals
+        # are not authorities, including conversion constants equal to a cost.
+        proposed["freshness_status"] = "current"
+        return {"selectable": True, "review_only": True,
+            "reason": "本段依据已变化，但无已绑定数值需要替换；请复核后保留原文",
+            "old_text": old_text, "new_text": old_text, "new_node": proposed}
     edits: dict[int, list[tuple[int, int, str]]] = {}
     for change in changes:
         old_value = _display_value(change.get("old_value"))
@@ -83,10 +93,16 @@ def propose_bound_text_change(
         if not occurrences:
             continue
         index, match = occurrences[0]
+        source = original_leaves[index]["text"]
+        if (source[:match.start()].rstrip()[-1:] in {"÷", "×", "/", "*", "=", "+", "−"}
+                or source[match.end():].lstrip()[:1] in {"÷", "×", "/", "*", "=", "+", "−"}):
+            return {"selectable": False, "reason": "数值出现在公式中且没有精确位置绑定，请人工核对", "old_text": old_text}
         leaf_edits = edits.setdefault(index, [])
         if any(match.start() < end and match.end() > start for start, end, _value in leaf_edits):
             return {"selectable": False, "reason": "同一数值对应多个变更，需补充精确位置绑定", "old_text": old_text}
-        leaf_edits.append((match.start(), match.end(), new_value))
+        digits = len(match.group().split(".")[1]) if "." in match.group() else 0
+        display = format(numeric_value(change["new_value"]), f".{digits}f") if digits else new_value
+        leaf_edits.append((match.start(), match.end(), display))
     if not edits:
         # The block has a registered dependency but does not repeat the changed
         # numeric value.  A reviewer may explicitly keep its wording while the

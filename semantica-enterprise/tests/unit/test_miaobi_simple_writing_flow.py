@@ -26,7 +26,7 @@ MIAOBI_APP = (ROOT / "apps/miaobi-web/src/App.tsx").read_text(encoding="utf-8")
 
 
 def test_upload_from_miaobi_switches_zhiku_to_the_task_space() -> None:
-    assert "const uploadSpaceId = materials[0]?.document.space_id || knowledgeContext?.spaces[0]?.id || '';" in MIAOBI_APP
+    assert "const uploadSpaceId = project.knowledge_space_id || materials[0]?.document.space_id || knowledgeContext?.spaces[0]?.id || '';" in MIAOBI_APP
     assert "formData.set('space_id', uploadSpaceId)" in MIAOBI_APP
     assert "'/documents/upload'" in MIAOBI_APP
     assert "knowledge-release/refresh" in MIAOBI_APP

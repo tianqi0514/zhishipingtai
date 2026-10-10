@@ -83,4 +83,26 @@ describe('项目资料池', () => {
       'href', '/api/v1/writing/projects/project-1/writing-support.zip?document_id=article-1',
     );
   });
+
+  it('空空间可以先上传解析，不伪造知识发布版本', async () => {
+    const request = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/documents/upload')) return json({ document: { id: 'source-1' }, version: { id: 'version-1' } });
+      if (url.endsWith('/documents/source-1')) return json({ status: 'ready', current_version_id: 'version-1', versions: [
+        { id: 'version-1', status: 'ready', parse_summary: { knowledge_auto_process: false } },
+      ] });
+      if (url.endsWith('/materials')) return json({ id: 'material-1' });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal('fetch', request);
+    const onChanged = vi.fn(async () => {});
+    render(<MaterialsPanel project={project} document={null} materials={[]} knowledgeContext={null}
+      onChanged={onChanged} onError={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: '上传资料' }));
+    fireEvent.change(screen.getByLabelText('文件'), { target: { files: [new File(['内容'], '资料.md')] } });
+    fireEvent.click(screen.getByRole('button', { name: '上传 1 个文件' }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
+    expect(request.mock.calls.some(([url]) => String(url).endsWith('/knowledge-release/refresh'))).toBe(false);
+    expect(screen.getByRole('status')).toHaveTextContent('检索索引待发布');
+  });
 });

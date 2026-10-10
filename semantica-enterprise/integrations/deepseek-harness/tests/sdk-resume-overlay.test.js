@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
@@ -7,7 +8,7 @@ import { patchSdkServer } from '../patch-sdk-server.mjs'
 
 
 test('SDK bridge overlay resumes a persisted session and fails closed on drift', () => {
-  const installed = '/opt/deepseek-harness/packages/sdk/server/src/server.ts'
+  const installed = resolve(process.env.DSH_ROOT || '/opt/deepseek-harness', 'packages/sdk/server/src/server.ts')
   const target = existsSync(installed)
     ? installed
     : fileURLToPath(new URL('../../../../deepseek-harness/packages/sdk/server/src/server.ts', import.meta.url))

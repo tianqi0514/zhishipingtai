@@ -67,4 +67,4 @@ def test_writing_graph_canvas_fills_stage_and_explains_layers() -> None:
     assert "color:item.color" in javascript
     assert "color: item.color || colorForType(item.type)" in graph_renderer
     assert "const edgeColor = edge.color" in graph_renderer
-    assert html.count("20260917-writing-graph-layout") == 3
+    assert html.count("20261010-platform-writing-assets") == 3

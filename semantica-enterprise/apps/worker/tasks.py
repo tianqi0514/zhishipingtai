@@ -94,6 +94,45 @@ from packages.platform.media import (
 )
 from packages.platform.media_policy import resolve_media_policy
 from packages.platform.writing_graph import process_writing_graph_version
+from packages.platform.writing_assets import process_writing_assets
+
+
+@celery_app.task(bind=True, autoretry_for=(), name="writing.extract_assets")
+def extract_writing_assets_task(self, job_id: str) -> dict[str, Any]:
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        if job is None:
+            return {"error": "job_not_found"}
+        if job.status in {"succeeded", "cancelled"}:
+            return job.result or {}
+        job.status = "running"; job.started_at = now(); job.progress = 5
+        db.commit()
+        try:
+            version = db.get(DocumentVersion, job.input["version_id"])
+            document = db.get(Document, version.document_id) if version else None
+            model = db.get(ModelConfig, job.input["model_config_id"])
+            if not version or version.tenant_id != job.tenant_id or not document or document.deleted_at is not None:
+                raise ValueError("资料版本不可用")
+            if not model or model.tenant_id != job.tenant_id or not model.enabled or model.deleted_at is not None or model.last_test_status == "failed":
+                raise ValueError("抽取模型当前不可用")
+            secret = decrypt_secret(model.api_key_encrypted)
+            if not secret: raise ValueError("抽取模型未配置凭据")
+            _step(db, job.id, "writing_assets_extract", 1, "running")
+            metrics = process_writing_assets(db, document=document, version=version,
+                model_config_id=model.id, api_key=secret, model=model.model_name, base_url=model.base_url,
+                material_role=job.input["material_role"], request_parameters=(model.config or {}).get("parameters"),
+                actor_id=job.input.get("actor_id"),
+                on_progress=lambda completed, total: _progress(db, job, 5 + int(90 * completed / max(total, 1))))
+            job.result = metrics; job.status = "succeeded"; job.progress = 100
+            job.finished_at = now(); job.error_code = None; job.error_message = None
+            _step(db, job.id, "writing_assets_extract", 1, "succeeded", metrics)
+        except Exception:
+            job.status = "failed"; job.finished_at = now()
+            job.error_code = "WRITING_ASSET_EXTRACTION_FAILED"
+            job.error_message = "写作资产抽取未完成，已完成批次保留；请检查模型及抽取记录后重试。"
+            _step(db, job.id, "writing_assets_extract", 1, "failed", {"message": job.error_message})
+        db.commit()
+        return job.result or {"error_code": job.error_code}
 
 
 def now() -> datetime:
@@ -898,6 +937,13 @@ def parse_version_task(self, job_id: str) -> dict[str, Any]:
                 and source.source_type == "database"
                 and (source.config or {}).get("knowledge_index_enabled") is False
             ) and not bool(summary.get("delegated_media_manifest"))
+            # Expose whether processing is scheduled; parsed-only preparation
+            # must never be presented as a published retrieval index.
+            version.parse_summary = {
+                **(version.parse_summary or {}),
+                "knowledge_auto_process": bool(settings.knowledge_auto_process and source_knowledge_enabled),
+            }
+            db.commit()
             if settings.knowledge_auto_process and source_knowledge_enabled and not media_cache_hit:
                 knowledge_key = (
                     f"knowledge-reprocess:{version.id}:{job.id}"

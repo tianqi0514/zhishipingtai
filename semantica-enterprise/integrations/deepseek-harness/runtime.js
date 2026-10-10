@@ -1,13 +1,19 @@
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
-import { DeepSeekHarness } from '/opt/deepseek-harness/packages/sdk/client/src/index.ts'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { evidenceRequirements, WRITING_REVISION_ACTIONS } from './query-policy.js'
 
+// Local verification uses a clean export of the same pinned SDK, not the
+// developer's potentially modified Harness checkout. Container defaults stay
+// unchanged, and all these paths are operator configuration, not tool input.
+const HARNESS_ROOT = resolve(process.env.DSH_ROOT || '/opt/deepseek-harness')
+const { DeepSeekHarness } = await import(pathToFileURL(`${HARNESS_ROOT}/packages/sdk/client/src/index.ts`).href)
 const PORT = Number(process.env.PORT || 8090)
 const PLATFORM_API = (process.env.PLATFORM_API || 'http://api:8080/api/v1').replace(/\/$/, '')
 const SERVICE_SECRET_FILE = process.env.AGENT_SERVICE_SECRET_FILE || '/run/secrets/agent_service_secret'
 const DSH_HOME = process.env.DSH_HOME || '/var/lib/chuanshen-harness'
-const PATCH = process.env.DSH_PATCH || '/opt/deepseek-harness/packages/integration/chuanshen-knowledge/cordis.patch.yml'
+const PATCH = process.env.DSH_PATCH || `${HARNESS_ROOT}/packages/integration/chuanshen-knowledge/cordis.patch.yml`
 const sessions = new Map()
 const closingSessions = new Map()
 
@@ -98,6 +104,9 @@ async function harnessFor(sessionId) {
   if (current) await current.harness.close().catch(() => {})
   const env = {
     ...process.env,
+    // The SDK child uses the same authoritative API as the gateway by
+    // default. Keep the explicit tool override for split-network deployments.
+    KNOWLEDGE_API_BASE: process.env.KNOWLEDGE_API_BASE || PLATFORM_API,
     DSH_MODEL_API_KEY: model.api_key,
     DSH_MODEL_BASE_URL: model.base_url || 'https://api.openai.com/v1',
     DSH_MODEL_NAME: model.model_name,
@@ -115,7 +124,7 @@ async function harnessFor(sessionId) {
     profile: 'sdk-minimal',
     patches: [PATCH],
     dshHome: DSH_HOME,
-    cwd: '/workspace',
+    cwd: process.env.DSH_WORKSPACE || '/workspace',
     provider: 'knowledge-model',
     model: model.model_name,
     reasoningEffort: model.enable_thinking === false ? 'off' : 'high',
@@ -470,4 +479,4 @@ async function shutdown() {
 
 process.once('SIGTERM', shutdown)
 process.once('SIGINT', shutdown)
-server.listen(PORT, '0.0.0.0')
+server.listen(PORT, process.env.AGENT_RUNTIME_BIND_HOST || '0.0.0.0')

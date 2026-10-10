@@ -1,6 +1,8 @@
 # Nexus One
 
-Nexus One 是基于 Semantica 0.6.6 源码增量开发的组织级知识平台。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理画像、OpenSearch/Qdrant/FalkorDB 三路检索、可编辑 3D 图谱、由 DeepSeek Harness 驱动的多轮知识问答，以及按“知识供给—能力场景—上线测试—接入发布—运行反馈”组织的应用构建闭环。当前交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
+Nexus One 是基于 Semantica 源码增量开发的组织级知识平台。当前开发分支已将内核更新到 0.7.0 及锁定的后续源码 `b5e380a4b98256d24afd5d7608bde3d9785f52bb`；这不表示测试服务器已升级，也不表示所有新增内核能力已经接入前端。系统包含租户与知识空间权限、29 类数据源、文档版本与增量加工、多模态解析、文档治理、三路检索、知识图谱、规则推演、DeepSeek Harness 和 Plate 妙笔。既有交付版本为 `0.10.0`，Web 地址为 <http://localhost:8080/>。
+
+本轮升级范围、16 类资产契约、HTML 参考审计及未完成项见 [升级设计与状态](docs/platform-upgrade/PLATFORM_WRITING_ASSETS_UPGRADE.md)；实际测试结果和操作步骤见 [验收记录](docs/platform-upgrade/VALIDATION.md)。历史定义不会自动成为本次项目事实，未经核验的公式或模型生成的工具代码不能执行。
 
 仓库附带可重复执行的验收数据脚本：`tests/e2e/seed_guolian_acceptance.py` 建立集团组织、角色、空间和 29 份真实业务多模态资料，`tests/e2e/seed_structured_acceptance.py` 建立 MySQL/PostgreSQL 经营数据、本体和激活映射，`tests/e2e/seed_source_acceptance.py` 用于协议数据源，`tests/e2e/seed_knowledge_analysis_acceptance.py` 建立带 100% 来源证据的制度适用与供应商风险推演空间。标准答案与使用顺序见 [集团验收数据集](docs/GUOLIAN_ACCEPTANCE_DATASET.md) 和 [集团业务旅程](docs/GROUP_BUSINESS_USER_JOURNEY.md)。
 

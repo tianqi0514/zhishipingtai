@@ -20,11 +20,11 @@ const MODULE_TABS={
   system:[['system','管理总览'],['orgs','组织机构'],['users','用户管理'],['roles','角色权限'],['audits','审计日志']],
 };
 const STATUS_LABELS={available:'正常',unavailable:'不可用',ready:'就绪',succeeded:'已完成',success:'成功',failed:'失败',partial_failed:'部分失败',running:'运行中',processing:'处理中',queued:'排队中',uploaded:'已上传',fetched:'已同步',unchanged:'未变化',enabled:'已启用',disabled:'已停用',published:'已发布',preview:'预览结果',invalidated:'已失效',active:'生效中',draft:'草稿',suspended:'已暂停',retired:'已退役',revoked:'已撤销',converted:'已转治理',triaged:'已分派',dismissed:'已关闭',publishing:'发布中',publish_failed:'发布失败',staged:'待发布',resolved:'已处理',handled:'已处理',ignored:'已忽略',open:'待治理',suppressed:'已屏蔽',rolled_back:'已回滚',superseded:'已替代',partial:'部分成功',not_configured:'未配置',not_tested:'未检测',cancelled:'已取消'};
-const JOB_TYPE_LABELS={parse_document:'文档解析',process_knowledge:'知识加工',sync_source:'数据源同步',publish_curation:'治理发布',curation_publish:'治理发布',run_inference:'知识分析',knowledge_inference:'知识分析',publish_inference:'推理发布',rollback_inference:'推理回滚',evaluation_run:'应用上线测试'};
+const JOB_TYPE_LABELS={parse_document:'文档解析',process_knowledge:'知识加工',writing_assets:'写作资产提炼',sync_source:'数据源同步',publish_curation:'治理发布',curation_publish:'治理发布',run_inference:'知识分析',knowledge_inference:'知识分析',publish_inference:'推理发布',rollback_inference:'推理回滚',evaluation_run:'应用上线测试'};
 const jobTypeLabel=value=>JOB_TYPE_LABELS[value]||String(value||'任务').replaceAll('_',' ');
 function jobDurableTarget(row={}){const input=row.input||{},target=input.version_id||input.source_id||input.inference_run_id||input.curation_batch_id||input.mapping_id||input.space_id||row.id||'';return `${row.job_type||'job'}:${target}`}
 function unresolvedFailedJobs(rows=[]){const latest=new Map();for(const row of rows){const key=jobDurableTarget(row);if(!latest.has(key))latest.set(key,row)}return [...latest.values()].filter(row=>row.target_current!==false&&['failed','partial_failed'].includes(row.status))}
-const JOB_STEP_LABELS={normalize_split:'内容切片',document_profile:'文档画像',semantic_extract:'知识图谱抽取',writing_graph_extract:'写作图谱抽取',governance:'实体关系治理',graph_publish:'图谱发布',index_publish:'检索索引发布',resolve_effective:'读取治理结果'};
+const JOB_STEP_LABELS={normalize_split:'内容切片',document_profile:'文档画像',semantic_extract:'知识图谱抽取',writing_graph_extract:'写作图谱抽取',writing_assets_extract:'写作结构与方法提炼',governance:'实体关系治理',graph_publish:'图谱发布',index_publish:'检索索引发布',resolve_effective:'读取治理结果'};
 const CAPABILITY_DISPLAY_NAMES={semantica:'语义建模引擎'};
 const capabilityDisplayName=name=>CAPABILITY_DISPLAY_NAMES[String(name||'').toLowerCase()]||name;
 const KNOWLEDGE_PROCESSING_LABELS={vector:'仅检索',graph:'仅图谱',both:'检索 + 图谱'};
@@ -396,8 +396,9 @@ async function renderReleaseRecords(){
 }
 
 async function renderCapabilities(){
-  actions('<button id="cap-refresh">重新检测</button>');const d=await api('/capabilities');
-  page('能力检测',table(['能力','版本','用途','状态','详情'],d.items.map(x=>`<tr><td>${esc(capabilityDisplayName(x.name))}</td><td class="mono">${esc(x.version||'—')}</td><td>${esc(x.required_for)}</td><td>${status(x.available?'available':'unavailable')}</td><td>${esc(x.detail||'—')}</td></tr>`)));
+  actions('<button id="cap-refresh">重新检测</button>');const [d,writing]=await Promise.all([api('/capabilities'),api('/writing-assets/kinds')]);
+  const engine=writing.engine;
+  page('能力检测',`<section class="panel"><div class="panel-heading"><b>语义建模引擎 ${esc(engine.version)}</b><small>写作资产支持 ${writing.kinds.length} 类定义</small></div><p>已接入：抽取 Schema · 本体质量检查</p><details><summary>原生能力与接入边界</summary>${engine.limitations.map(item=>`<p>${esc(item)}</p>`).join('')}<small>源码版本 ${esc(engine.source_commit.slice(0,12))}</small></details></section>`+table(['能力','版本','用途','状态','详情'],d.items.map(x=>`<tr><td>${esc(capabilityDisplayName(x.name))}</td><td class="mono">${esc(x.version||'—')}</td><td>${esc(x.required_for)}</td><td>${status(x.available?'available':'unavailable')}</td><td>${esc(x.detail||'—')}</td></tr>`)));
   $('#cap-refresh').onclick=renderCapabilities;
 }
 

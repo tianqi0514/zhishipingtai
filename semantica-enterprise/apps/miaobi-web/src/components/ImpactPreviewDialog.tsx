@@ -15,6 +15,10 @@ export function ImpactPreviewDialog({ preview, submitting, onCancel, onApply }: 
   const definite = useMemo(() => selectable.filter((item) => item.impact_type !== 'suspected'), [selectable]);
   const [accepted, setAccepted] = useState<string[]>(() => selectable.map((item) => item.block_id));
   const allSelected = selectable.length > 0 && accepted.length === selectable.length;
+  const authorityLabels = new Map([
+    ...preview.changes.map((item) => [item.fact_key, item.label] as const),
+    ...(preview.impact.calculations || []).map((item) => [item.result_key, item.label] as const),
+  ]);
   const toggle = (blockId: string) => setAccepted((current) => current.includes(blockId)
     ? current.filter((id) => id !== blockId)
     : [...current, blockId]);
@@ -27,7 +31,9 @@ export function ImpactPreviewDialog({ preview, submitting, onCancel, onApply }: 
     <p className="field-help">勾选控制正文是否采用新值；未勾选的段落保留原文并标记待核对。无法安全替换的表述不会被自动勾选。</p>
     <div className="impact-proposals">{(preview.impact.content_proposals || []).map((item) => <label className={item.selectable ? 'impact-proposal' : 'impact-proposal review-only'} key={item.block_id}>
       <input type="checkbox" checked={accepted.includes(item.block_id)} disabled={submitting || !item.selectable} onChange={() => toggle(item.block_id)} aria-label={`采用${item.section}中的更新`} />
-      <span><b>{item.section} · {item.kind === 'computed_metric' ? '测算值' : '正文'} · {item.impact_type === 'suspected' ? '疑似影响' : '确定影响'}</b><small>{item.dependency_reasons?.length ? item.dependency_reasons.join('；') : item.reason || (item.selectable ? '可更新' : '待人工核对')}</small><em>{item.old_text || '当前内容未找到'}</em>{item.selectable && <strong>→ {item.new_text}</strong>}</span>
+      <span><b>{item.section} · {item.kind === 'computed_metric' ? '测算值' : item.kind === 'table' ? '表格' : '正文'} · {item.impact_type === 'suspected' ? '疑似影响' : '确定影响'}</b><small>{item.dependency_reasons?.length ? item.dependency_reasons.join('；') : item.reason || (item.selectable ? '可更新' : '待人工核对')}</small>
+        {item.kind === 'table' && !!item.occurrence_updates?.length ? <>{item.occurrence_updates.map((change) => <div key={change.occurrence_id}><b>{authorityLabels.get(change.fact_key) || '已绑定指标'}</b><span>{change.old_text} → <strong>{change.new_text}</strong> {change.unit || ''}</span></div>)}<small>只更新这些已绑定的单元格，公式与其他内容保持不变。</small></> : <><em>{item.old_text || '当前内容未找到'}</em>{item.selectable && <strong>→ {item.new_text}</strong>}</>}
+      </span>
     </label>)}{!preview.impact.content_proposals?.length && <p className="field-help">当前文章没有登记受影响的内容；输入仍可更新，文章保持原样。</p>}</div>
     {!!preview.impact.suspected_impacts?.length && <section className="suspected-impact-list"><h3>疑似影响 · 仅提示</h3><p className="field-help">这些文字没有登记权威绑定，系统不会自动修改。</p>{preview.impact.suspected_impacts.map((item) => <div key={item.block_id}><b>{item.section}</b><span>{item.matched_labels?.length ? `提到：${item.matched_labels.join('、')}；` : ''}{item.reason}</span></div>)}</section>}
     {!!preview.impact.propagation?.impacts?.length && <details className="propagation-paths"><summary>查看传播路径</summary>{preview.impact.propagation.impacts.map((item) => <div key={`${item.node_id}-${item.path.join('-')}`}><b>{item.direct ? '直接' : '间接'} · {item.action}</b><code>{item.path.join(' → ')}</code></div>)}</details>}

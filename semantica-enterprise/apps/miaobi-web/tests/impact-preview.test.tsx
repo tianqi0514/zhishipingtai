@@ -27,6 +27,17 @@ const preview: WritingInputChange = {
 };
 
 describe('指标影响预览', () => {
+  it('表格逐项展示精确指标变更，不把单元格拼成无法阅读的长文本', () => {
+    render(<ImpactPreviewDialog preview={{ ...preview, impact: { ...preview.impact, content_proposals: [{
+      block_id: 'table', section: '统计表', kind: 'table', selectable: true,
+      old_text: '不应该展示的单元格拼接', new_text: '不应该展示的新表格拼接',
+      occurrence_updates: [{ occurrence_id: 'gap-cell', fact_key: 'rescue_gap', old_text: '180', new_text: '100', unit: '人' }],
+    }] } }} submitting={false} onCancel={vi.fn()} onApply={vi.fn()} />);
+    expect(screen.getByText('统计表 · 表格 · 确定影响')).toBeInTheDocument();
+    expect(screen.getByText('只更新这些已绑定的单元格，公式与其他内容保持不变。')).toBeInTheDocument();
+    expect(screen.queryByText('不应该展示的单元格拼接')).not.toBeInTheDocument();
+    expect(screen.getAllByText('搜救人员缺口')).toHaveLength(2);
+  });
   it('列出可验算结果及逐项文章提案，不让待人工核对内容被勾选', () => {
     const onApply = vi.fn();
     render(<ImpactPreviewDialog preview={preview} submitting={false} onCancel={vi.fn()} onApply={onApply} />);

@@ -180,7 +180,7 @@ export type WritingDocument = {
   document_type?: string;
   purpose?: string;
   audience?: string;
-  applicability?: { region?: string; organization?: string; subject?: string; time_range?: string; sample_profile?: WritingSampleProfile };
+  applicability?: { region?: string; organization?: string; subject?: string; time_range?: string; sample_profile?: WritingSampleProfile; native_outline?: { sections?: unknown[] }; asset_bundle?: { release_id: string; checksum: string; assets: Array<{ id: string; definition: { kind: string } }> } };
   writing_requirements?: string;
   adopted_material_ids?: string[] | null;
   scenario_package_version_id?: string;
@@ -244,6 +244,7 @@ export type WritingInputChange = {
     content_proposals?: Array<{
       block_id: string; section: string; kind?: string; selectable: boolean;
       old_text?: string; new_text?: string; reason?: string;
+      occurrence_updates?: Array<{ occurrence_id: string; fact_key: string; old_text: string; new_text: string; unit?: string }>;
       impact_type?: 'definite' | 'suspected'; dependency_reasons?: string[];
     }>;
     suspected_impacts?: Array<{ block_id: string; section: string; reason: string; matched_labels?: string[]; automatic_update?: boolean }>;

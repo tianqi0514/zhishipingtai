@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     local_storage_path: Path = Path("./data/objects")
     use_local_object_store: bool = False
 
-    semantica_required_version: str = "0.6.6"
+    semantica_required_version: str = "0.7.0"
     kimi_api_key_file: Path = Path("/run/secrets/kimi_api_key")
     max_upload_bytes: int = 100 * 1024 * 1024
     max_image_upload_bytes: int = 50 * 1024 * 1024

@@ -1599,6 +1599,37 @@ class WritingExtractionRun(Base, TimestampMixin):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class WritingAssetVersion(Base, TimestampMixin):
+    __tablename__ = "writing_asset_versions"
+    __table_args__ = (UniqueConstraint("tenant_id", "space_id", "asset_key", "version", name="uq_writing_asset_version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    extraction_run_id: Mapped[str] = mapped_column(ForeignKey("writing_extraction_runs.id"), index=True)
+    asset_key: Mapped[str] = mapped_column(String(100), index=True)
+    kind: Mapped[str] = mapped_column(String(50), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(300))
+    definition: Mapped[dict] = mapped_column(JSON)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
+    validation: Mapped[dict] = mapped_column(JSON, default=dict)
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WritingAssetRelease(Base, TimestampMixin):
+    __tablename__ = "writing_asset_releases"
+    __table_args__ = (UniqueConstraint("space_id", "release_number", name="uq_writing_asset_release"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    space_id: Mapped[str] = mapped_column(ForeignKey("knowledge_spaces.id"), index=True)
+    release_number: Mapped[int] = mapped_column(Integer)
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    published_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
 class WritingEntityCandidate(Base, TimestampMixin):
     __tablename__ = "writing_entity_candidates"
     __table_args__ = (

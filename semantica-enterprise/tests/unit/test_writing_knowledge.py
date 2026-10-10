@@ -165,10 +165,10 @@ def test_publication_rejects_stale_narrative(monkeypatch):
     from fastapi import HTTPException
     from apps.api import writing as api
     from apps.api.writing_schemas import WritingDocumentVersionCreate
-    monkeypatch.setattr(api, "_document", lambda *a: (SimpleNamespace(id="doc"), SimpleNamespace(id="project")))
+    monkeypatch.setattr(api, "_document", lambda *a: (SimpleNamespace(id="doc", status="draft", current_version_id=None), SimpleNamespace(id="project")))
     monkeypatch.setattr(api, "_generated_report_quality", lambda *a, **kw: None)
     monkeypatch.setattr(api, "validate_plate_content", lambda *a: [{"code": "stale_paragraph", "block_id": "p"}])
-    db = SimpleNamespace(scalars=lambda *a: [], scalar=lambda *a: 0)
+    db = SimpleNamespace(scalars=lambda *a: [], scalar=lambda *a: 0, refresh=lambda *a, **kw: None)
     with pytest.raises(HTTPException) as error:
         api.create_document_version("doc", WritingDocumentVersionCreate(content=[], publish=True), SimpleNamespace(), db)
     assert error.value.status_code == 409

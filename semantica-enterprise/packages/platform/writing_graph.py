@@ -6,6 +6,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -183,6 +184,18 @@ def writing_evidence_segments(text: str, *, max_chars: int = 600) -> list[dict[s
     return expanded or ([{"text": text, "start": 0, "end": len(text), "key_index": 0}] if text.strip() else [])
 
 
+@dataclass(frozen=True)
+class _EvidenceSource:
+    text: str
+    key: str
+    content_hash: str
+    page_number: int | None
+    structural_path: str | None
+    source_span: dict[str, Any]
+    chunk: Chunk | None = None
+    element: ContentElement | None = None
+
+
 def ensure_writing_evidence(
     db: Session,
     *,
@@ -190,25 +203,45 @@ def ensure_writing_evidence(
     version: DocumentVersion,
     actor_id: str | None = None,
 ) -> list[WritingEvidence]:
-    """Project current parser chunks to immutable, reusable Evidence rows."""
+    """Project real chunks or parsed elements to addressable Evidence.
+
+    Element-backed evidence supports preparation before retrieval indexes exist;
+    it retains real element identity and never invents a published Chunk.
+    """
 
     chunks = list(db.scalars(select(Chunk).where(
         Chunk.version_id == version.id,
         Chunk.deleted_at.is_(None),
         Chunk.status != "superseded",
     ).order_by(Chunk.ordinal)))
-    result: list[WritingEvidence] = []
-    evidence_drafts: list[tuple[Chunk, ContentElement | None, int, dict[str, Any]]] = []
+    sources: list[_EvidenceSource] = []
     for chunk in chunks:
         element = db.get(ContentElement, chunk.element_id) if chunk.element_id else None
-        for segment_index, segment in enumerate(writing_evidence_segments(chunk.text)):
-            evidence_drafts.append((chunk, element, segment_index, segment))
-    for index, (chunk, element, segment_index, segment) in enumerate(evidence_drafts):
+        sources.append(_EvidenceSource(chunk.text, chunk.chunk_id, chunk.content_hash,
+            chunk.page_number, chunk.structural_path, chunk.source_span or {}, chunk, element))
+    if not chunks:
+        elements = list(db.scalars(select(ContentElement).where(
+            ContentElement.version_id == version.id,
+            ContentElement.tenant_id == version.tenant_id,
+            ContentElement.deleted_at.is_(None),
+        ).order_by(ContentElement.ordinal)))
+        for element in elements:
+            if not (element.text or '').strip(): continue
+            sources.append(_EvidenceSource(element.text, f"element:{element.id}",
+                hashlib.sha256(element.text.encode('utf-8')).hexdigest(),
+                element.page_number, element.structural_path, {}, element=element))
+    result: list[WritingEvidence] = []
+    evidence_drafts: list[tuple[_EvidenceSource, int, dict[str, Any]]] = []
+    for source in sources:
+        for segment_index, segment in enumerate(writing_evidence_segments(source.text)):
+            evidence_drafts.append((source, segment_index, segment))
+    for index, (source, segment_index, segment) in enumerate(evidence_drafts):
+        element = source.element
         segment_hash = hashlib.sha256(segment["text"].encode("utf-8")).hexdigest()
         key = stable_evidence_key(
             version.id,
-            chunk.chunk_id,
-            chunk.content_hash,
+            source.key,
+            source.content_hash,
             int(segment.get("key_index", segment_index)),
             segment_hash,
         )
@@ -218,10 +251,10 @@ def ensure_writing_evidence(
             WritingEvidence.deleted_at.is_(None),
         ))
         locator = {
-            "page": chunk.page_number,
-            "structural_path": chunk.structural_path,
+            "page": source.page_number,
+            "structural_path": source.structural_path,
             "source_span": {
-                **(chunk.source_span or {}),
+                **source.source_span,
                 "segment_index": segment_index,
                 "char_start": segment["start"],
                 "char_end": segment["end"],
@@ -236,16 +269,16 @@ def ensure_writing_evidence(
                 space_id=document.space_id,
                 document_id=document.id,
                 document_version_id=version.id,
-                content_element_id=chunk.element_id,
-                chunk_id=chunk.id,
+                content_element_id=element.id if element else None,
+                chunk_id=source.chunk.id if source.chunk else None,
                 evidence_key=key,
                 filename=version.filename,
                 file_version=version.version_number,
                 locator=locator,
                 text=segment["text"],
-                context_before=evidence_drafts[index - 1][3]["text"][-500:] if index else "",
+                context_before=evidence_drafts[index - 1][2]["text"][-500:] if index else "",
                 context_after=(
-                    evidence_drafts[index + 1][3]["text"][:500]
+                    evidence_drafts[index + 1][2]["text"][:500]
                     if index + 1 < len(evidence_drafts) else ""
                 ),
                 content_hash=segment_hash,

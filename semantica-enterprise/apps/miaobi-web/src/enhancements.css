@@ -454,3 +454,30 @@
 .formal-dependency-list>small{flex-basis:100%;color:var(--muted,#667085)}
 .formal-dependency-list .status{display:inline-flex;align-items:center;gap:4px}
 .formal-dependency-list .text-button{margin-left:3px}
+/* Historical asset definitions stay outside the formal Plate body. */
+.asset-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0}
+.asset-actions select{max-width:300px;min-width:150px;border:1px solid #dce2ea;border-radius:8px;padding:8px;background:#fff}
+.asset-list{max-height:340px;overflow:auto}
+.asset-list>article{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #edf0f4}
+.asset-open{display:flex;flex-direction:column;gap:5px;text-align:left;flex:1;min-width:0;background:transparent;border:0;padding:0}
+.asset-open small,.asset-open span{color:#667085;font-size:12px;overflow-wrap:anywhere}
+.asset-dialog{max-height:85vh;width:min(860px,92vw);overflow:auto}
+.asset-definition>div{display:grid;grid-template-columns:110px minmax(0,1fr);padding:8px 0;border-bottom:1px solid #edf0f4}
+.asset-definition dt{color:#667085;font-size:13px}
+.asset-definition dd{margin:0;overflow-wrap:anywhere}
+.asset-definition dd p{margin:0 0 6px;font-size:13px}
+.asset-definition dd .asset-definition{margin:0;font-size:13px}
+.asset-definition dd .asset-definition>div{grid-template-columns:78px minmax(0,1fr);padding:4px 0;border:0}
+.asset-definition-item+.asset-definition-item{margin-top:10px;padding-top:8px;border-top:1px solid #edf0f4}
+.asset-calculation-result{padding:10px 12px;border:1px solid #c7e4db;background:#f3faf7;border-radius:10px}
+.asset-review{border-top:1px solid #edf0f4;margin-top:20px;padding-top:12px}
+.asset-review label{display:block;margin:10px 0}
+.asset-review textarea,.asset-json-editor{width:100%;min-height:110px;font-family:monospace;font-size:12px}
+.asset-json-editor{min-height:300px}
+.asset-sources{max-height:48vh;overflow:auto}
+.asset-sources article{padding:10px 0;border-bottom:1px solid #edf0f4}
+.asset-sources small{display:block;color:#667085}
+.asset-warning{background:#fff7e8;color:#9a6700;padding:10px;border-radius:8px}
+.asset-formula-tests { display: flex; gap: 12px; flex-wrap: wrap; }
+.asset-formula-tests fieldset { flex: 1 1 240px; min-width: 0; border: 1px solid var(--border, #e4e9f2); border-radius: 12px; padding: 12px; }
+.asset-formula-tests label { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; }

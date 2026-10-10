@@ -10,6 +10,7 @@ import { verifyCollaborationToken } from './token.mjs';
 
 const port = Number.parseInt(process.env.PORT || '8092', 10);
 const healthPort = Number.parseInt(process.env.HEALTH_PORT || '8093', 10);
+const bindHost = process.env.COLLABORATION_BIND_HOST || '0.0.0.0';
 const storageRoot = process.env.COLLABORATION_STORAGE_PATH || '/var/lib/miaobi-collab';
 const secretFile = process.env.COLLABORATION_SECRET_FILE || '/run/secrets/agent_service_secret';
 const secret = readFileSync(secretFile, 'utf8').trim();
@@ -39,7 +40,7 @@ async function storeDocument(documentName, document) {
 
 const hocuspocus = new Server({
   port,
-  address: '0.0.0.0',
+  address: bindHost,
   debounce: 800,
   maxDebounce: 5000,
   quiet: true,
@@ -72,7 +73,7 @@ const health = createHttpServer((request, response) => {
 });
 
 await hocuspocus.listen();
-health.listen(healthPort, '0.0.0.0');
+health.listen(healthPort, bindHost);
 
 let stopping = false;
 async function shutdown() {

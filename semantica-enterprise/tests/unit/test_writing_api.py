@@ -24,10 +24,11 @@ from apps.api.agent_internal import (
     _writing_model_capacity,
     agent_writing_context,
     agent_writing_document_outline,
+    agent_writing_chapter_source_pack,
     issue_credential,
 )
 from apps.api.schemas import AgentCredentialRequest
-from apps.api.writing_schemas import AgentWritingRequest
+from apps.api.writing_schemas import AgentWritingRequest, AgentWritingChapterSourcePackRequest
 from packages.platform.database import Base, get_db
 from packages.platform.models import (
     AgentCredential,
@@ -1736,6 +1737,47 @@ def test_writing_agent_session_is_idempotent_and_release_scoped() -> None:
         assert outline["document_title"] == "助手测试文稿"
 
 
+def test_chapter_source_pack_without_graph_keeps_document_and_input_evidence() -> None:
+    with writing_client() as (client, db, release):
+        project = _create_project(client, release.id)
+        article = client.post("/api/v1/writing/documents", json={
+            "project_id": project["id"], "title": "资料与本次输入写作", "content": [],
+        }).json()
+        document = db.get(WritingDocument, article["id"])
+        document.applicability = {"sample_profile": {"status": "confirmed", "chapters": [
+            {"key": "cost", "title": "投资估算", "required_inputs": ["area"], "toolbox_outputs": []},
+        ]}}
+        db.add(ProjectFact(tenant_id=document.tenant_id, project_id=project["id"],
+            fact_key="area", label="本次面积", fact_type="manual_input", value={"number": 20000}, unit="平方米",
+            source_type="manual_input", verification_status="verified", active=True))
+        db.commit()
+        session = client.post(f"/api/v1/writing/projects/{project['id']}/agent-sessions", json={
+            "document_id": document.id, "purpose": "report_generation",
+        }).json()
+        conversation = db.get(Conversation, session["conversation_id"])
+        claims = {"conversation_id": conversation.id, "harness_session_id": conversation.harness_session_id,
+            "tenant_id": conversation.tenant_id, "sub": conversation.user_id,
+            "space_ids": conversation.settings["space_ids"]}
+        payload = AgentWritingChapterSourcePackRequest(conversation_id=conversation.id, section_key="cost")
+        result = agent_writing_chapter_source_pack(payload, claims=claims, db=db)
+        assert result["verified_inputs"][0]["value"] == {"number": 20000}
+        assert result["missing_required_inputs"] == []
+        assert result["writing_graph"]["release_id"] is None
+        assert result["writing_graph"]["available"] is False
+        assert result["writing_graph"]["facts"] == []
+        # Optional absence does not excuse an invalid selected release or scope.
+        document.writing_graph_release_id = "missing-selected-release"
+        db.commit()
+        with pytest.raises(HTTPException) as error:
+            agent_writing_chapter_source_pack(payload, claims=claims, db=db)
+        assert error.value.status_code == 409
+        document.writing_graph_release_id = None
+        db.commit()
+        with pytest.raises(HTTPException) as error:
+            agent_writing_chapter_source_pack(payload, claims={**claims, "space_ids": []}, db=db)
+        assert error.value.status_code == 403
+
+
 def test_parallel_writing_tools_keep_overlapping_short_lived_credentials_valid() -> None:
     with writing_client() as (client, db, release):
         project = _create_project(client, release.id)
@@ -1894,6 +1936,21 @@ def test_collaboration_token_is_short_lived_and_room_scoped(monkeypatch) -> None
         assert payload["role"] == "owner"
         assert payload["read_only"] is False
         assert claims["exp"] - claims["iat"] == 15 * 60
+
+
+def test_collaboration_missing_secret_returns_safe_unavailable_message(monkeypatch) -> None:
+    def unavailable(**kwargs):
+        raise RuntimeError("server-secret-unavailable")
+    monkeypatch.setattr("apps.api.writing.create_collaboration_access_token", unavailable)
+    with writing_client() as (client, _, release):
+        project = _create_project(client, release.id)
+        document = client.post("/api/v1/writing/documents", json={
+            "project_id": project["id"], "title": "缺少协同配置的文稿",
+        }).json()
+        response = client.post(f"/api/v1/writing/documents/{document['id']}/collaboration-token")
+        assert response.status_code == 503
+        assert response.json()["detail"] == "协同编辑服务尚未就绪，请联系管理员检查配置后重新连接"
+        assert "secret" not in response.text and "token" not in response.json()
 
 
 def test_document_comments_bind_to_real_blocks_and_resolve_threads() -> None:

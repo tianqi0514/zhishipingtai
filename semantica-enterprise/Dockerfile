@@ -8,7 +8,7 @@ COPY apps/miaobi-web/index.html apps/miaobi-web/tsconfig.json apps/miaobi-web/vi
 COPY apps/miaobi-web/src ./src
 RUN pnpm build
 
-FROM semantica-local:0.6.6-cce5ea1
+FROM semantica-local:0.7.0-b5e380a
 
 ARG DEBIAN_MIRROR=http://deb.debian.org/debian
 ARG DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security

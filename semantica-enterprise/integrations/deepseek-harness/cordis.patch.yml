@@ -100,4 +100,6 @@
             compactionRetries: 2
             maxOverflowRetries: 2
     - id: chuanshen-knowledge-tools
-      name: '/opt/deepseek-harness/packages/integration/chuanshen-knowledge/index.js'
+      # The pinned Loader anchors relative insert names to this patch file.
+      # Plugin names are identifiers, not config expressions.
+      name: ./index.js

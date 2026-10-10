@@ -1505,7 +1505,12 @@ def agent_writing_chapter_source_pack(
             "verification_status": fact.get("verification_status"),
         })
 
-    release = _writing_tool_graph_release(db, project, document, claims)
+    # A controlled article may use verified project inputs and fixed-version
+    # document chunks without a writing graph. Do not fabricate an empty
+    # release to satisfy a graph-only precondition. A selected graph still
+    # goes through the full permission and validity checks.
+    graph_release_id = document.writing_graph_release_id or project.writing_graph_release_id
+    release = _writing_tool_graph_release(db, project, document, claims) if graph_release_id else None
     graph_query = " ".join(filter(None, [
         *terms,
         str(chapter.get("instruction") or ""),
@@ -1517,7 +1522,7 @@ def agent_writing_chapter_source_pack(
         query=graph_query,
         object_types={"fact", "relation"},
         limit=14,
-    )
+    ) if release is not None else []
     graph_facts = [item["snapshot"] for item in graph_hits if item["object_type"] == "fact"][:4]
     graph_relations = [item["snapshot"] for item in graph_hits if item["object_type"] == "relation"][:4]
     evidence_ids: list[str] = []
@@ -1566,8 +1571,9 @@ def agent_writing_chapter_source_pack(
         "missing_required_inputs": sorted(set(required_inputs) - set(snapshot_facts)),
         "computed_metrics": computed_metrics,
         "writing_graph": {
-            "release_id": release.id,
-            "release_number": release.release_number,
+            "release_id": release.id if release else None,
+            "release_number": release.release_number if release else None,
+            "available": release is not None,
             "facts": graph_facts,
             "relations": graph_relations,
             "evidence": graph_evidence,

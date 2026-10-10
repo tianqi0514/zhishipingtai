@@ -52,6 +52,7 @@ def test_schema_migrations_are_repeatable_on_fresh_database() -> None:
         "0034_writing_document_graph_release",
         "0035_writing_public_references",
         "0036_controlled_writing_diff",
+        "0037_writing_assets",
         ]
     assert profile_table == "document_profiles"
 

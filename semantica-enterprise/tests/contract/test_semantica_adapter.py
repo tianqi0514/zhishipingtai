@@ -20,7 +20,7 @@ class SemanticaAdapterContractTest(unittest.TestCase):
         }
 
         self.assertTrue(report.ready_for_m4, required)
-        self.assertEqual(report.semantica_version, "0.6.6")
+        self.assertEqual(report.semantica_version, "0.7.0")
 
     def test_text_parse_has_stable_element_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
