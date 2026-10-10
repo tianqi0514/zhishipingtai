@@ -8,6 +8,11 @@ conversion = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(conversion)
 
 
+def test_compact_pdf_layout_keeps_text_numbers_and_page_local_line_order():
+    raw = "    5.1.2     荷载     10.0 kN/m²\n\n\n    q =     1.2 × G\n"
+    assert conversion.compact_pdf_layout(raw) == "5.1.2 荷载 10.0 kN/m²\n\nq = 1.2 × G"
+
+
 def test_docx_merged_cells_not_duplicated_and_identical_distinct_cells_kept(tmp_path):
     from docx import Document
     source = tmp_path / "source.docx"

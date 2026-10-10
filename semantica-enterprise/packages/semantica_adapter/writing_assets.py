@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from packages.platform.writing_assets_schema import ASSET_KINDS, PAYLOAD_MODELS, AssetExtraction
 from .llm_transport import apply_model_transport_options
@@ -29,6 +30,9 @@ def asset_prompt(evidence: list[WritingEvidenceInput], material_role: str) -> st
 类型与含义：{json.dumps(ASSET_KINDS, ensure_ascii=False)}
 材料用途：{material_role}。样稿仅可提炼结构、表达、所需输入及明确写出的方法；不得迁移其事实值。
 候选保持待确认；不能声明方法已执行、Skill已实现或规则已验证。
+origin只能是 extracted_explicit（原文明示）、inferred_from_sources（从材料归纳）、compiled（新编译），不能用其他值。
+只提炼本批最有价值且有依据的资产，合并同义项，避免重复。建议不超过8项，保持描述简洁，JSON总输出控制在6000字以内。
+封面、页眉、水印、空表、仅有文献题名等不能支持独立资产时，返回assets=[]；这也是合法结果，不要凑数。
 不存在的代码、原始提示词、DAG和公式不要还原。隐含结构只能标记 inferred_from_sources。
 提示词是根据文稿结构新编译的资产，origin=compiled，不是历史提示词。
 公式只提取原文明示的表达与单位；不能由几个数字反推公式。变量定义不带历史值。
@@ -38,9 +42,11 @@ def asset_prompt(evidence: list[WritingEvidenceInput], material_role: str) -> st
 processed_evidence_ids 列出实际读过的全部输入ID；未完成时 continuation_needed=true，不得报完整成功。
 顶层：assets、processed_evidence_ids、unresolved_items、continuation_needed。
 每个asset字段：kind、key(英文语义键)、title、purpose、origin、evidence_ids、used_in_sections、dependencies(其他资产key)、scope、payload。
+顶层和asset都禁止增加字段，尤其不要输出type、schema_version、id、name、status等未定义字段。
+完整外层Schema：{json.dumps(AssetExtraction.model_json_schema(), ensure_ascii=False, separators=(',', ':'))}
 payload按kind使用以下严格Schema，不能增加字段：
-{json.dumps(schemas, ensure_ascii=False)}
-Evidence：{json.dumps([item.model_dump() for item in evidence], ensure_ascii=False)}"""
+{json.dumps(schemas, ensure_ascii=False, separators=(',', ':'))}
+Evidence：{json.dumps([{'evidence_id': item.evidence_id, 'text': item.text} for item in evidence], ensure_ascii=False)}"""
 
 
 def extract_assets(evidence: list[WritingEvidenceInput], *, material_role: str,
@@ -51,9 +57,18 @@ def extract_assets(evidence: list[WritingEvidenceInput], *, material_role: str,
     prompt = asset_prompt(evidence, material_role)
     if generator is None:
         from semantica.semantic_extract.providers import OpenAIProvider
+        transport_parameters = dict(request_parameters or {})
+        # Official DeepSeek Flash enables thinking by default. Its thinking
+        # tokens share max_tokens with JSON and can leave an empty/truncated
+        # answer. Extraction is a bounded structured task, not a reasoning UI.
+        # Only apply the documented extension to the known official endpoint;
+        # explicit configured choices and private compatible providers retain
+        # their own transport settings.
+        if urlparse(base_url or "").hostname == "api.deepseek.com" and model == "deepseek-flash":
+            transport_parameters.setdefault("thinking", {"type": "disabled"})
         provider = apply_model_transport_options(
             OpenAIProvider(api_key=api_key, model=model, base_url=base_url),
-            timeout=timeout, max_retries=1, request_parameters=request_parameters,
+            timeout=timeout, max_retries=1, request_parameters=transport_parameters,
         )
 
         def generate(value: str) -> dict:
@@ -80,9 +95,9 @@ def extract_assets(evidence: list[WritingEvidenceInput], *, material_role: str,
             result = AssetExtraction.model_validate(output)
             return _validate_coverage(result, evidence), prompt
         except ValueError as exc:
-            if on_attempt: on_attempt({"prompt": prompt, "status": "rejected", "error_type": type(exc).__name__})
-            if attempt == 1 or isinstance(exc, WritingExtractionTruncated): raise
             errors = [{"location": list(item["loc"]), "message": item["msg"]} for item in exc.errors()][:12] if hasattr(exc, "errors") else [{"message": str(exc)[:300]}]
+            if on_attempt: on_attempt({"prompt": prompt, "status": "rejected", "error_type": type(exc).__name__, "errors": errors})
+            if attempt == 1 or isinstance(exc, WritingExtractionTruncated): raise
             prompt += "\n纠错重试：上一轮输出未通过严格结构校验。只输出完整JSON对象，逐项核对kind对应payload，不要Markdown或额外字段；不要虚构资产或来源。错误位置：" + json.dumps(errors, ensure_ascii=False)
     raise AssertionError("unreachable")
 

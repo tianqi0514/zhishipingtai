@@ -7,6 +7,7 @@ _ALLOWED_REQUEST_PARAMETERS = {
     "chat_template_kwargs",
     "enable_thinking",
     "thinking_token_budget",
+    "thinking",
 }
 
 

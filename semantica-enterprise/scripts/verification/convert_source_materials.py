@@ -53,10 +53,20 @@ def convert_docx(source: Path) -> tuple[str, dict]:
     return "\n".join(output), {"paragraphs": paragraphs, "tables": tables, "image_resources": images, "conversion": "docx_body_order"}
 
 
+def compact_pdf_layout(value: str) -> str:
+    """Remove positioning padding, not text or page boundaries.
+
+    Layout extraction can add megabytes of spaces. Preserve line order and
+    single separators (including formula tokens); never guess missing glyphs.
+    """
+    lines = [re.sub(r"[ \t]{2,}", " ", line).strip() for line in value.splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 def convert_pdf(source: Path) -> tuple[str, dict]:
     from pypdf import PdfReader
     reader = PdfReader(source)
-    pages = [(page.extract_text(extraction_mode="layout") or "").strip() for page in reader.pages]
+    pages = [compact_pdf_layout(page.extract_text(extraction_mode="layout") or "") for page in reader.pages]
     broken = [index + 1 for index, value in enumerate(pages) if len(re.findall(r"/G[0-9A-F]{2,4}", value)) > 10]
     empty = [index + 1 for index, value in enumerate(pages) if len(re.sub(r"\s", "", value)) < 30]
     output = [f"# {source.stem}", "", f"原始文件：{source.name}", "", "> 文本按页提取；图形、公式排版和表格须对照原 PDF 核验。", ""]
@@ -71,10 +81,28 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--html-selector")
+    parser.add_argument("--source-url")
     args = parser.parse_args()
     if args.output.exists():
         raise SystemExit("Output already exists; original conversion is preserved")
-    result, metrics = convert_docx(args.source) if args.source.suffix.lower() == ".docx" else convert_pdf(args.source)
+    if args.source.suffix.lower() == ".html":
+        from bs4 import BeautifulSoup
+        if not args.html_selector or not args.source_url:
+            raise SystemExit("HTML conversion requires an explicit article selector and source URL")
+        selected = BeautifulSoup(args.source.read_text(encoding="utf-8"), "html.parser").select_one(args.html_selector)
+        if selected is None:
+            raise SystemExit("No matching source article; cannot convert navigation as source content")
+        for tag in selected.select("script,style"):
+            tag.decompose()
+        result = "\n\n".join([f"# {args.source.stem}", f"来源：{args.source_url}",
+             "> 历史文件原文转录；适用性及当前有效性须重新核验。", selected.get_text("\n", strip=True)])
+        metrics = {"conversion": "html_selected_article", "source_url": args.source_url, "selector": args.html_selector}
+    else:
+        result, metrics = convert_docx(args.source) if args.source.suffix.lower() == ".docx" else convert_pdf(args.source)
+        if args.source_url:
+            result = result.replace("\n\n", f"\n\n来源：{args.source_url}\n\n", 1)
+            metrics["source_url"] = args.source_url
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(result, encoding="utf-8")
     audit = {"source": args.source.name, "source_sha256": hashlib.sha256(args.source.read_bytes()).hexdigest(), "output": args.output.name,

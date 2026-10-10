@@ -38,7 +38,11 @@ def process_writing_assets(db: Session, *, document: Document, version: Document
     if not evidence:
         raise ValueError("资料没有可读取的解析文本，不能完成写作资产抽取")
     count, completed = 0, 0
-    for batch in evidence_batches(evidence, target_chars=3500, max_items=12):
+    # Compact signed Evidence references permit useful context without repeating
+    # every locator in the model prompt. Keep locators authoritative in the DB.
+    pending_batches = evidence_batches(evidence, target_chars=3500, max_items=50)
+    while pending_batches:
+        batch = pending_batches.pop(0)
         inputs = [WritingEvidenceInput(evidence_id=item.id, text=item.text, locator=item.locator) for item in batch]
         prompt = asset_prompt(inputs, material_role)
         # The prompt, schema, selected model and source all participate in cache identity.
@@ -54,6 +58,11 @@ def process_writing_assets(db: Session, *, document: Document, version: Document
             count += int((run.metrics or {}).get("asset_count", 0)); completed += len(batch)
             if on_progress: on_progress(completed, len(evidence))
             continue
+        if run and run.status == "split":
+            midpoint = len(batch) // 2
+            if midpoint:
+                pending_batches[0:0] = [batch[:midpoint], batch[midpoint:]]
+                continue
         if run is None:
             run = WritingExtractionRun(tenant_id=document.tenant_id, space_id=document.space_id,
                 document_version_id=version.id, model_config_id=model_config_id,
@@ -94,12 +103,22 @@ def process_writing_assets(db: Session, *, document: Document, version: Document
             run.status = "succeeded"; run.finished_at = utcnow()
             count += len(extracted.assets); completed += len(batch)
             if on_progress: on_progress(completed, len(evidence))
-        except Exception:
+        except Exception as exc:
             run.metrics = {**run.metrics, "attempts": attempts, "coverage": "failed"}
             run.status = "failed"; run.finished_at = utcnow()
             run.error_code = "ASSET_EXTRACTION_INCOMPLETE"
             run.error_message = "资产抽取未通过结构、来源或覆盖校验；已完成批次保留，可重试。"
             db.flush()
+            # Never accept a truncated prefix or coerce invalid schema fields.
+            # Retry the same signed sources in smaller, independently audited
+            # batches. Single-source failures and transport failures still fail.
+            if isinstance(exc, ValueError) and len(batch) > 1:
+                midpoint = len(batch) // 2
+                run.status = "split"
+                run.metrics = {**run.metrics, "coverage": "split_pending", "split_sizes": [midpoint, len(batch) - midpoint]}
+                pending_batches[0:0] = [batch[:midpoint], batch[midpoint:]]
+                db.flush()
+                continue
             raise
     return {"asset_count": count, "processed_evidence_count": completed,
             "total_evidence_count": len(evidence), "coverage": "complete" if completed == len(evidence) else "partial"}

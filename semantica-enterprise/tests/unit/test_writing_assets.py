@@ -178,3 +178,45 @@ def test_no_readable_source_is_not_reported_as_extraction_success():
         process_writing_assets(db, document=doc, version=version, model_config_id=None,
             api_key="", model="test", base_url=None, material_role="reference", generator=lambda _: pytest.fail("不能调用模型"))
     db.close()
+
+
+def test_invalid_batch_splits_without_accepting_partial_output_and_reuses_checkpoints():
+    db, tenant, user, space, doc, version = graph_fixture()
+    chunk = db.scalar(select(Chunk))
+    chunk.text = "# 第一节\n\n人员需求需要核验。\n\n# 第二节\n\n供应来源需要核验。"
+    db.flush()
+    calls = []
+    def generate(prompt):
+        evidence = json.loads(prompt.split("Evidence：", 1)[1])
+        calls.append(len(evidence))
+        if len(evidence) > 1:
+            raise WritingExtractionTruncated("output length")
+        item = candidate("report_structure", evidence[0]["evidence_id"])
+        item["key"] = "section_" + evidence[0]["evidence_id"].replace("-", "")[:20]
+        return {"assets": [item], "processed_evidence_ids": [evidence[0]["evidence_id"]]}
+    args = dict(document=doc, version=version, model_config_id=None, api_key="", model="test",
+                base_url=None, material_role="sample_style", generator=generate)
+    result = process_writing_assets(db, **args)
+    assert result["coverage"] == "complete" and result["processed_evidence_count"] == 2
+    assert calls == [2, 1, 1]
+    assert process_writing_assets(db, **args) == result and calls == [2, 1, 1]
+    runs = list(db.scalars(select(WritingExtractionRun)))
+    assert sorted(row.status for row in runs) == ["split", "succeeded", "succeeded"]
+    assert len(list(db.scalars(select(WritingAssetVersion)))) == 2
+    db.close()
+
+
+def test_single_source_invalid_output_still_fails_and_prompt_has_wrapper_enum():
+    from packages.semantica_adapter.writing_assets import asset_prompt
+    evidence = [WritingEvidenceInput(evidence_id="evidence-1", text="封面")]
+    prompt = asset_prompt(evidence, "sample_style")
+    assert '"extracted_explicit","inferred_from_sources","compiled"' in prompt
+    assert '"additionalProperties":false' in prompt
+    db, tenant, user, space, doc, version = graph_fixture()
+    def bad(_): raise WritingExtractionTruncated("still truncated")
+    with pytest.raises(WritingExtractionTruncated):
+        process_writing_assets(db, document=doc, version=version, model_config_id=None,
+            api_key="", model="test", base_url=None, material_role="reference", generator=bad)
+    assert db.scalar(select(WritingAssetVersion)) is None
+    assert db.scalar(select(WritingExtractionRun)).status == "failed"
+    db.close()
