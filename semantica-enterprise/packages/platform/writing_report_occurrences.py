@@ -107,7 +107,11 @@ def bind_report_numeric_positions(node: dict[str, Any], metadata: dict[str, Any]
             cells = row.get("children") or []
             if not cells:
                 continue
-            label = _text(cells[0]).strip()
+            # Formal estimate tables commonly start with a serial-number
+            # column. Resolve an exact authority label across the row rather
+            # than assuming that its first cell is the business label.
+            row_labels = {_text(cell).strip() for cell in cells
+                          if _text(cell).strip() and not NUMBER.fullmatch(_text(cell).strip())}
             for ci, cell in enumerate(cells[1:], 1):
                 leaves = cell.get("children") or []
                 if len(leaves) != 1 or not isinstance(leaves[0].get("text"), str):
@@ -118,7 +122,7 @@ def bind_report_numeric_positions(node: dict[str, Any], metadata: dict[str, Any]
                     register_unit_literals((ri, ci, 0), literal)
                     continue
                 candidates = [binding for name, value, binding in authorities
-                    if name == label and value == Decimal(literal.replace(",", "")) and binding["unit"]
+                    if name in row_labels and value == Decimal(literal.replace(",", "")) and binding["unit"]
                     and ci < len(headers) and (headers[ci].strip() == binding["unit"]
                         or binding["unit"] in re.findall(r"[（(]([^（）()]+)[）)]", headers[ci]))]
                 if len(candidates) == 1:

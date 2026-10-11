@@ -80,6 +80,32 @@ def test_bad_grouping_is_not_registered_as_a_number():
     assert not validate_numeric_occurrences(bound)
 
 
+def test_serial_number_column_does_not_hide_the_authoritative_amount():
+    node = table()
+    for ri, row in enumerate(node["children"]):
+        row["children"].insert(0, {"type": "td", "children": [{"text": "序号" if ri == 0 else "1"}]})
+    bound = bind_report_numeric_positions(node, {"metric_keys": ["cost"]},
+        inputs_by_key={}, metrics_by_key={"cost": metric()})
+    occurrences = validate_numeric_occurrences(bound)
+    assert len(occurrences) == 1 and occurrences[0]["leaf_path"] == [1, 2, 0]
+    proposal = propose_bound_text_change(bound, [{"result_key": "cost", "previous_run_id": "cost-run",
+        "old_value": 10000, "new_value": 11000, "unit": "万元"}])
+    assert "11000.00" in proposal["new_text"]
+    cells = proposal["new_node"]["children"][1]["children"]
+    assert cells[0]["children"][0]["text"] == "1"
+    assert cells[3]["children"][0]["text"].endswith("÷10000")
+
+
+def test_multiple_equal_authorities_in_one_row_remain_ambiguous():
+    node = table()
+    node["children"][1]["children"].append({"type": "td", "children": [{"text": "另一费用"}]})
+    other = {"id": "other-run", "result": {"value": 10000,
+        "output_fact": {"fact_key": "other", "label": "另一费用", "unit": "万元"}}}
+    bound = bind_report_numeric_positions(node, {"metric_keys": ["cost", "other"]},
+        inputs_by_key={}, metrics_by_key={"cost": metric(), "other": other})
+    assert not validate_numeric_occurrences(bound)
+
+
 def test_conflicting_fact_and_computation_snapshots_do_not_bind():
     fact = {"id": "output-fact", "label": "建安工程费用", "version": 1,
             "value": {"number": 9000}, "unit": "万元", "verification_status": "verified"}
