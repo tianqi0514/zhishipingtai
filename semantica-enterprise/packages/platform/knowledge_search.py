@@ -478,6 +478,7 @@ def execute_hybrid_search(
                 query,
                 allowed_space_ids=space_ids,
                 limit=top_k * 3,
+                **({"allowed_document_ids": list(filters["document_ids"])} if "document_ids" in filters else {}),
             )
         except Exception as exc:
             warnings.append(f"全文检索暂不可用：{str(exc)[:160]}")

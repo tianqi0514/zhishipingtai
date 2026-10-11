@@ -440,3 +440,10 @@ def test_agent_edit_rejects_work_notes_noop_and_wrong_length_direction() -> None
         validate_agent_edit("shorten", "需要缩短的原始文字", "这段文字实际上比原始文字更长")
     with pytest.raises(ValueError, match="没有补充"):
         validate_agent_edit("expand", "需要扩写的原始文字", "太短")
+def test_protocol_retry_feedback_keeps_strict_list_contract():
+    from packages.platform.writing_flow import build_generation_prompt
+    prompt = build_generation_prompt(project_name="复核", section_plan=[{"key": "fund", "title": "资金筹措"}],
+        protocol_feedback="列表不得包含 text")
+    assert "连空字符串 text 也不允许" in prompt
+    assert "其他完成章节保持不变" in prompt
+    assert '"type":"ul","items"' in prompt

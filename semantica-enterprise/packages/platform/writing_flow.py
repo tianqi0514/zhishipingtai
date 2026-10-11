@@ -545,6 +545,7 @@ def build_generation_prompt(
     sample_style: dict[str, Any] | None = None,
     revision_mode: bool = False,
     reusable_assets: list[dict[str, Any]] | None = None,
+    protocol_feedback: str | None = None,
 ) -> str:
     sections = [
         {
@@ -675,6 +676,14 @@ def build_generation_prompt(
         "sections 必须是数组。禁止把 section_key、title、content_nodes、依赖数组或 status 平铺到根层。"
         f"\n章节契约：{json.dumps(sections, ensure_ascii=False)}"
         f"\n输出结构示例：{json.dumps(schema_example, ensure_ascii=False)}"
+        + ("\n上一轮本章输出被严格协议校验拒绝，其他完成章节保持不变。"
+           "请重新生成本章，修复以下协议错误，不改动已核验事实和计算结果："
+           + json.dumps(str(protocol_feedback)[:1000], ensure_ascii=False)
+           + "。ul/ol/table 节点必须彻底省略 text 键，连空字符串 text 也不允许；"
+             "列表正确示例为 {\"type\":\"ul\",\"items\":[\"待核实事项\"],\"input_refs\":[],\"metric_refs\":[],"
+             "\"writing_fact_refs\":[],\"writing_evidence_refs\":[],\"writing_relation_refs\":[],\"public_reference_refs\":[]}。"
+             "无法保证列表格式时，可用多个合法 p 节点表达，不返回无效字段。"
+           if protocol_feedback else "")
     )
 
 

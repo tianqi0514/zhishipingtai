@@ -3785,6 +3785,7 @@ def stream_report_generation_agent(
     retry_protocol_failure = retryable_agent_report_protocol_failure(
         run.status, run.stage, run.error_code,
     )
+    protocol_feedback = run.error_message if retry_protocol_failure else None
     if run.status not in {"awaiting_agent", "agent_failed"} and not retry_protocol_failure:
         raise HTTPException(status_code=409, detail="当前报告生成任务不能启动写作 Agent")
     if run.agent_session_id is None:
@@ -3883,6 +3884,7 @@ def stream_report_generation_agent(
             "attachments": sample_profile.get("attachments") or [],
         } if sample_profile.get("status") == "confirmed" else None,
         revision_mode=bool(revision_draft),
+        protocol_feedback=protocol_feedback,
     )
     if revision_draft.get("section_key") == str(section_plan[0].get("key") or ""):
         factual_keys = sorted({str(row.fact_key) for row in db.scalars(

@@ -16,15 +16,21 @@ def keyword_search(
     *,
     allowed_space_ids: list[str],
     limit: int,
+    allowed_document_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if not index_names or not allowed_space_ids:
         return []
+    if allowed_document_ids == []:
+        return []
+    scope_filters = [{"terms": {"space_id": allowed_space_ids}}]
+    if allowed_document_ids is not None:
+        scope_filters.append({"terms": {"document_id": allowed_document_ids}})
     body = {
         "size": limit,
         "query": {"function_score": {
             "query": {"bool": {
                     "must": [{"multi_match": {"query": query, "fields": ["text^2", "title"]}}],
-                    "filter": [{"terms": {"space_id": allowed_space_ids}}],
+                    "filter": scope_filters,
             }},
             "field_value_factor": {"field": "curation_boost", "factor": 1.0, "missing": 1.0},
             "boost_mode": "multiply",
