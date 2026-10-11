@@ -263,6 +263,10 @@ def _add_table(document: Document, node: dict[str, Any]) -> None:
         return
     table = document.add_table(rows=len(matrix), cols=width)
     table.style = "Table Grid"
+    # A long financial table may span pages. Keep its column labels visible
+    # on continuation pages instead of leaving later amounts without context.
+    header = OxmlElement("w:tblHeader")
+    table.rows[0]._tr.get_or_add_trPr().append(header)
     for row_index, values in enumerate(matrix):
         for column_index in range(width):
             cell = table.cell(row_index, column_index)
