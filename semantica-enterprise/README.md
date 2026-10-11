@@ -12,6 +12,8 @@ Nexus One 是基于 Semantica 源码增量开发的组织级知识平台。当�
 
 妙笔样稿配置提炼与 Plate 指标变更的真实验收见 [样稿配置与指标联动验收](docs/miaobi/SAMPLE_PROFILE_AND_METRIC_BINDING_ACCEPTANCE.md)：在独立项目中按样稿结构生成来源可核验的讨论稿，输入数值变更可先预览并选择性应用已绑定影响。
 
+上财历史可研资料的抽取、治理、检索、三章新稿、数值影响与 Word/PDF 手工演示见 [完整演示脚本](docs/demo/SHUFE_WRITING_ASSETS_END_TO_END_DEMO.md)。已确认的历史方法与本次假设输入分开使用，不将讨论稿称为专业批准的完整可研。
+
 本机低内存开发模式已支持“本地应用 + 服务器独立开发中间件”，日常启动、隔离策略和数据回退见 [远端开发中间件说明](docs/REMOTE_DEVELOPMENT.md)。不要将本地开发直接连接到线上业务库或共用同名索引。
 
 推荐从仓库根目录使用部署脚本，它会生成本地 Secret、从 Semantica 源码构建 CPU 基础镜像、启动服务并等待健康检查：
