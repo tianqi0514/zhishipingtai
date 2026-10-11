@@ -59,6 +59,35 @@ def test_wrong_unit_or_ambiguous_authority_does_not_bind():
         {"metric_keys": ["cost"]}, inputs_by_key={}, metrics_by_key={"cost": metric()}))
 
 
+def test_computed_fact_and_its_run_are_one_authority_in_prose_and_table():
+    fact = {"id": "output-fact", "label": "建安工程费用", "version": 1,
+            "value": {"number": 10000}, "unit": "万元", "verification_status": "verified"}
+    metadata = {"input_keys": ["cost"], "metric_keys": ["cost"]}
+    for node in [table(), {"id": "summary", "type": "p", "children": [{"text": "建安工程费用为10,000万元。"}]}]:
+        bound = bind_report_numeric_positions(node, metadata, inputs_by_key={"cost": fact}, metrics_by_key={"cost": metric()})
+        occurrences = validate_numeric_occurrences(bound)
+        assert len(occurrences) == 1
+        assert occurrences[0]["computation_run_id"] == "cost-run"
+        proposal = propose_bound_text_change(bound, [{"result_key": "cost", "previous_run_id": "cost-run",
+            "old_value": 10000, "new_value": 11000, "unit": "万元"}])
+        assert proposal["selectable"]
+        assert "11,000万元" in proposal["new_text"] or "11000.00" in proposal["new_text"]
+
+
+def test_bad_grouping_is_not_registered_as_a_number():
+    node = {"id": "summary", "type": "p", "children": [{"text": "建安工程费用为10,00万元。"}]}
+    bound = bind_report_numeric_positions(node, {"metric_keys": ["cost"]}, inputs_by_key={}, metrics_by_key={"cost": metric()})
+    assert not validate_numeric_occurrences(bound)
+
+
+def test_conflicting_fact_and_computation_snapshots_do_not_bind():
+    fact = {"id": "output-fact", "label": "建安工程费用", "version": 1,
+            "value": {"number": 9000}, "unit": "万元", "verification_status": "verified"}
+    bound = bind_report_numeric_positions(table(), {"input_keys": ["cost"], "metric_keys": ["cost"]},
+        inputs_by_key={"cost": fact}, metrics_by_key={"cost": metric()})
+    assert not validate_numeric_occurrences(bound)
+
+
 def test_table_formula_input_has_exact_binding_but_conversion_constant_does_not():
     node = table()
     node["children"][1]["children"][2]["children"][0]["text"] = "建筑面积20000平方米×建筑安装单价5000元/平方米÷10000"

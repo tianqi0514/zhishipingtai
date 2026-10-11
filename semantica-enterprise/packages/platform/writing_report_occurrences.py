@@ -15,7 +15,7 @@ from typing import Any
 from .writing_occurrences import bind_numeric_occurrences, numeric_value
 
 
-NUMBER = re.compile(r"(?<![\d.])[+-]?\d+(?:\.\d+)?(?![\d.])")
+NUMBER = re.compile(r"(?<![\d.,])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.,])")
 
 
 def _text(node):
@@ -26,6 +26,7 @@ def bind_report_numeric_positions(node: dict[str, Any], metadata: dict[str, Any]
     inputs_by_key: dict[str, dict[str, Any]], metrics_by_key: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     authorities = []
+    conflicted_keys = set()
     for key in metadata.get("input_keys") or []:
         row = inputs_by_key[key]
         if row.get("verification_status") != "verified":
@@ -34,11 +35,28 @@ def bind_report_numeric_positions(node: dict[str, Any], metadata: dict[str, Any]
             value = numeric_value(row.get("value"))
         except ValueError:
             continue
+        # A computed Fact and its immutable producing run describe the same
+        # authority, not two competing values. Prefer the run only after
+        # checking their value and unit agree; conflicting snapshots remain
+        # ambiguous and must not acquire a mutable occurrence.
+        if key in (metadata.get("metric_keys") or []) and key in metrics_by_key:
+            metric = metrics_by_key[key]
+            output = (metric.get("result") or {}).get("output_fact") or {}
+            try:
+                same_value = value == numeric_value((metric.get("result") or {}).get("value"))
+            except ValueError:
+                same_value = False
+            if same_value and str(row.get("unit") or "") == str(output.get("unit") or ""):
+                continue
+            conflicted_keys.add(key)
+            continue
         authorities.append((str(row.get("label") or ""), value, {
             "fact_key": key, "fact_id": row["id"], "fact_version": row["version"],
             "value": row["value"], "unit": str(row.get("unit") or ""),
         }))
     for key in metadata.get("metric_keys") or []:
+        if key in conflicted_keys:
+            continue
         row = metrics_by_key[key]
         output = (row.get("result") or {}).get("output_fact") or {}
         value = (row.get("result") or {}).get("value")
@@ -55,7 +73,8 @@ def bind_report_numeric_positions(node: dict[str, Any], metadata: dict[str, Any]
     def register(path, match, binding):
         literal = match.group()
         specs.append({"leaf_path": list(path), "start": match.start(), "end": match.end(),
-            "binding": {**binding, "decimal_places": len(literal.split(".")[1]) if "." in literal else 0}})
+            "binding": {**binding, "decimal_places": len(literal.split(".")[1]) if "." in literal else 0,
+                        "grouping": "," in literal}})
 
     def register_unit_literals(path, text):
         for match in NUMBER.finditer(text):
@@ -63,7 +82,7 @@ def bind_report_numeric_positions(node: dict[str, Any], metadata: dict[str, Any]
             operators = {"÷", "×", "/", "*", "=", "+", "−"}
             in_formula = prefix[-1:] in operators or text[match.end():].lstrip()[:1] in operators
             candidates = [binding for name, value, binding in authorities
-                if value == Decimal(match.group()) and binding["unit"]
+                if value == Decimal(match.group().replace(",", "")) and binding["unit"]
                 and text.startswith(binding["unit"], match.end())
                 # An explicit variable label and unit distinguish a formula
                 # input from its conversion constants, even after × or +.
@@ -89,7 +108,7 @@ def bind_report_numeric_positions(node: dict[str, Any], metadata: dict[str, Any]
                     register_unit_literals((ri, ci, 0), literal)
                     continue
                 candidates = [binding for name, value, binding in authorities
-                    if name == label and value == Decimal(literal) and binding["unit"]
+                    if name == label and value == Decimal(literal.replace(",", "")) and binding["unit"]
                     and ci < len(headers) and (headers[ci].strip() == binding["unit"]
                         or binding["unit"] in re.findall(r"[（(]([^（）()]+)[）)]", headers[ci]))]
                 if len(candidates) == 1:
