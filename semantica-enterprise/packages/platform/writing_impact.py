@@ -56,6 +56,9 @@ def propose_bound_text_change(
     """Return a reviewable Plate-node proposal without mutating its source."""
     original = deepcopy(node)
     proposed = deepcopy(node)
+    if node.get("numeric_review_required"):
+        return {"selectable": False, "reason": str(node["numeric_review_required"]),
+                "old_text": "".join(leaf["text"] for leaf in _text_leaves(original))}
     if any(iter_numeric_occurrences(node)):
         try:
             return propose_numeric_occurrence_changes(node, changes)

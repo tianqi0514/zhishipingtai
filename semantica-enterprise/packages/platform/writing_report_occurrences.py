@@ -25,6 +25,16 @@ def _text(node):
 def bind_report_numeric_positions(node: dict[str, Any], metadata: dict[str, Any], *,
     inputs_by_key: dict[str, dict[str, Any]], metrics_by_key: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    # A baseline/proposed transition is not a statement of current value.
+    # Refuse automatic rebinding of the whole paragraph until its meaning is
+    # reviewed; numeric equality alone cannot distinguish these temporal roles.
+    if str(node.get("type") or "") in {"p", "li"} and re.search(
+        r"(?:由|从)\s*[+-]?\d[\d,.]*\s*[^。；;]{0,35}(?:调整为|变更为|增加到|降低至|改为|变为)", _text(node)
+    ):
+        reviewed = deepcopy(node)
+        reviewed["numeric_binding_version"] = 1
+        reviewed["numeric_review_required"] = "包含历史或候选变更数值，不能按当前值自动更新，请人工核对时态和含义"
+        return reviewed
     authorities = []
     conflicted_keys = set()
     for key in metadata.get("input_keys") or []:

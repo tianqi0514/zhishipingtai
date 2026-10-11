@@ -88,6 +88,15 @@ def test_conflicting_fact_and_computation_snapshots_do_not_bind():
     assert not validate_numeric_occurrences(bound)
 
 
+def test_proposed_transition_is_not_rebound_as_current_fact():
+    node = {"id": "candidate", "type": "p", "children": [{"text": "拟将建安费由10000万元调整为11000万元，仍待确认。"}]}
+    bound = bind_report_numeric_positions(node, {"metric_keys": ["cost"]}, inputs_by_key={}, metrics_by_key={"cost": metric()})
+    assert not validate_numeric_occurrences(bound)
+    change = propose_bound_text_change(bound, [{"result_key": "cost", "old_value": 10000, "new_value": 11000}])
+    assert not change["selectable"] and "历史或候选" in change["reason"]
+    assert "由10000万元调整为11000万元" in change["old_text"]
+
+
 def test_table_formula_input_has_exact_binding_but_conversion_constant_does_not():
     node = table()
     node["children"][1]["children"][2]["children"][0]["text"] = "建筑面积20000平方米×建筑安装单价5000元/平方米÷10000"
